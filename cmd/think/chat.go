@@ -120,7 +120,7 @@ func (approval *approvals) check(ctx context.Context, call anthropic.ToolUseBloc
 		if err != nil {
 			return false, err
 		}
-		approval.screen.SetStatus(presentation.Safe(view.Title))
+		approval.screen.SetToolStatus(presentation.Safe(view.Title))
 		outcome := func(text string, style func(string) string) {
 			fmt.Fprintln(approval.output, presentation.ApprovalBar(approval.theme)+style(text))
 		}
@@ -298,8 +298,16 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	displayOutput, progressOutput := stdout, stderr
 	var theme presentation.Theme
 	if outputFile, ok := stdout.(*os.File); ok && interactive && !o.plain && os.Getenv("TERM") != "dumb" && terminal.IsTerminal(outputFile) {
-		screen, err = terminal.New(ctx, stdin, outputFile, func() { control.interrupt(exit) },
-			presentation.DetectColorDepth(os.Getenv), presentation.AccentFor(o.model))
+		motion, err := motionSetting(os.Getenv(motionVariable))
+		if err != nil {
+			fmt.Fprintf(stderr, "inkling: %v\n", err)
+			return 2
+		}
+		screen, err = terminal.New(ctx, stdin, outputFile, func() { control.interrupt(exit) }, terminal.Style{
+			Depth:  presentation.DetectColorDepth(os.Getenv),
+			Accent: presentation.AccentFor(o.model),
+			Motion: motion,
+		})
 		if err != nil {
 			fmt.Fprintf(stderr, "inkling: terminal: %v\n", err)
 			return 1
@@ -335,7 +343,12 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	if screen != nil {
 		bannerWidth = screen.Width()
 	}
-	fmt.Fprintln(displayOutput, presentation.Banner(o.model, displayEffort(o.effort), projectContext.WorkDir, bannerWidth, theme))
+	frames := presentation.BannerFrames(o.model, displayEffort(o.effort), projectContext.WorkDir, bannerWidth, theme, bannerFrames)
+	if screen != nil && frames != nil {
+		screen.Intro(frames)
+	} else {
+		fmt.Fprintln(displayOutput, presentation.Banner(o.model, displayEffort(o.effort), projectContext.WorkDir, bannerWidth, theme))
+	}
 	printPrivacyNotice(stderr, o.model)
 	if *resume != "" {
 		if err := printLastReply(displayOutput, current.Messages, theme); err != nil {
@@ -415,7 +428,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		var line string
 		var err error
 		if screen != nil {
-			screen.SetFooter(contextFooter(o, current.Messages, theme))
+			screen.SetContext(contextUse(o, current.Messages))
 			signals.ready()
 			var start func() *backgroundCompaction
 			if compactOnTyping {
@@ -436,7 +449,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				if settleError = settleBackground(ctx); settleError != nil {
 					return settleError
 				}
-				screen.SetFooter(contextFooter(o, current.Messages, theme))
+				screen.SetContext(contextUse(o, current.Messages))
 				screen.SetBackgroundWork("")
 				return nil
 			})

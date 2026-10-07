@@ -75,19 +75,35 @@ bottom change.
 
 - The chat opens with the Inkling mark, drawn in half blocks, beside the
   letterspaced `T H I N K I N G   M A C H I N E S` wordmark, the model name
-  with its effort on a chip, and the folder.
+  with its effort on a chip, and the folder. The mark bleeds in like ink from
+  one drop, each new pixel pale and then dry; the green shape, the blue dot,
+  and the red pill follow; the wordmark types itself. The composer works at
+  once, and any output ends the animation on the final banner.
 - Your prompts sit on a faint tinted band that starts with `›`. Each reply
   starts with a `●` in the model color: plum for Inkling-Small, blue for
-  Inkling, and green for other models.
-- Tool rows show a green `●` when done and a red `✕` when failed, the verb in
-  bold, and the target. Previews follow a hairline `│`.
-- While the model works, a row of squares pulses in the model color beside
-  the status and the elapsed seconds. The empty composer is hidden.
+  Inkling, and green for other models. Streamed text arrives pale and dries
+  to ink in about a quarter second.
+- While the model works, a grid of 16 squares fires like the experts of a
+  mixture-of-experts model: a few light up in the model color at each tick,
+  and the ones of the previous tick fade. The status and elapsed seconds
+  follow. A running tool shows a drop that fills, `○ ◔ ◑ ◕`; the finished row
+  shows a green `●` or a red `✕`, the verb in bold, and the target. Previews
+  follow a hairline `│`. When the turn ends, the grid slides into a `●`.
 - The footer shows the model, effort, and the context estimate as ten
   squares against the compaction threshold, for example `▪▪▪▪▪▪▪▪▪▪ 61k / 200k`.
-  Used squares turn amber at 80% and red at the threshold.
+  A new estimate counts up and fills the squares one by one. Used squares
+  turn amber at 80% and red at the threshold; during a turn they breathe.
 - An approval request is a card with an amber bar, the command on a chip,
-  and the keys `y`, `a`, and `n` on chips.
+  and the keys `y`, `a`, and `n` on chips. The bar beside the keys breathes
+  until you answer.
+
+Every effect is a function of the time and runs only in the live rows, never
+in scrollback. The screen draws at 30 frames per second while a short effect
+plays (opening, drying text, hand-off, gauge), at 15 while the grid or the
+approval bar moves, and not at all at an idle prompt. Set `INKLING_MOTION=off`
+to stop every animation; the screen then wakes once a second during a turn to
+count its seconds. Another value of `INKLING_MOTION` is an error. Fades need
+256 colors; with fewer colors the grid still moves but nothing fades.
 
 At start, chat asks the terminal for its background color (OSC 11, then
 DA1). On a light background the mark's blot and the text are ink; on a dark
@@ -113,14 +129,23 @@ Replies use Markdown styles. Partial lines stay literal until they are
 complete. Each frame leaves in one write. A frame that changes more than one
 row, or adds scrollback text, is wrapped in synchronized output (DEC mode
 2026), so supporting terminals never show a half-drawn frame; a one-row
-update, such as a pulse frame or a typed key, has no markers. An idle
+update, such as a grid frame or a typed key, has no markers. An idle
 prompt does not wake the process; the screen sleeps until a key, a resize, or
 an animation frame is due.
 
-Startup to the first composer frame, measured on an Apple M3 in a real PTY
-(7 alternating runs, medians): v0.1.0 25.5 ms; this build 25.1 ms when the
-terminal answers OSC 11 and DA1, 25.2 ms when it answers only DA1, and
-231 ms when it answers neither (3 runs).
+Measured on an Apple M3 in a real 30×100 PTY that answers OSC 11 and DA1
+(medians of 3 alternating runs; CPU of the process, bytes it wrote):
+
+| Scenario | v0.2.0 | Motion on | `INKLING_MOTION=off` |
+| --- | --- | --- | --- |
+| Idle prompt, 10 s | 1.0 ms, 1.0 KB | 1.6 ms, 1.0 KB | 1.1 ms, 1.0 KB |
+| Turn, 5 s of status | 22.7 ms, 9.8 KB | 31.6 ms, 14.9 KB | 2.7 ms, 2.2 KB |
+| Streamed reply, 5 s at 40 tokens/s | 55.8 ms, 34.4 KB | 66.0 ms, 62.5 KB | 59.5 ms, 30.6 KB |
+| Approval wait, 5 s | 1.0 ms, 0.8 KB | 27.9 ms, 33.7 KB | 1.3 ms, 0.8 KB |
+
+The first composer frame appears 27.2 ms after start (v0.2.0: 32.6 ms;
+7 runs); the opening plays under it and ends about 0.6 s later. A terminal
+that answers neither OSC 11 nor DA1 adds up to 200 ms.
 
 Tool activity is compact. Successful reads and searches do not dump their
 contents into the conversation. `/tools` shows the full stored output from

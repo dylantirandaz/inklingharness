@@ -19,9 +19,6 @@ import (
 )
 
 const (
-	// frameInterval paces the activity animation: 12.5 frames per second
-	// keeps the spinner smooth and the write rate small.
-	frameInterval = 80 * time.Millisecond
 	// DEC private mode 2026 makes a supporting terminal show each frame at
 	// once. Other terminals ignore the mode.
 	syncBegin = "\x1b[?2026h"
@@ -83,12 +80,12 @@ type Screen struct {
 	paintMulti               bool
 	cursorRow, cursorCol     int
 	pending                  bytes.Buffer
-	preview, status, footer  string
+	preview, status          string
 	background               string
 	title                    string
 	rule                     cachedRule
 	activitySince, lastFrame time.Time
-	activityFrame            int
+	effects                  effects
 	mode                     inputMode
 	result                   chan answer
 	placeholder              string
@@ -158,9 +155,9 @@ func (w wakePipe) close() {
 }
 
 // New takes over the terminal. It asks the terminal for its background, so
-// the theme of depth and accent fits a light or a dark terminal; NoColor
-// skips the question and draws without color.
-func New(ctx context.Context, input, output *os.File, onInterrupt func(), depth presentation.ColorDepth, accent presentation.Accent) (*Screen, error) {
+// the theme fits a light or a dark terminal; NoColor skips the question and
+// draws without color.
+func New(ctx context.Context, input, output *os.File, onInterrupt func(), style Style) (*Screen, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -199,7 +196,7 @@ func New(ctx context.Context, input, output *os.File, onInterrupt func(), depth 
 		return nil, errors.Join(err, restoreErr)
 	}
 	shade, typed := presentation.DarkBackground, []byte(nil)
-	if depth != presentation.NoColor {
+	if style.Depth != presentation.NoColor {
 		shade, typed, err = queryShade(input, output, wake.read)
 		if err != nil {
 			wake.close()
@@ -211,7 +208,8 @@ func New(ctx context.Context, input, output *os.File, onInterrupt func(), depth 
 		input: input, output: output, wake: wake, state: state, onInterrupt: onInterrupt,
 		ctx: ctx, stop: make(chan struct{}), done: make(chan struct{}),
 		resizes: make(chan os.Signal, 1), rows: rows, cols: cols, layoutDirty: true,
-		theme: presentation.NewTheme(depth, shade, accent), activityRow: -1, footerRow: -1,
+		theme: presentation.NewTheme(style.Depth, shade, style.Accent), activityRow: -1, footerRow: -1,
+		effects: effects{motion: style.Motion, epoch: time.Now()},
 	}
 	// Keys typed while the terminal answered the background query get the
 	// same handling as keys read later.
@@ -367,22 +365,32 @@ func (s *Screen) composerRuleLocked(width int) string {
 }
 
 // layoutLocked builds the rows that change only with input, mode, preview,
-// or size: preview, composer rule, input or choice rows. The activity and
-// footer rows get a fixed place and are filled at each draw.
+// or size: opening banner, preview, composer rule, input or choice rows. The
+// activity and footer rows get a fixed place and are filled at each draw.
+// While an effect plays, every frame lays out again.
 func (s *Screen) layoutLocked() {
+	now := time.Now()
 	clear(s.frame)
 	s.frame = s.frame[:0]
 	s.activityRow, s.footerRow = -1, -1
 	width := max(s.cols-1, 2)
-	rule := s.mode == modePrompt && s.rows >= 3 && width >= 12
+	// The opening banner takes the top rows while it plays, if the composer
+	// still fits under it.
+	rows := s.rows
+	if intro := s.introFrameLocked(now); intro != nil && s.rows-len(intro) >= minimumLiveRows {
+		s.frame = append(s.frame, intro...)
+		rows -= len(intro)
+	}
+	rule := s.mode == modePrompt && rows >= 3 && width >= 12
 	marker := s.mode == modePrompt && width >= 4
 	inner := width
 	if marker {
 		inner -= 2
 	}
 	var bodyRows []string
+	var choiceBar string
 	editRow, editCol, start := 0, 0, 0
-	maxBody := s.rows
+	maxBody := rows
 	if rule {
 		maxBody--
 	}
@@ -408,7 +416,10 @@ func (s *Screen) layoutLocked() {
 		start = max(0, editRow-maxBody+1)
 		bodyRows = bodyRows[start:min(start+maxBody, len(bodyRows))]
 	case modeChoice:
-		// Shorten labels, then drop their styles, before hiding an option.
+		// The bar continues the approval card above and breathes while it
+		// waits. Shorten labels, then drop their styles, before hiding an
+		// option.
+		choiceBar = s.theme.Glow("▌", s.breathLocked(now)) + " "
 		key := s.theme.Key
 		for _, labels := range [...]string{
 			key("y") + " allow once   " + key("a") + " allow session   " + key("n") + " deny",
@@ -417,24 +428,24 @@ func (s *Screen) layoutLocked() {
 			"y a n",
 			"yan",
 		} {
-			bodyRows = styledRows(labels, width, s.theme.Colored())
-			if len(bodyRows) <= s.rows {
+			bodyRows = styledRows(labels, max(width-2, 1), s.theme.Colored())
+			if len(bodyRows) <= rows {
 				break
 			}
 		}
-		bodyRows = bodyRows[:min(len(bodyRows), s.rows)]
+		bodyRows = bodyRows[:min(len(bodyRows), rows)]
 	case modeBusy:
 	}
-	activity := s.mode == modeBusy && s.status != ""
-	room := s.rows - len(bodyRows) - 1
+	activity := (s.mode == modeBusy && s.status != "") || s.handoffActiveLocked(now)
+	room := rows - len(bodyRows) - 1
 	if rule {
 		room--
 	}
 	if activity {
 		room--
 	}
-	if s.preview != "" && room > 0 {
-		previewRows := styledRows(s.preview, width, s.theme.Colored())
+	if preview := s.previewLocked(now); preview != "" && room > 0 {
+		previewRows := styledRows(preview, width, s.theme.Colored())
 		s.frame = append(s.frame, previewRows[max(0, len(previewRows)-room):]...)
 	}
 	if activity && len(s.frame) < s.rows-1 {
@@ -456,7 +467,7 @@ func (s *Screen) layoutLocked() {
 			}
 			row = prefix + row
 		}
-		s.frame = append(s.frame, row)
+		s.frame = append(s.frame, choiceBar+row)
 	}
 	if len(s.frame) < s.rows {
 		s.footerRow = len(s.frame)
@@ -474,42 +485,48 @@ func (s *Screen) layoutLocked() {
 	s.layoutDirty = false
 }
 
-// pulseLocked is the working indicator of the current animation frame.
-func (s *Screen) pulseLocked(cells int) string {
-	return s.theme.Pulse(s.activityFrame, cells)
-}
-
 // activityLocked is the animated row while the model or a tool works: the
-// pulse of squares, the status, and the elapsed seconds.
+// expert grid, the status, and the elapsed seconds. After a turn it is the
+// hand-off of the grid into the reply dot.
 func (s *Screen) activityLocked() string {
+	now := time.Now()
 	width := max(s.cols-1, 2)
-	row := s.pulseLocked(8) + "  " + s.theme.Ink(s.status)
+	if s.status == "" {
+		return styledRows(s.theme.Handoff(s.handoffProgressLocked(now), expertCells), width, s.theme.Colored())[0]
+	}
+	status := s.theme.Ink(s.status)
+	if s.effects.toolRunning {
+		status = s.theme.Fill(s.fillStepLocked(now)) + " " + status
+	}
+	row := s.theme.Experts(s.tickLocked(now), expertCells, expertsFiring) + "  " + status
 	if !s.activitySince.IsZero() {
-		row += s.theme.Graphite(" · " + strconv.Itoa(int(time.Since(s.activitySince).Seconds())) + "s")
+		row += s.theme.Graphite(" · " + strconv.Itoa(int(now.Sub(s.activitySince).Seconds())) + "s")
 	}
 	return styledRows(row, width, s.theme.Colored())[0]
 }
 
-// footerLocked is the status row: background work, the caller's footer, and
+// footerLocked is the status row: background work, the context footer, and
 // the key hints of the current mode when they fit.
 func (s *Screen) footerLocked() string {
+	now := time.Now()
 	width := max(s.cols-1, 2)
 	var lead, hint string
 	switch s.mode {
 	case modePrompt:
 		if s.background != "" {
-			lead = s.pulseLocked(4) + " " + s.theme.Graphite(s.theme.Italic(s.background)) + s.theme.Hairline(" · ")
+			lead = s.theme.Experts(s.tickLocked(now), 4, 1) + " " + s.theme.Graphite(s.theme.Italic(s.background)) + s.theme.Hairline(" · ")
 		}
 		hint = "enter send · ctrl-j newline"
 	case modeChoice:
-		lead = s.theme.Amber("●") + " "
+		lead = s.theme.Glow("●", s.breathLocked(now)) + " "
 		hint = "enter / esc deny"
 	case modeBusy:
 		hint = "ctrl-c cancel"
 	}
-	line := lead + s.footer
+	footer := s.footerTextLocked(now)
+	line := lead + footer
 	visible := cellWidth(withoutStyles(line))
-	if s.footer != "" {
+	if footer != "" {
 		hint = "   " + hint
 	}
 	if visible+cellWidth(hint) <= width {
@@ -518,12 +535,12 @@ func (s *Screen) footerLocked() string {
 	return styledRows(line, width, s.theme.Colored())[0]
 }
 
-func (s *Screen) animatingLocked() bool {
-	return (s.mode == modeBusy && s.status != "") || (s.mode == modePrompt && s.background != "")
-}
-
 func (s *Screen) drawLocked() {
 	if s.closed || s.fault != nil {
+		return
+	}
+	if s.introDoneLocked(time.Now()) {
+		s.commitIntroLocked()
 		return
 	}
 	s.beginPaint()
@@ -532,9 +549,13 @@ func (s *Screen) drawLocked() {
 }
 
 // renderLocked appends the changes from the live rows to the frame to paint.
+// A render that lays out shows every effect at the current time, so it
+// counts as an animation frame: streamed tokens then replace frames instead
+// of adding to them.
 func (s *Screen) renderLocked() {
 	if s.layoutDirty || len(s.frame) == 0 {
 		s.layoutLocked()
+		s.lastFrame = time.Now()
 	}
 	if s.activityRow >= 0 {
 		s.frame[s.activityRow] = s.activityLocked()
@@ -607,6 +628,14 @@ func (s *Screen) Write(data []byte) (int, error) {
 	if s.fault != nil {
 		return 0, s.fault
 	}
+	// Output ends the opening banner first, so the transcript keeps the order
+	// of the calls.
+	s.commitIntroLocked()
+	s.writeLocked(data)
+	return len(data), s.fault
+}
+
+func (s *Screen) writeLocked(data []byte) {
 	s.pending.Write(data)
 	if end := bytes.LastIndexByte(s.pending.Bytes(), '\n'); end >= 0 {
 		s.beginPaint()
@@ -620,7 +649,6 @@ func (s *Screen) Write(data []byte) (int, error) {
 		s.renderLocked()
 		s.flushPaintLocked()
 	}
-	return len(data), s.fault
 }
 
 // Width is the terminal width in cells.
@@ -672,20 +700,41 @@ func (s *Screen) Notify(text string) {
 	s.flushPaintLocked()
 }
 
+// SetStatus shows what the model works on. Empty text ends the activity row
+// with the hand-off into the reply dot.
 func (s *Screen) SetStatus(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if text == s.status {
+	s.setStatusLocked(text, false)
+}
+
+// SetToolStatus shows a running tool: its title after a drop that fills.
+func (s *Screen) SetToolStatus(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setStatusLocked(text, true)
+}
+
+func (s *Screen) setStatusLocked(text string, tool bool) {
+	if text == s.status && tool == s.effects.toolRunning {
 		return
 	}
-	starts := s.status == "" || text == ""
-	s.activitySince, s.lastFrame = time.Now(), time.Now()
-	s.activityFrame = 0
-	s.status = text
-	if starts {
-		// The activity row appears or goes away.
-		s.layoutDirty = true
+	now := time.Now()
+	switch {
+	case text == "" && s.status != "" && s.effects.motion:
+		s.effects.handoffAt = now
+	case text != "":
+		s.effects.handoffAt = time.Time{}
 	}
+	if tool && (!s.effects.toolRunning || text != s.status) {
+		s.effects.toolSince = now
+	}
+	if text != s.status {
+		s.activitySince = now
+	}
+	s.effects.toolRunning = tool
+	s.status = text
+	s.layoutDirty = true
 	s.drawLocked()
 	s.wake.signal()
 }
@@ -700,29 +749,21 @@ func (s *Screen) SetBackgroundWork(text string) {
 		return
 	}
 	s.background = text
-	s.lastFrame = time.Now()
 	s.drawLocked()
 	s.wake.signal()
 }
 
-// SetFooter takes a line that presentation already made safe and styled.
-func (s *Screen) SetFooter(text string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if text == s.footer {
-		return
-	}
-	s.footer = text
-	s.drawLocked()
-}
-
+// SetPreview shows a line that is not streamed, such as reasoning text, or
+// clears the preview with empty text.
 func (s *Screen) SetPreview(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if text == s.preview {
+	if text == s.preview && s.effects.previewBody == "" {
 		return
 	}
 	s.preview = text
+	s.effects.previewPrefix, s.effects.previewBody = "", ""
+	s.effects.wet = s.effects.wet[:0]
 	s.layoutDirty = true
 	s.drawLocked()
 }
@@ -813,6 +854,9 @@ func (s *Screen) await(ctx context.Context, mode inputMode, placeholder string) 
 	s.draft = ""
 	s.layoutDirty = true
 	s.drawLocked()
+	// The new mode may animate, such as the breathing approval bar; the read
+	// loop must leave a wait that it began without a deadline.
+	s.wake.signal()
 	s.mu.Unlock()
 	select {
 	case value := <-result:
@@ -994,12 +1038,13 @@ func (s *Screen) resizeLocked(rows, cols int) {
 }
 
 // waitLocked returns how long the read loop may block: until the next
-// animation frame, until a lone Escape becomes a key, or without a limit.
-// A negative duration means no limit; the wake pipe ends the wait early.
-func (s *Screen) waitLocked(now time.Time) time.Duration {
+// animation frame at interval, until a lone Escape becomes a key, or without
+// a limit. A negative duration means no limit; the wake pipe ends the wait
+// early.
+func (s *Screen) waitLocked(now time.Time, interval time.Duration) time.Duration {
 	timeout := time.Duration(-1)
-	if s.animatingLocked() {
-		timeout = max(0, frameInterval-now.Sub(s.lastFrame))
+	if interval > 0 {
+		timeout = max(0, interval-now.Sub(s.lastFrame))
 	}
 	if deadline, pending := s.parser.escapeDeadline(); pending {
 		if wait := max(0, deadline.Sub(now)); timeout < 0 || wait < timeout {
@@ -1016,7 +1061,11 @@ func (s *Screen) readLoop() {
 	for {
 		s.mu.Lock()
 		closed := s.closed
-		timeout := s.waitLocked(time.Now())
+		// The interval is fixed before the wait, so the frame after an effect
+		// ends still comes and removes it.
+		now := time.Now()
+		interval := s.frameIntervalLocked(now)
+		timeout := s.waitLocked(now, interval)
 		s.mu.Unlock()
 		if closed {
 			return
@@ -1075,10 +1124,10 @@ func (s *Screen) readLoop() {
 				interrupt = true
 			}
 		}
-		frame := s.animatingLocked() && time.Since(s.lastFrame) >= frameInterval
+		// A due frame lays out again; the render records its time.
+		frame := interval > 0 && time.Since(s.lastFrame) >= interval
 		if frame {
-			s.activityFrame++
-			s.lastFrame = time.Now()
+			s.layoutDirty = true
 		}
 		if len(keys) > 0 || frame {
 			s.drawLocked()
@@ -1109,6 +1158,9 @@ func (s *Screen) Close() error {
 		s.mu.Unlock()
 		return err
 	}
+	// A banner that still plays goes to scrollback, where Write would have
+	// put it.
+	s.commitIntroLocked()
 	s.closed = true
 	close(s.stop)
 	signal.Stop(s.resizes)

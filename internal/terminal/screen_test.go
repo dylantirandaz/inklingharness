@@ -60,6 +60,7 @@ func TestDrawUnchangedAndCursorOnly(t *testing.T) {
 
 func TestBackgroundWorkRepaintsOnlyFooter(t *testing.T) {
 	s, take := renderScreen(t, modePrompt, 8, 60)
+	s.effects = effects{motion: true, epoch: time.Now()}
 	s.insertLocked("composer contents")
 	s.drawLocked()
 	take()
@@ -72,13 +73,14 @@ func TestBackgroundWorkRepaintsOnlyFooter(t *testing.T) {
 		if s.cursorRow != s.frameRow || s.cursorCol != s.frameCol || !s.cursorVisible {
 			t.Fatal("background work did not restore the input cursor")
 		}
-		s.activityFrame++
+		s.effects.epoch = s.effects.epoch.Add(-expertTick)
 		s.drawLocked()
 	}
 }
 
-func TestDrawPulseKeepsPreview(t *testing.T) {
+func TestDrawExpertGridKeepsPreview(t *testing.T) {
 	s, take := renderScreen(t, modeBusy, 8, 60)
+	s.effects = effects{motion: true, epoch: time.Now()}
 	s.preview = "first preview line\nsecond preview line"
 	s.status = "working"
 	s.activitySince = time.Now()
@@ -87,11 +89,11 @@ func TestDrawPulseKeepsPreview(t *testing.T) {
 	if len(s.live) != 4 {
 		t.Fatalf("busy view contains %d rows, want preview, activity, and footer rows", len(s.live))
 	}
-	s.activityFrame++
+	s.effects.epoch = s.effects.epoch.Add(-expertTick)
 	s.drawLocked()
 	got := take()
 	if strings.Count(got, "\x1b[2K") != 1 || strings.Contains(got, "preview") || len(got) >= len(initial) {
-		t.Fatalf("pulse repainted preview: %q", got)
+		t.Fatalf("expert grid repainted preview: %q", got)
 	}
 	if s.cursorVisible {
 		t.Fatal("busy cursor is visible")
@@ -212,25 +214,34 @@ func TestPromptToBusyClearsComposer(t *testing.T) {
 }
 
 // An idle prompt must not wake the process: the loop blocks until a key, the
-// wake pipe, or a deadline that an animation or a lone Escape needs.
+// wake pipe, or a deadline that an animation or a lone Escape needs. Without
+// motion a turn wakes only once a second, for its elapsed seconds.
 func TestReadLoopBlocksUnlessSomethingIsDue(t *testing.T) {
 	now := time.Now()
-	s := &Screen{mode: modePrompt}
-	if got := s.waitLocked(now); got >= 0 {
+	s := &Screen{mode: modePrompt, effects: effects{motion: true}}
+	if got := s.waitLocked(now, s.frameIntervalLocked(now)); got >= 0 {
 		t.Fatalf("idle prompt waits %v, want no limit", got)
 	}
 	s.background = "compacting"
 	s.lastFrame = now.Add(-30 * time.Millisecond)
-	if got := s.waitLocked(now); got != frameInterval-30*time.Millisecond {
+	if got := s.waitLocked(now, s.frameIntervalLocked(now)); got != steadyInterval-30*time.Millisecond {
 		t.Fatalf("background work waits %v", got)
 	}
-	s = &Screen{mode: modeBusy, status: "working", lastFrame: now.Add(-time.Second)}
-	if got := s.waitLocked(now); got != 0 {
+	s = &Screen{mode: modeBusy, status: "working", lastFrame: now.Add(-time.Second), effects: effects{motion: true}}
+	if got := s.waitLocked(now, s.frameIntervalLocked(now)); got != 0 {
 		t.Fatalf("overdue frame waits %v", got)
+	}
+	s = &Screen{mode: modeBusy, status: "working", lastFrame: now}
+	if got := s.waitLocked(now, s.frameIntervalLocked(now)); got != stillInterval {
+		t.Fatalf("a turn without motion waits %v", got)
+	}
+	s = &Screen{mode: modeChoice}
+	if got := s.frameIntervalLocked(now); got != 0 {
+		t.Fatalf("an approval without motion animates every %v", got)
 	}
 	s = &Screen{mode: modeBusy}
 	s.parser.feed([]byte{27}, now.Add(-10*time.Millisecond))
-	if got := s.waitLocked(now); got != escapeTimeout-10*time.Millisecond {
+	if got := s.waitLocked(now, s.frameIntervalLocked(now)); got != escapeTimeout-10*time.Millisecond {
 		t.Fatalf("pending Escape waits %v", got)
 	}
 }

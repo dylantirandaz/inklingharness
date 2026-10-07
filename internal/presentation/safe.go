@@ -3,6 +3,7 @@ package presentation
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"unicode"
 )
@@ -113,19 +114,53 @@ const wordmark = "T H I N K I N G   M A C H I N E S"
 // narrow terminal, or one without 256 colors, gets the text alone. Session
 // details belong in /status.
 func Banner(model, effort, directory string, width int, theme Theme) string {
-	text := []string{
+	if !bannerHasMark(width, theme) {
+		return strings.Join(bannerText(model, effort, directory, theme), "\n")
+	}
+	return bannerAt(1, model, effort, directory, theme)
+}
+
+// BannerFrames is the opening animation, count frames from an empty banner
+// to Banner: the mark bleeds in, the wordmark types itself, and the model and
+// folder appear last. It is nil when Banner has no mark to animate.
+func BannerFrames(model, effort, directory string, width int, theme Theme, count int) []string {
+	if !bannerHasMark(width, theme) || count < 2 {
+		return nil
+	}
+	frames := make([]string, count)
+	for index := range frames {
+		frames[index] = bannerAt(float64(index)/float64(count-1), model, effort, directory, theme)
+	}
+	return frames
+}
+
+func bannerHasMark(width int, theme Theme) bool {
+	return theme.depth >= ANSI256 && width >= MarkWidth+3+len(wordmark)+1
+}
+
+func bannerText(model, effort, directory string, theme Theme) []string {
+	return []string{
 		theme.Graphite(wordmark),
 		theme.Bold(theme.Ink(ModelName(model))) + "  " + theme.Chip(" "+strings.ToUpper(singleLine(effort))+" "),
 		theme.Graphite(singleLine(directory)),
 	}
-	mark := theme.Mark()
-	if mark == nil || width < MarkWidth+3+len(wordmark)+1 {
-		return strings.Join(text, "\n")
+}
+
+// bannerAt draws the banner at progress from 0 to 1. The wordmark types from
+// 0.25 to 0.75; the model and folder appear at 0.8.
+func bannerAt(progress float64, model, effort, directory string, theme Theme) string {
+	text := bannerText(model, effort, directory, theme)
+	if progress < 1 {
+		typed := int(math.Round(float64(len(wordmark)) * min(max((progress-0.25)/0.5, 0), 1)))
+		text[0] = theme.Graphite(wordmark[:typed])
+		if progress < 0.8 {
+			text[1], text[2] = "", ""
+		}
 	}
 	// Center the wordmark, a gap, the model, and the folder on the six rows.
-	beside := append([]string{"", text[0], ""}, text[1:]...)
+	beside := []string{"", text[0], "", text[1], text[2]}
 	var out strings.Builder
-	for index, row := range mark {
+	for index, row := range theme.MarkReveal(progress) {
 		if index > 0 {
 			out.WriteByte('\n')
 		}
@@ -245,22 +280,31 @@ func styleLines(text string, style func(string) string) string {
 	return strings.Join(lines, "\n")
 }
 
+// ContextUse is what the footer reports: the model, the effort, and the
+// context estimate against the compaction threshold. CompactTokens 0 means
+// that automatic compaction is off.
+type ContextUse struct {
+	Model, Effort string
+	Tokens        int
+	CompactTokens int
+}
+
 // Footer is the one-line status under the composer: model, effort, and a
-// context gauge against the compaction threshold, drawn as the squares of a
-// model card. compactTokens 0 means that automatic compaction is off; the
-// footer then gives only the estimate.
-func Footer(model, effort string, contextTokens, compactTokens int, theme Theme) string {
+// context gauge drawn as the squares of a model card. shownTokens is the
+// value to draw, which a caller may animate toward use.Tokens; glow makes
+// the squares near the limit breathe and is 1 for a steady gauge.
+func Footer(use ContextUse, shownTokens int, glow float64, theme Theme) string {
 	separator := theme.Hairline(" · ")
 	var out strings.Builder
-	out.WriteString(theme.Graphite(ModelName(model)))
+	out.WriteString(theme.Graphite(ModelName(use.Model)))
 	out.WriteString(separator)
-	out.WriteString(theme.Graphite(singleLine(effort)))
+	out.WriteString(theme.Graphite(singleLine(use.Effort)))
 	out.WriteString(separator)
-	if compactTokens > 0 {
-		out.WriteString(theme.Gauge(contextTokens, compactTokens, 10))
-		out.WriteString(theme.Graphite(" " + shortTokens(contextTokens) + " / " + shortTokens(compactTokens)))
+	if use.CompactTokens > 0 {
+		out.WriteString(theme.Gauge(shownTokens, use.CompactTokens, 10, glow))
+		out.WriteString(theme.Graphite(" " + shortTokens(shownTokens) + " / " + shortTokens(use.CompactTokens)))
 	} else {
-		out.WriteString(theme.Graphite("context ~" + shortTokens(contextTokens)))
+		out.WriteString(theme.Graphite("context ~" + shortTokens(shownTokens)))
 	}
 	return out.String()
 }

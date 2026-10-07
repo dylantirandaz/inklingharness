@@ -3,6 +3,7 @@ package presentation
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 )
 
@@ -305,32 +306,94 @@ func (t Theme) squareGlyph(r role) string {
 	return "▪"
 }
 
-// Pulse is the working indicator: a row of squares, like the parameter grid
-// of an Inkling model card, where one active square with a soft trail moves
-// across and wraps.
-func (t Theme) Pulse(frame, cells int) string {
+// Blends reports whether the theme can draw the intermediate colors that the
+// fades need: drying ink, the breathing bar, and the mark reveal.
+func (t Theme) Blends() bool { return t.depth >= ANSI256 }
+
+// Experts is the working indicator: a row of squares like the parameter grid
+// of an Inkling model card, where a few experts fire at each tick, as in a
+// mixture-of-experts model, and the ones of the previous tick fade.
+func (t Theme) Experts(tick, cells, active int) string {
 	if cells <= 0 {
 		return ""
 	}
-	const trail = 2
-	head := frame % (cells + trail + 1)
 	styles := make([]role, cells)
 	for index := range styles {
-		switch distance := head - index; {
-		case distance == 0:
-			styles[index] = roleAccent
-		case distance > 0 && distance <= trail:
-			styles[index] = roleAccentSoft
-		default:
-			styles[index] = roleHairline
-		}
+		styles[index] = roleHairline
+	}
+	for _, index := range firing(tick-1, cells, active) {
+		styles[index] = roleAccentSoft
+	}
+	for _, index := range firing(tick, cells, active) {
+		styles[index] = roleAccent
 	}
 	return t.squares(styles, t.squareGlyph)
 }
 
+// firing picks active distinct cells for a tick. A hash of the tick, not a
+// random source, keeps a frame reproducible and the screen free of state.
+func firing(tick, cells, active int) []int {
+	active = min(active, cells)
+	chosen := make([]int, 0, active)
+	for draw := uint64(0); len(chosen) < active; draw++ {
+		index := int(mix(uint64(tick)*0x9e3779b97f4a7c15+draw) % uint64(cells))
+		if !slices.Contains(chosen, index) {
+			chosen = append(chosen, index)
+		}
+	}
+	return chosen
+}
+
+// mix is the splitmix64 finalizer.
+func mix(value uint64) uint64 {
+	value = (value ^ value>>30) * 0xbf58476d1ce4e5b9
+	value = (value ^ value>>27) * 0x94d049bb133111eb
+	return value ^ value>>31
+}
+
+// Handoff ends a turn: the row of squares slides into the reply dot. progress
+// runs from 0 to 1; at 1 only the dot is left.
+func (t Theme) Handoff(progress float64, cells int) string {
+	progress = min(max(progress, 0), 1)
+	remaining := int(math.Round(float64(cells-1) * (1 - progress*progress)))
+	return t.Accent("●") + t.paint(roleAccentSoft, strings.Repeat("▪", remaining))
+}
+
+// fillGlyphs is a running tool: an ink drop that fills until the result.
+var fillGlyphs = [...]string{"○", "◔", "◑", "◕"}
+
+// Fill is the glyph of a running tool at step; the finished row shows ●.
+func (t Theme) Fill(step int) string {
+	return t.Green(fillGlyphs[(step%len(fillGlyphs)+len(fillGlyphs))%len(fillGlyphs)])
+}
+
+// Wet draws text that just arrived: wetness 1 is pale, 0 is dry ink. Without
+// intermediate colors the text is plain.
+func (t Theme) Wet(text string, wetness float64) string {
+	if !t.Blends() || text == "" {
+		return text
+	}
+	ink := palette[roleInk].color.on(t.shade)
+	pale := palette[roleHairline].color.on(t.shade)
+	return t.foreground(blend(ink, pale, min(max(wetness, 0), 1)), "") + text + reset
+}
+
+// Glow draws text in amber that breathes: intensity 1 is full amber, 0 is
+// half way to the hairline. Without intermediate colors it stays amber.
+func (t Theme) Glow(text string, intensity float64) string {
+	if !t.Blends() {
+		return t.Amber(text)
+	}
+	amber := palette[roleAmber].color.on(t.shade)
+	pale := palette[roleHairline].color.on(t.shade)
+	return t.foreground(blend(pale, amber, 0.5+0.5*min(max(intensity, 0), 1)), "") + text + reset
+}
+
 // Gauge shows used of limit as a row of squares. Used squares take the
-// accent, turn amber near the limit, and red above it.
-func (t Theme) Gauge(used, limit, cells int) string {
+// accent, turn amber near the limit, and red above it. glow from 0 to 1
+// dims and restores the amber and red squares, so a caller can make them
+// breathe; 1 is steady.
+func (t Theme) Gauge(used, limit, cells int, glow float64) string {
 	if limit <= 0 || cells <= 0 {
 		return ""
 	}
@@ -352,7 +415,11 @@ func (t Theme) Gauge(used, limit, cells int) string {
 			styles[index] = fill
 		}
 	}
-	return t.squares(styles, t.squareGlyph)
+	if fill == roleAccent || glow >= 1 || !t.Blends() {
+		return t.squares(styles, t.squareGlyph)
+	}
+	color := blend(palette[roleHairline].color.on(t.shade), palette[fill].color.on(t.shade), 0.5+0.5*max(glow, 0))
+	return t.foreground(color, "") + strings.Repeat("▪", filled) + reset + t.Hairline(strings.Repeat("▪", cells-filled))
 }
 
 // inklingMark is the Inkling mark at 16 by 12 pixels, sampled from the logo
@@ -376,35 +443,52 @@ var inklingMark = [...]string{
 // MarkWidth is the number of cells of each Mark row.
 const MarkWidth = 16
 
+// markDrying is the share of the reveal over which a new pixel dries.
+const markDrying = 0.2
+
 // Mark draws the Inkling mark in six rows with half blocks: each cell holds
 // two pixels, the top one as foreground and the bottom one as background.
 // The blot takes the ink color, so it inverts with the shade. Below 256
 // colors the mark cannot be drawn and Mark returns nil.
-func (t Theme) Mark() []string {
+func (t Theme) Mark() []string { return t.MarkReveal(1) }
+
+// MarkReveal draws the mark as ink that bleeds from one drop: at progress 0
+// nothing shows; the blot spreads from its center, then the green shape, the
+// blue dot, and the red pill appear; each new pixel starts pale and dries.
+// At progress 1 the result equals Mark.
+func (t Theme) MarkReveal(progress float64) []string {
 	if t.depth < ANSI256 {
 		return nil
 	}
-	pixel := func(code byte) (rgb, bool) {
-		switch code {
-		case 'K':
-			return palette[roleInk].color.on(t.shade), true
-		case 'G':
-			return markGreen, true
-		case 'B':
-			return markBlue, true
-		case 'R':
-			return markRed, true
-		case '.':
+	reveal := markRevealTimes()
+	pale := palette[roleHairline].color.on(t.shade)
+	pixel := func(x, y int) (rgb, bool) {
+		code := inklingMark[y][x]
+		if code == '.' || progress < reveal[y][x] {
 			return rgb{}, false
 		}
-		panic(fmt.Sprintf("presentation: unknown mark pixel %q", code))
+		var color rgb
+		switch code {
+		case 'K':
+			color = palette[roleInk].color.on(t.shade)
+		case 'G':
+			color = markGreen
+		case 'B':
+			color = markBlue
+		case 'R':
+			color = markRed
+		default:
+			panic(fmt.Sprintf("presentation: unknown mark pixel %q", code))
+		}
+		wetness := 1 - min((progress-reveal[y][x])/markDrying, 1)
+		return blend(color, pale, 0.7*wetness), true
 	}
 	rows := make([]string, 0, len(inklingMark)/2)
 	for y := 0; y < len(inklingMark); y += 2 {
 		var out strings.Builder
 		for x := range MarkWidth {
-			top, topSet := pixel(inklingMark[y][x])
-			bottom, bottomSet := pixel(inklingMark[y+1][x])
+			top, topSet := pixel(x, y)
+			bottom, bottomSet := pixel(x, y+1)
 			switch {
 			case !topSet && !bottomSet:
 				out.WriteString(reset + " ")
@@ -422,6 +506,54 @@ func (t Theme) Mark() []string {
 		rows = append(rows, out.String())
 	}
 	return rows
+}
+
+// markRevealTimes gives each pixel the progress at which it appears. The blot
+// spreads by distance from its centroid with a little hashed jitter, so the
+// edge looks like bleeding ink rather than a circle; each shape follows in
+// turn. Every pixel appears by 1-markDrying, so it is dry at progress 1.
+func markRevealTimes() [len(inklingMark)][MarkWidth]float64 {
+	type window struct{ start, span float64 }
+	windows := map[byte]window{'K': {0, 0.45}, 'G': {0.4, 0.15}, 'B': {0.5, 0.15}, 'R': {0.6, 0.15}}
+	var times [len(inklingMark)][MarkWidth]float64
+	for code, slot := range windows {
+		var sumX, sumY, count float64
+		for y, row := range inklingMark {
+			for x := range MarkWidth {
+				if row[x] == code {
+					sumX, sumY, count = sumX+float64(x), sumY+float64(y), count+1
+				}
+			}
+		}
+		centerX, centerY := sumX/count, sumY/count
+		farthest := 0.0
+		for y, row := range inklingMark {
+			for x := range MarkWidth {
+				if row[x] == code {
+					farthest = max(farthest, math.Hypot(float64(x)-centerX, float64(y)-centerY))
+				}
+			}
+		}
+		for y, row := range inklingMark {
+			for x := range MarkWidth {
+				if row[x] != code {
+					continue
+				}
+				distance := math.Hypot(float64(x)-centerX, float64(y)-centerY) / max(farthest, 1)
+				jitter := float64(mix(uint64(y*MarkWidth+x))%1000)/1000*0.25 - 0.125
+				times[y][x] = slot.start + slot.span*min(max(distance+jitter, 0), 1)
+			}
+		}
+	}
+	return times
+}
+
+func blend(from, to rgb, share float64) rgb {
+	share = min(max(share, 0), 1)
+	channel := func(a, b uint8) uint8 {
+		return uint8(math.Round(float64(a) + (float64(b)-float64(a))*share))
+	}
+	return rgb{channel(from.r, to.r), channel(from.g, to.g), channel(from.b, to.b)}
 }
 
 // nearest256 maps a color to the closest entry of the xterm 6x6x6 cube or the

@@ -331,9 +331,19 @@ func TestThemeDecorationKeepsVisibleText(t *testing.T) {
 				t.Fatalf("rule width %d = %q", width, got)
 			}
 		}
-		for frame := range 40 {
-			if got := Safe(theme.Pulse(frame, 8)); utf8.RuneCountInString(got) != 8 {
-				t.Fatalf("pulse depth %d frame %d = %q, want 8 cells", theme.depth, frame, got)
+		for tick := range 40 {
+			if got := Safe(theme.Experts(tick, 16, 3)); utf8.RuneCountInString(got) != 16 {
+				t.Fatalf("experts depth %d tick %d = %q, want 16 cells", theme.depth, tick, got)
+			}
+			if got := Safe(theme.Handoff(float64(tick)/39, 16)); !strings.HasPrefix(got, "●") || utf8.RuneCountInString(got) > 16 {
+				t.Fatalf("hand-off at %d = %q", tick, got)
+			}
+		}
+		for _, text := range []string{"Approval", "界"} {
+			for _, level := range []float64{0, 0.5, 1} {
+				if Safe(theme.Wet(text, level)) != text || Safe(theme.Glow(text, level)) != text {
+					t.Fatalf("fade changed %q", text)
+				}
 			}
 		}
 		for _, text := range []string{"Approval", " y ", "界"} {
@@ -347,8 +357,10 @@ func TestThemeDecorationKeepsVisibleText(t *testing.T) {
 			continue
 		}
 		for used := range 300 {
-			if got := Safe(theme.Gauge(used, 100, 4)); got != "▪▪▪▪" {
-				t.Fatalf("gauge %d = %q", used, got)
+			for _, glow := range []float64{0, 0.5, 1} {
+				if got := Safe(theme.Gauge(used, 100, 4, glow)); got != "▪▪▪▪" {
+					t.Fatalf("gauge %d glow %v = %q", used, glow, got)
+				}
 			}
 		}
 	}
@@ -358,19 +370,50 @@ func TestThemeDecorationKeepsVisibleText(t *testing.T) {
 // squares are filled, the rest are dots.
 func TestSquaresShowStateWithoutColor(t *testing.T) {
 	for used, want := range map[int]string{0: "····", 1: "▪···", 50: "▪▪··", 100: "▪▪▪▪", 250: "▪▪▪▪"} {
-		if got := (Theme{}).Gauge(used, 100, 4); got != want {
+		if got := (Theme{}).Gauge(used, 100, 4, 1); got != want {
 			t.Fatalf("gauge %d = %q, want %q", used, got, want)
 		}
 	}
-	heads := map[int]bool{}
-	for frame := range 11 {
-		heads[strings.Index((Theme{}).Pulse(frame, 8), "▪")] = true
+	rows := map[string]bool{}
+	for tick := range 20 {
+		row := (Theme{}).Experts(tick, 16, 3)
+		if lit := strings.Count(row, "▪"); lit < 3 || lit > 6 {
+			t.Fatalf("tick %d lights %d experts: %q", tick, lit, row)
+		}
+		rows[row] = true
 	}
-	if len(heads) < 8 {
-		t.Fatalf("pulse does not travel across the row: first squares at %v", heads)
+	if len(rows) < 15 {
+		t.Fatalf("the expert grid barely changes: %d distinct rows in 20 ticks", len(rows))
 	}
 	if got := (Theme{}).Key("y"); got != "[y]" {
 		t.Fatalf("key without color = %q", got)
+	}
+}
+
+// The opening animation starts empty and ends exactly on the banner.
+func TestBannerFramesEndOnTheBanner(t *testing.T) {
+	theme := NewTheme(TrueColor, LightBackground, AccentPlum)
+	frames := BannerFrames("thinkingmachines/inkling-small", "high", "/work", 100, theme, 24)
+	if len(frames) != 24 {
+		t.Fatalf("%d frames", len(frames))
+	}
+	if frames[23] != Banner("thinkingmachines/inkling-small", "high", "/work", 100, theme) {
+		t.Fatal("the last frame is not the banner")
+	}
+	if strings.TrimSpace(Safe(frames[0])) != "" {
+		t.Fatalf("the first frame is not empty: %q", Safe(frames[0]))
+	}
+	shown := 0
+	for _, frame := range frames {
+		ink := strings.Count(Safe(frame), "▀") + strings.Count(Safe(frame), "▄") + strings.Count(Safe(frame), "█")
+		if ink < shown {
+			t.Fatal("the mark shrinks during the reveal")
+		}
+		shown = ink
+	}
+	if BannerFrames("m", "high", "/work", 100, NewTheme(ANSI16, DarkBackground, AccentBlue), 24) != nil ||
+		BannerFrames("m", "high", "/work", 30, theme, 24) != nil {
+		t.Fatal("frames without a mark to animate")
 	}
 }
 

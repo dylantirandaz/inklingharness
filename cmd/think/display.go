@@ -120,7 +120,7 @@ func (c *consoleObserver) Text(delta string) {
 	}
 	if c.line.Len() > 0 {
 		// Show tokens immediately; parse Markdown only when the line commits.
-		c.screen.SetPreview(c.replyPrefix() + presentation.Safe(c.line.String()))
+		c.screen.StreamPreview(c.replyPrefix(), presentation.Safe(c.line.String()))
 	}
 }
 
@@ -197,7 +197,9 @@ func (c *consoleObserver) ToolCall(name string, input json.RawMessage) {
 		title = presentation.Safe(name) + " (invalid or unknown arguments)"
 	}
 	c.pending = append(c.pending, pendingTool{name: name, title: title})
-	c.activity(title)
+	if c.screen != nil {
+		c.screen.SetToolStatus(title)
+	}
 	if c.verbose {
 		fmt.Fprintf(c.stderr, "\n[tool %s] %s\n", presentation.Safe(name), presentation.Safe(string(input)))
 	}
@@ -272,8 +274,27 @@ func printUser(output io.Writer, prompt string, theme presentation.Theme) {
 	fmt.Fprintln(output, "\n"+presentation.UserTurn(prompt, theme))
 }
 
-func contextFooter(o *options, messages []anthropic.EncodedMessage, theme presentation.Theme) string {
-	return presentation.Footer(o.model, displayEffort(o.effort), agent.EstimateTokens(messages), o.compactTokens, theme)
+func contextUse(o *options, messages []anthropic.EncodedMessage) presentation.ContextUse {
+	return presentation.ContextUse{Model: o.model, Effort: displayEffort(o.effort), Tokens: agent.EstimateTokens(messages), CompactTokens: o.compactTokens}
+}
+
+// motionVariable turns the terminal animations off with the value "off".
+const motionVariable = "INKLING_MOTION"
+
+// bannerFrames is the number of frames of the opening animation.
+const bannerFrames = 24
+
+// motionSetting reads INKLING_MOTION: empty or "on" animates, "off" keeps
+// every row still. Another value is an error, not a silent default.
+func motionSetting(value string) (bool, error) {
+	switch value {
+	case "", "on":
+		return true, nil
+	case "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be on or off, not %q", motionVariable, value)
+	}
 }
 
 // notifyAfter keeps quick turns quiet: a notification is useful only when the
