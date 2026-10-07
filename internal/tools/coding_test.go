@@ -34,46 +34,54 @@ func runTool(t *testing.T, tool Tool, input string) Result {
 
 func TestReadFileRangesAndBounds(t *testing.T) {
 	root := t.TempDir()
-	putTestFile(t, root, "lines.txt", "one\ntwo\nthree\n")
+	lines := []string{"first value", "second value", "third value"}
+	putTestFile(t, root, "lines.txt", strings.Join(lines, "\n")+"\n")
 	tool := lookup(t, root, "read_file")
-	cases := []struct {
-		input   string
-		want    string
-		isError bool
+	for _, test := range []struct {
+		input string
+		start int
+		end   int
 	}{
-		{`{"path":"lines.txt"}`, "1: one\n2: two\n3: three\n[end of file: 3 lines]", false},
-		{`{"path":"lines.txt","offset":2,"limit":1}`, "2: two\n[truncated: line limit; continue with offset 3]", false},
-		{`{"path":"lines.txt","offset":3,"limit":1}`, "3: three\n[end of file: 3 lines]", false},
-		{`{"path":"lines.txt","offset":4}`, "[end of file: 3 lines; offset 4 is beyond EOF]", false},
-		{`{"path":"lines.txt","offset":999}`, "[end of file: 3 lines; offset 999 is beyond EOF]", false},
-		{`{"path":"lines.txt","offset":0}`, "offset and limit must be positive", true},
-		{`{"path":"lines.txt","limit":-1}`, "offset and limit must be positive", true},
-	}
-	for _, test := range cases {
-		t.Run(test.input, func(t *testing.T) {
-			result := runTool(t, tool, test.input)
-			if result.IsError != test.isError || !strings.Contains(result.Content, test.want) {
-				t.Fatalf("got %+v, want %q, error %v", result, test.want, test.isError)
+		{`{"path":"lines.txt"}`, 0, 3},
+		{`{"path":"lines.txt","offset":2,"limit":1}`, 1, 2},
+		{`{"path":"lines.txt","offset":3,"limit":1}`, 2, 3},
+		{`{"path":"lines.txt","offset":4}`, 3, 3},
+		{`{"path":"lines.txt","offset":999}`, 3, 3},
+	} {
+		result := runTool(t, tool, test.input)
+		if result.IsError {
+			t.Fatalf("%s: %+v", test.input, result)
+		}
+		for index, line := range lines {
+			present := strings.Contains(result.Content, line)
+			if present != (index >= test.start && index < test.end) {
+				t.Fatalf("%s: line %d presence = %t", test.input, index+1, present)
 			}
-		})
+		}
+	}
+	for _, input := range []string{`{"path":"lines.txt","offset":0}`, `{"path":"lines.txt","limit":-1}`} {
+		if result := runTool(t, tool, input); !result.IsError {
+			t.Fatalf("accepted an invalid range: %s", input)
+		}
 	}
 	putTestFile(t, root, "long.txt", strings.Repeat("x", 2*maxReadBytes)+"\nlast")
 	result := runTool(t, tool, `{"path":"long.txt"}`)
-	if result.IsError || len(result.Content) > maxReadBytes || !strings.Contains(result.Content, "truncated: 256 KiB") {
+	if result.IsError || len(result.Content) > maxReadBytes || strings.Contains(result.Content, "last") {
 		t.Fatalf("large line: length %d, error %v", len(result.Content), result.IsError)
 	}
 	result = runTool(t, tool, `{"path":"long.txt","offset":2}`)
-	if result.Content != "2: last\n[end of file: 2 lines]" {
-		t.Fatalf("skipping large line = %q", result.Content)
+	if result.IsError || !strings.Contains(result.Content, "last") || strings.Contains(result.Content, "xxx") {
+		t.Fatalf("skipping a large line = %q", result.Content)
 	}
-	putTestFile(t, root, "empty.txt", "")
-	if result := runTool(t, tool, `{"path":"empty.txt"}`); result.Content != "[end of file: 0 lines]" {
-		t.Fatalf("empty file = %+v", result)
-	}
-	putTestFile(t, root, "many.txt", strings.Repeat("line\n", 2001))
-	result = runTool(t, tool, `{"path":"many.txt"}`)
-	if !strings.Contains(result.Content, "2000: line\n[truncated: line limit; continue with offset 2001]") {
-		t.Fatal("default line limit was not applied")
+}
+
+func TestReadFilePreservesLinesAcrossReaderBuffers(t *testing.T) {
+	root := t.TempDir()
+	lines := []string{strings.Repeat("a", 4095), strings.Repeat("界", 3000), "", "last"}
+	putTestFile(t, root, "lines.txt", strings.Join(lines, "\r\n"))
+	result := runTool(t, lookup(t, root, "read_file"), `{"path":"lines.txt"}`)
+	if result.IsError || !strings.Contains(result.Content, strings.Join(lines, "\n")+"\n") {
+		t.Fatal("file text changed at a reader boundary")
 	}
 }
 

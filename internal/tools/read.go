@@ -26,13 +26,14 @@ func (r contextReader) Read(p []byte) (int, error) {
 }
 
 // boundedLine consumes a line without retaining more than capacity bytes.
+// The returned bytes are valid until the next read from reader.
 // EOF is returned only when there is no remaining line, including an empty one.
-func boundedLine(ctx context.Context, reader *bufio.Reader, capacity int) (string, bool, error) {
-	var line strings.Builder
+func boundedLine(ctx context.Context, reader *bufio.Reader, capacity int) ([]byte, bool, error) {
+	var line []byte
 	present, truncated := false, false
 	for {
 		if err := ctx.Err(); err != nil {
-			return "", false, err
+			return nil, false, err
 		}
 		part, err := reader.ReadSlice('\n')
 		if len(part) > 0 {
@@ -40,23 +41,30 @@ func boundedLine(ctx context.Context, reader *bufio.Reader, capacity int) (strin
 			if part[len(part)-1] == '\n' {
 				part = part[:len(part)-1]
 			}
-			remaining := capacity - line.Len()
+			remaining := capacity - len(line)
 			if len(part) > remaining {
 				truncated = true
 				part = part[:remaining]
 			}
-			line.Write(part)
+			if line == nil && err != bufio.ErrBufferFull {
+				line = part
+			} else {
+				line = append(line, part...)
+			}
 		}
 		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
 		}
 		if err != nil && !errors.Is(err, io.EOF) {
-			return "", false, err
+			return nil, false, err
 		}
 		if !present && errors.Is(err, io.EOF) {
-			return "", false, io.EOF
+			return nil, false, io.EOF
 		}
-		return strings.TrimSuffix(line.String(), "\r"), truncated, nil
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		return line, truncated, nil
 	}
 }
 
@@ -71,6 +79,9 @@ func readLines(ctx context.Context, path string, offset, limit int) (Result, err
 	defer file.Close()
 	reader := bufio.NewReader(contextReader{ctx: ctx, reader: file})
 	var output strings.Builder
+	if offset > 1 {
+		fmt.Fprintf(&output, "[from line %d]\n", offset)
+	}
 	for number, shown := 1, 0; ; number++ {
 		capacity := outputBodyBytes - output.Len() - 32
 		if number < offset {
@@ -82,7 +93,8 @@ func readLines(ctx context.Context, path string, offset, limit int) (Result, err
 			if offset > 1 && offset >= number {
 				notice = fmt.Sprintf("[end of file: %d lines; offset %d is beyond EOF]", number-1, offset)
 			}
-			return Result{Content: output.String() + notice}, nil
+			output.WriteString(notice)
+			return Result{Content: output.String()}, nil
 		}
 		if err != nil {
 			return fileFailure(err)
@@ -90,20 +102,24 @@ func readLines(ctx context.Context, path string, offset, limit int) (Result, err
 		if number < offset {
 			continue
 		}
-		fmt.Fprintf(&output, "%d: %s\n", number, text)
+		output.Write(text)
+		output.WriteByte('\n')
 		shown++
 		if truncated || output.Len() >= outputBodyBytes-32 {
-			return Result{Content: output.String() + "[truncated: 256 KiB output limit; a line may be partial]"}, nil
+			output.WriteString("[truncated: 256 KiB output limit; a line may be partial]")
+			return Result{Content: output.String()}, nil
 		}
 		if shown == limit {
 			_, err := reader.Peek(1)
 			if errors.Is(err, io.EOF) {
-				return Result{Content: output.String() + fmt.Sprintf("[end of file: %d lines]", number)}, nil
+				fmt.Fprintf(&output, "[end of file: %d lines]", number)
+				return Result{Content: output.String()}, nil
 			}
 			if err != nil {
 				return fileFailure(err)
 			}
-			return Result{Content: output.String() + fmt.Sprintf("[truncated: line limit; continue with offset %d]", number+1)}, nil
+			fmt.Fprintf(&output, "[truncated: line limit; continue with offset %d]", number+1)
+			return Result{Content: output.String()}, nil
 		}
 	}
 }

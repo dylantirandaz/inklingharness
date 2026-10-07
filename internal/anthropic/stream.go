@@ -137,7 +137,7 @@ func newResponseBuilder() *responseBuilder {
 
 func (b *responseBuilder) apply(event serverSentEvent, observe func(StreamEvent) error) error {
 	var wire wireEvent
-	if err := json.Unmarshal([]byte(event.Data), &wire); err != nil {
+	if err := json.Unmarshal(event.Data, &wire); err != nil {
 		return fmt.Errorf("anthropic: decode %q event: %w", event.Name, err)
 	}
 	if b.timing != nil && (wire.Type == "message_start" || wire.Type == "message_delta") {
@@ -149,7 +149,7 @@ func (b *responseBuilder) apply(event serverSentEvent, observe func(StreamEvent)
 			} `json:"message"`
 			Usage latency.Tokens `json:"usage"`
 		}
-		if json.Unmarshal([]byte(event.Data), &counters) == nil {
+		if json.Unmarshal(event.Data, &counters) == nil {
 			if counters.Message != nil {
 				b.timing.Usage(counters.Message.Usage)
 			}
@@ -193,7 +193,7 @@ func (b *responseBuilder) apply(event serverSentEvent, observe func(StreamEvent)
 		}
 		return &StreamError{Type: wire.Error.Type, Message: wire.Error.Message}
 	}
-	return observe(UnknownEvent{Type: wire.Type, Data: event.Data})
+	return observe(UnknownEvent{Type: wire.Type, Data: string(event.Data)})
 }
 
 func (b *responseBuilder) startBlock(wire wireEvent, observe func(StreamEvent) error) error {

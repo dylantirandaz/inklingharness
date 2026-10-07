@@ -211,6 +211,7 @@ func grepTool(root string) Tool {
 			}
 			output := searchOutput{limit: arguments.Limit}
 			largeFiles, binaryFiles, longLines := 0, 0, 0
+			var content bytes.Buffer
 			err = walkFiles(ctx, resolvePath(root, arguments.Path), func(filename, relative string, entry fs.DirEntry) error {
 				name := relative
 				if len(include) == 1 {
@@ -231,20 +232,21 @@ func grepTool(root string) Tool {
 				if err != nil {
 					return err
 				}
-				content, err := io.ReadAll(io.LimitReader(contextReader{ctx: ctx, reader: file}, maxGrepFileBytes+1))
+				content.Reset()
+				_, err = content.ReadFrom(io.LimitReader(contextReader{ctx: ctx, reader: file}, maxGrepFileBytes+1))
 				file.Close()
 				if err != nil {
 					return err
 				}
-				if len(content) > maxGrepFileBytes {
+				if content.Len() > maxGrepFileBytes {
 					largeFiles++
 					return nil
 				}
-				if bytes.IndexByte(content, 0) >= 0 {
+				if bytes.IndexByte(content.Bytes(), 0) >= 0 {
 					binaryFiles++
 					return nil
 				}
-				reader := bufio.NewReader(bytes.NewReader(content))
+				reader := bufio.NewReader(bytes.NewReader(content.Bytes()))
 				for number := 1; ; number++ {
 					text, truncated, err := boundedLine(ctx, reader, maxGrepLineBytes)
 					if errors.Is(err, io.EOF) {
@@ -257,7 +259,7 @@ func grepTool(root string) Tool {
 						longLines++
 						continue
 					}
-					if expression.MatchString(text) && !output.add(fmt.Sprintf("%s:%d:%s", relative, number, text)) {
+					if expression.Match(text) && !output.add(fmt.Sprintf("%s:%d:%s", relative, number, text)) {
 						return filepath.SkipAll
 					}
 				}

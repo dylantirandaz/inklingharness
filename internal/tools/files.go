@@ -19,7 +19,7 @@ const maxReadBytes = 256 * 1024
 func readFileTool(root string) Tool {
 	return Tool{
 		Name:        "read_file",
-		Description: "Read a text file as numbered lines. Give path in every call. offset is 1-based; limit defaults to 2000 lines.",
+		Description: "Read file text. Give path in every call. offset is a 1-based line number; limit defaults to 2000 lines. Use ranges for large files.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`),
 		ReadOnly:    true,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {

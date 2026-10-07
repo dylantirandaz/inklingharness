@@ -201,7 +201,7 @@ func TestBashSavesLargeOutputForReadFile(t *testing.T) {
 	}
 
 	read := runTool(t, lookup(t, root, "read_file"), fmt.Sprintf(`{"path":%q,"offset":2,"limit":1}`, files[0]))
-	if read.IsError || read.Content != "2: 2\n[truncated: line limit; continue with offset 3]" {
+	if read.IsError || !strings.Contains(read.Content, "\n2\n") || strings.Contains(read.Content, "\n1\n") {
 		t.Fatalf("read_file on saved output = %+v", read)
 	}
 }

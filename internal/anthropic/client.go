@@ -303,7 +303,7 @@ func (c *Client) Stream(ctx context.Context, request Request, observe func(Strea
 		}
 		// Gateways such as OpenRouter end the stream with an OpenAI-style
 		// sentinel after message_stop.
-		if event.Data == streamSentinel {
+		if string(event.Data) == streamSentinel {
 			break
 		}
 		started = decodeMeter.Start()
