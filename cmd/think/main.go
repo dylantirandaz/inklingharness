@@ -22,7 +22,6 @@ import (
 	"github.com/dylantirandaz/inklingharness/internal/credentials"
 	"github.com/dylantirandaz/inklingharness/internal/eval"
 	"github.com/dylantirandaz/inklingharness/internal/latency"
-	"github.com/dylantirandaz/inklingharness/internal/lsp"
 	"github.com/dylantirandaz/inklingharness/internal/openrouter"
 	"github.com/dylantirandaz/inklingharness/internal/presentation"
 	"github.com/dylantirandaz/inklingharness/internal/record"
@@ -116,9 +115,6 @@ type options struct {
 	timings       string
 	cpuProfile    string
 	runtimeTrace  string
-	taskModel     string
-	compactModel  string
-	diagnostics   bool
 }
 
 func bindOptions(flags *flag.FlagSet) *options {
@@ -141,9 +137,6 @@ func bindOptions(flags *flag.FlagSet) *options {
 	flags.StringVar(&o.timings, "timings", "", "append private stage timing records to this JSONL file")
 	flags.StringVar(&o.cpuProfile, "cpu-profile", "", "write a CPU profile to a new private file")
 	flags.StringVar(&o.runtimeTrace, "runtime-trace", "", "write a Go runtime trace to a new private file")
-	flags.StringVar(&o.taskModel, "task-model", "", "model for read-only research tasks; empty uses -model")
-	flags.StringVar(&o.compactModel, "compact-model", "", "model that writes context summaries; empty uses -model, which can reuse the cached prefix")
-	flags.BoolVar(&o.diagnostics, "diagnostics", true, "report language-server errors after each file change, when a server for the language is installed")
 	return &o
 }
 
@@ -151,8 +144,7 @@ func (o *options) agentConfig() (agent.Config, error) {
 	if o.maxTokens <= 0 || o.maxTurns <= 0 || o.compactTokens < 0 || strings.TrimSpace(o.model) == "" {
 		return agent.Config{}, errors.New("model, positive token/turn limits, and nonnegative compact-tokens are required")
 	}
-	config := agent.Config{Model: o.model, MaxTokens: o.maxTokens, MaxTurns: o.maxTurns, System: agent.CodingInstructions, CompactTokens: o.compactTokens, EnableTasks: o.enableTasks,
-		TaskModel: strings.TrimSpace(o.taskModel), CompactModel: strings.TrimSpace(o.compactModel)}
+	config := agent.Config{Model: o.model, MaxTokens: o.maxTokens, MaxTurns: o.maxTurns, System: agent.CodingInstructions, CompactTokens: o.compactTokens, EnableTasks: o.enableTasks}
 	if o.systemFile != "" {
 		system, err := os.ReadFile(o.systemFile)
 		if err != nil {
@@ -568,7 +560,7 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) (
 			return 1
 		}
 		taskContext, timing := timedContext(ctx, o)
-		result := eval.RunTask(taskContext, client, config, evalSetup(o), task, taskFileDir, *keepWorkDirs)
+		result := eval.RunTask(taskContext, client, config, evalSetup, task, taskFileDir, *keepWorkDirs)
 		var taskError error
 		if !result.Pass {
 			taskError = errors.New("evaluation failed")
@@ -607,28 +599,19 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) (
 // so a feature that changes the model's success shows in the score. It reads
 // no user settings, hooks, or memory, so the score does not depend on the
 // files of this machine. No user answers ask_user.
-func evalSetup(o *options) eval.Setup {
-	return func(workDir, outputDirectory string, jobs *tools.Jobs, config *agent.Config) (*tools.Set, func() error, error) {
-		ext := &extensions{workDir: workDir}
-		if o.diagnostics {
-			languages, err := lsp.NewManager(lsp.DefaultServers(), workDir)
-			if err != nil {
-				return nil, nil, fmt.Errorf("language servers: %w", err)
-			}
-			ext.languages = languages
-		}
-		standard, err := tools.Standard(workDir, outputDirectory, jobs)
-		if err != nil {
-			return nil, nil, errors.Join(err, ext.close())
-		}
-		toolSet, err := ext.toolSet(standard, nil)
-		if err != nil {
-			return nil, nil, errors.Join(err, ext.close())
-		}
-		ext.configure(config, toolSet, turnPolicy{}, config.Approve)
-		config.Notices = jobs.Notices
-		return toolSet, ext.close, nil
+func evalSetup(workDir, outputDirectory string, jobs *tools.Jobs, config *agent.Config) (*tools.Set, error) {
+	ext := &extensions{workDir: workDir}
+	standard, err := tools.Standard(workDir, outputDirectory, jobs)
+	if err != nil {
+		return nil, err
 	}
+	toolSet, err := ext.toolSet(standard, nil)
+	if err != nil {
+		return nil, err
+	}
+	ext.configure(config, toolSet, turnPolicy{}, config.Approve)
+	config.Notices = jobs.Notices
+	return toolSet, nil
 }
 
 func formatResult(result eval.Result) string {

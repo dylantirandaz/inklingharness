@@ -18,7 +18,7 @@ func todoWriteTool() Tool {
 	var items []todoItem
 	return Tool{
 		Name:        "todo_write",
-		Description: "Replace this tool set's task list with items containing content and status (pending, in_progress, completed). At most one task may be in_progress. An empty items array clears the list. State is local to this tool set, not written to disk. Output is capped at 256 KiB.",
+		Description: "Replace the task list. Status is pending, in_progress (at most one), or completed.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["content","status"]}}},"required":["items"]}`),
 		ReadOnly:    false,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {

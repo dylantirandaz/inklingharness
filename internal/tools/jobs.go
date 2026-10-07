@@ -614,8 +614,8 @@ func oneLine(err error) string {
 func bashJobTool(jobs *Jobs) Tool {
 	return Tool{
 		Name:        "bash_job",
-		Description: "Manage the background jobs that bash starts with background true. Action list shows each job with its id, state, run time, and command. Action output returns the output of job id that no earlier output call returned, at most 32 KiB; when more arrived, it drops the oldest part and says so. The full output of each job goes to a file that the result names; use read_file to read it. Action kill sends SIGTERM to the job and its child processes, then SIGKILL after 2 seconds, and returns the final state. All jobs stop when the session ends.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["list","output","kill"]},"id":{"type":"integer","minimum":1,"description":"Job id. Required for output and kill."}},"required":["action"]}`),
+		Description: "Background jobs from bash with background set. list: all jobs. output: new output of job id, at most 32 KiB. kill: stop job id and its children.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","enum":["list","output","kill"]},"id":{"type":"integer","minimum":1}},"required":["action"]}`),
 		// ReadOnly is false because action kill stops processes. The flag
 		// applies to the whole tool, so the read actions follow the same rules.
 		ReadOnly: false,

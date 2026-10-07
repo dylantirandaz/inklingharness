@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/dylantirandaz/inklingharness/internal/tools"
 )
 
 func TestAskUserTool(t *testing.T) {
@@ -32,8 +34,23 @@ func TestAskUserTool(t *testing.T) {
 	if content, failed := run(`{"question":"Which store?","options":["map","slice"]}`, ask); failed || content != "The user answered in their own words: neither, use sqlite" {
 		t.Fatalf("own answer = %q %t", content, failed)
 	}
-	if content, failed := run(`{"question":"Which store?","options":["map","slice"]}`, nil); !failed || !strings.Contains(content, "state your assumption") {
-		t.Fatalf("no user = %q %t", content, failed)
+	// Without a user the model does not get the tool at all.
+	ext := &extensions{workDir: t.TempDir()}
+	empty, err := tools.NewSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		ask  questionAsker
+		want bool
+	}{{nil, false}, {ask, true}} {
+		set, err := ext.toolSet(empty, test.ask)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, found := set.Lookup("ask_user"); found != test.want {
+			t.Fatalf("ask_user offered = %t with asker %t", found, test.ask != nil)
+		}
 	}
 	for _, input := range []string{
 		`{"options":["a","b"]}`, `{"question":"","options":["a","b"]}`, `{"question":"q","options":["a"]}`,

@@ -259,7 +259,6 @@ that must be isolated from your files or network.
 | `read_file` | `path`, optional 1-based `offset` and positive `limit`. Defaults: 1 and 2000. Returns numbered lines and an end or truncation notice. |
 | `write_file` | Required `path` and `content`. Creates or replaces a file. Explicit empty content is valid; omitted or null content is rejected. |
 | `edit_file` | Required `path`, `old_string`, and `new_string`. Changes exactly one match; missing or duplicate matches fail without a write. |
-| `list_dir` | Optional `path` and `limit`. Defaults: `.` and 500. Lists sorted names; directories end with `/`. |
 | `glob` | Required `pattern`; optional `path` and `limit`. Defaults: `.` and 1000. `**` matches zero or more path segments. |
 | `grep` | Required Go regular expression `pattern`; optional `path`, `include` glob, `limit`, and `case_sensitive`. Defaults: `.`, 100 results, case-sensitive. Returns `path:line:text`. |
 | `bash` | Required `command`; optional `timeout_seconds` or `background`. Default timeout: 120 seconds; maximum: 600 seconds. Reports output and exit status. Output above 32 KiB returns its first and last 16 KiB and the path of a file with the full output. With `background: true` the command starts as job N and the call returns at once. |
@@ -268,8 +267,11 @@ that must be isolated from your files or network.
 | `task` | Required `prompt`. Runs read-only research with the same model in a separate conversation. Returns findings to the parent. |
 | `mcp_list`, `mcp_call` | Only when MCP servers are set. `mcp_list` starts a server on first use and lists its tools with their input schemas; `mcp_call` calls one. |
 | `web_fetch` | Required `url`; optional `offset` and `max_chars`. Gets an http or https page and returns its text: HTML becomes plain text with headings, lists, code, and absolute links. At most 5 redirects, 30 seconds, and 5 MiB; long pages come in parts. Needs approval; the rule `web_fetch(*.go.dev)` matches the host. |
-| `remember` | Required `fact`, one line. Adds the fact to `.inkling/memory.md`. The next session loads the file into the system prompt; the current session does not, so the prompt cache stays valid. Needs no approval. |
-| `ask_user` | Required `question` and 2 to 6 `options`. Chat shows a numbered question; answer with a number or your own words. Without a user (`run`, `rpc`, `acp`, `eval`) the model is told to choose and state its assumption. |
+| `remember` | Required `fact`, one line of at most 300 characters. Adds the fact to `.inkling/memory.md`; the same fact again, apart from case and spacing, is not added. The next session loads the file into the system prompt; the current session does not, so the prompt cache stays valid. Needs no approval. |
+| `ask_user` | Only in chat, where a user can answer. Required `question` and 2 to 6 `options`. Chat shows a numbered question; answer with a number or your own words. `run`, `rpc`, `acp`, and `eval` leave the tool out, so its definition costs no tokens there. |
+
+The system prompt and the tool definitions go with every request, so they are
+kept short. `/context` shows their current size.
 
 Custom tools from `.inkling/tools/` follow the standard tools, in name order.
 
@@ -301,19 +303,8 @@ model response; partial streamed tool arguments are never executed.
 Research tasks cannot write files, run commands, or start more research
 tasks. They can use the read and search tools and take at most 20 model turns.
 The parent waits for their results. `-tasks=false` removes the task tool.
-`-task-model ID` runs them with another model, for example a smaller and
-faster one. `-compact-model ID` writes context summaries with another model;
-the default is the chat model, because only it can reuse the cached prefix.
 The task list is local to the current tool set; its reported results remain
 in conversation history, but its in-memory state resets on resume.
-
-After `write_file` or `edit_file` succeeds, a language server checks the file
-and its errors and warnings follow the result, at most 20 lines. The servers
-are `gopls`, `rust-analyzer`, `typescript-language-server`, `pyright`, and
-`clangd`, when they are on `PATH`. A server starts at the first change to a
-file of its language and stops at exit. The first check waits at most 15
-seconds, later checks 3 seconds; a slow or missing server adds nothing.
-`-diagnostics=false` turns this off.
 
 When a background job ends, the next tool results or the next prompt tell the
 model, once: the job, its exit code, and its last output lines.
@@ -385,7 +376,7 @@ it, so a long skill costs nothing until it is used.
 
 **Memory**, `memory.md`, project only: facts that the `remember` tool adds,
 one per line. You can edit it. It loads into the system prompt at the start
-of each session; above 16 KiB, the newest facts load.
+of each session; above 4 KiB (about 1,000 tokens), the newest facts load.
 
 ## Undo and rewind
 
@@ -429,8 +420,8 @@ prompt is cancelled.
 
 `think acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com)
 version 1 over stdin and stdout, for Zed and other editors. Each
-`session/new` opens its folder with the same tools, rules, hooks, memory, and
-diagnostics as chat. Tool calls stream as `tool_call` updates; a change asks
+`session/new` opens its folder with the same tools, rules, hooks, and memory
+as chat. Tool calls stream as `tool_call` updates; a change asks
 with `session/request_permission` (allow once, allow always, reject). Images
 and embedded resources in prompts are supported; `session/load` and client
 MCP servers are not. In Zed:
@@ -446,6 +437,11 @@ and token use. Files have mode `0600`; the session directory has mode `0700`.
 The location is `$XDG_STATE_HOME/inkling/sessions`, or
 `~/.local/state/inkling/sessions`. `think sessions -all` lists sessions from
 all directories.
+
+The provider bills reasoning in history as input tokens. At each new prompt,
+the reasoning of every reply before the last one leaves the history, also in
+the saved session; the last reply keeps it, because some APIs need it for an
+open tool call. This costs one cache miss for the history at each prompt.
 
 Each session has an append-only log, `<id>.log`, and a small index,
 `<id>.meta.json`. A log record has a 4-byte length, a 4-byte CRC-32C, and a
@@ -937,8 +933,9 @@ each build cannot separate a gain from model variance; it shows no
 regression from the longer tool list. `scripts/limits` on the release build:
 7.15 MiB, 25.7 ms startup (median of 7), no measurable idle CPU.
 
-The model-success and daily-use release was checked with the same model
-settings, with real `gopls`, real processes, and a real terminal:
+v0.5.0 was checked with the same model settings, with real `gopls`, real
+processes, and a real terminal. (v0.6.0 removed its language-server
+diagnostics and model roles.)
 
 - Writing a Go file with a type error gave the model
   `bad.go:3:25: error: cannot use "x" ...` from `gopls`, then the output of
@@ -959,15 +956,15 @@ settings, with real `gopls`, real processes, and a real terminal:
 - `-task-model` and `-compact-model` sent the research and summary requests
   to `thinkingmachines/inkling`, and the other requests to the main model.
 
-The 20-task eval, 3 runs of each build, all builds at the same time in each
+The v0.5.0 20-task eval, 3 runs of each build, all builds at the same time in each
 round. Each value is the mean of one run of 20 tasks:
 
 | Build | Passed (of 60) | Turns | Input tokens | Output tokens | Turn p95 |
 | --- | --- | --- | --- | --- | --- |
 | v0.4.0 | 59 | 157 | 550k | 31.4k | 3.40 s |
-| this release | 58 | 157 | 583k | 32.7k | 3.51 s |
-| this release, `-diagnostics=false` | 58 | 158 | 589k | 37.6k | 4.06 s |
-| this release, hashline edits | 59 | 191 | 815k | 28.7k | 2.99 s |
+| v0.5.0 | 58 | 157 | 583k | 32.7k | 3.51 s |
+| v0.5.0, `-diagnostics=false` | 58 | 158 | 589k | 37.6k | 4.06 s |
+| v0.5.0, hashline edits | 59 | 191 | 815k | 28.7k | 2.99 s |
 
 Every failure in every build was a reply that hit `max_tokens` in a tool
 call, not a wrong result. Against the same release with replace edits, the
@@ -976,8 +973,26 @@ and 40% more input tokens, so it was removed. Diagnostics fired in 4 of 20
 tasks of a recorded run, each on a real compile error; with them, output
 tokens were 13% lower and turn p95 was lower, which is inside the
 run-to-run spread but worse on no measure. The three new tools add about 6%
-input tokens. `scripts/limits`: 7.52 MiB, 26.7 ms startup, no measurable
-idle CPU.
+input tokens.
+
+v0.6.0 cuts tokens. The system prompt went from 386 to 202 tokens and the
+tool definitions of `run` and `eval` from 1,883 to 967 tokens, measured with
+real requests: shorter texts, no `list_dir` (`glob` and `ls` cover it), and
+no `ask_user` where no user can answer. Reasoning of earlier replies leaves
+the history at the next prompt; a recorded two-prompt `rpc` run showed the
+second prompt's requests without it, and the model still answered from the
+history. The 20-task eval, 3 runs of each build at the same time:
+
+| Build | Passed (of 60) | Turns | Input tokens | Output tokens | Wall time |
+| --- | --- | --- | --- | --- | --- |
+| v0.5.0 | 57 | 156 | 570k | 36.6k | 313 s |
+| v0.6.0 | 59 | 146 | 360k | 21.3k | 236 s |
+
+Input tokens fell 37%, output tokens 42%, and wall time 25%; each round
+showed both drops. The v0.5.0 failures were replies cut at `max_tokens`; the
+v0.6.0 failure was one wrong result. The `think` process stays near 20 MiB;
+a resumed 198k-token session peaks at 18 MiB. `scripts/limits`: 7.42 MiB,
+27.7 ms startup, no measurable idle CPU.
 
 ## Layout
 
@@ -990,7 +1005,6 @@ idle CPU.
 - `internal/extend`: settings, hooks, custom tools, commands, skills, project memory, and goal checks from files.
 - `internal/permission`: permission rules for tool calls.
 - `internal/mcp`: MCP client over stdio.
-- `internal/lsp`: language-server client for diagnostics after file changes.
 - `internal/web`: the `web_fetch` tool and its HTML-to-text conversion.
 - `internal/rewind`: working-tree snapshots for undo.
 - `internal/session`: private append-only conversation storage.

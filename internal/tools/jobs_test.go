@@ -144,7 +144,7 @@ func TestStandardToolOrder(t *testing.T) {
 	for _, tool := range set.All() {
 		names = append(names, tool.Name)
 	}
-	want := []string{"read_file", "write_file", "edit_file", "bash", "bash_job", "list_dir", "glob", "grep", "todo_write"}
+	want := []string{"read_file", "write_file", "edit_file", "bash", "bash_job", "glob", "grep", "todo_write"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("tool order = %v, want %v", names, want)
 	}

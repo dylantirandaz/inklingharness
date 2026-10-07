@@ -189,7 +189,7 @@ func TestToolViewsAndBannerSanitize(t *testing.T) {
 		{"read_file", `{"path":"a\u001b[2Jb"}`},
 		{"write_file", `{"path":"x","content":"a\u001b]52;c;secret\u0007b"}`},
 		{"edit_file", `{"path":"x","old_string":"a\u001b[2J","new_string":"b"}`},
-		{"list_dir", `{"path":"a\u001b[2J"}`}, {"glob", `{"pattern":"**/\u001b[2J*.go"}`},
+		{"glob", `{"pattern":"**/\u001b[2J*.go"}`},
 		{"grep", `{"pattern":"needle\u001b[2J","include":"*.go","case_sensitive":false}`},
 		{"bash", `{"command":"printf hi\u001b[2J"}`},
 		{"todo_write", `{"items":[{"content":"a\u001b[2J","status":"pending"}]}`},

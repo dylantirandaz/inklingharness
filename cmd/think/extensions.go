@@ -15,7 +15,6 @@ import (
 	"github.com/dylantirandaz/inklingharness/internal/agent"
 	"github.com/dylantirandaz/inklingharness/internal/anthropic"
 	"github.com/dylantirandaz/inklingharness/internal/extend"
-	"github.com/dylantirandaz/inklingharness/internal/lsp"
 	"github.com/dylantirandaz/inklingharness/internal/mcp"
 	"github.com/dylantirandaz/inklingharness/internal/permission"
 	"github.com/dylantirandaz/inklingharness/internal/presentation"
@@ -26,23 +25,19 @@ import (
 
 // extensions are the user's settings, tools, hooks, commands, skills, and
 // project memory for one working directory. Loading reads a few small files
-// and starts nothing; an MCP server starts when the model first uses it, and
-// a language server when the model first edits a file of its language.
+// and starts nothing; an MCP server starts when the model first uses it.
 type extensions struct {
-	workDir   string
-	rules     permission.Rules
-	hooks     extend.Hooks
-	servers   *mcp.Manager
-	languages *lsp.Manager
-	tools     []tools.Tool
-	commands  []extend.Command
-	skills    []extend.Skill
-	memory    string
+	workDir  string
+	rules    permission.Rules
+	hooks    extend.Hooks
+	servers  *mcp.Manager
+	tools    []tools.Tool
+	commands []extend.Command
+	skills   []extend.Skill
+	memory   string
 }
 
-// loadExtensions reads the extension files. diagnostics turns on the
-// language servers that report errors after each edit.
-func loadExtensions(workDir string, diagnostics bool) (*extensions, error) {
+func loadExtensions(workDir string) (*extensions, error) {
 	settings, err := extend.LoadSettings(workDir)
 	if err != nil {
 		return nil, err
@@ -74,11 +69,6 @@ func loadExtensions(workDir string, diagnostics bool) (*extensions, error) {
 	}
 	loaded := &extensions{workDir: workDir, rules: rules, hooks: settings.Hooks, tools: custom,
 		commands: append(extend.BuiltinCommands(), userCommands...), skills: skills, memory: memory}
-	if diagnostics {
-		if loaded.languages, err = lsp.NewManager(lsp.DefaultServers(), workDir); err != nil {
-			return nil, fmt.Errorf("language servers: %w", err)
-		}
-	}
 	if len(settings.MCPServers) > 0 {
 		configs := make([]mcp.ServerConfig, len(settings.MCPServers))
 		for index, server := range settings.MCPServers {
@@ -92,16 +82,12 @@ func loadExtensions(workDir string, diagnostics bool) (*extensions, error) {
 	return loaded, nil
 }
 
-// close stops the MCP servers and language servers that started.
+// close stops the MCP servers that started.
 func (e *extensions) close() error {
-	var errs []error
-	if e.servers != nil {
-		errs = append(errs, e.servers.Close())
+	if e.servers == nil {
+		return nil
 	}
-	if e.languages != nil {
-		errs = append(errs, e.languages.Close())
-	}
-	return errors.Join(errs...)
+	return e.servers.Close()
 }
 
 // systemPrompt is the part of the system prompt that the extensions add. It
@@ -125,35 +111,15 @@ func (e *extensions) systemPrompt() string {
 
 // toolSet adds, after the standard tools and in a fixed order, web_fetch,
 // remember, ask_user, then the custom and MCP tools. ask is nil when no user
-// can answer questions.
+// can answer; then ask_user is left out, because it could only fail and its
+// definition costs tokens in every request.
 func (e *extensions) toolSet(standard *tools.Set, ask questionAsker) (*tools.Set, error) {
 	all := append([]tools.Tool(nil), standard.All()...)
-	all = append(all, web.FetchTool(), extend.MemoryTool(e.workDir), askUserTool(ask))
+	all = append(all, web.FetchTool(), extend.MemoryTool(e.workDir))
+	if ask != nil {
+		all = append(all, askUserTool(ask))
+	}
 	return tools.NewSet(append(all, e.tools...)...)
-}
-
-// diagnose returns the errors that a language server reports for a file
-// that write_file or edit_file just changed, or "" for other calls, failed
-// calls, and files without a language server.
-func (e *extensions) diagnose(ctx context.Context, call anthropic.ToolUseBlock, result tools.Result) string {
-	if e.languages == nil || result.IsError || (call.Name != "write_file" && call.Name != "edit_file") {
-		return ""
-	}
-	var input struct {
-		Path string `json:"path"`
-	}
-	if json.Unmarshal(call.Input, &input) != nil || input.Path == "" {
-		return ""
-	}
-	path := input.Path
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(e.workDir, path)
-	}
-	report, err := e.languages.Diagnose(ctx, path)
-	if err != nil || report == "" {
-		return ""
-	}
-	return "Language server diagnostics after this change:\n" + report
 }
 
 // planCommand is the built-in read-only plan command. Its absence is a
@@ -230,18 +196,11 @@ func (e *extensions) configure(config *agent.Config, toolSet *tools.Set, policy 
 		return nil, nil
 	}
 	config.AfterTool = func(ctx context.Context, call anthropic.ToolUseBlock, result tools.Result) (string, error) {
-		var sections []string
-		if report := e.diagnose(ctx, call, result); report != "" {
-			sections = append(sections, report)
-		}
 		output, err := e.hooks.RunAfterTool(ctx, e.workDir, extend.ToolEvent{Tool: call.Name, Input: call.Input, Result: &result})
-		if err != nil {
+		if err != nil || output == "" {
 			return "", err
 		}
-		if output != "" {
-			sections = append(sections, "After-tool hook output:\n"+output)
-		}
-		return strings.Join(sections, "\n\n"), nil
+		return "After-tool hook output:\n" + output, nil
 	}
 	config.Approve = func(ctx context.Context, call anthropic.ToolUseBlock) (bool, error) {
 		if verdict, _ := e.rules.Check(e.workDir, call.Name, call.Input); verdict == permission.Allow && staysInside(e.workDir, call) {

@@ -136,18 +136,6 @@ func TestTreeToolsSearchRealFiles(t *testing.T) {
 			t.Fatalf("invalid glob %s accepted: %+v", input, result)
 		}
 	}
-	list := lookup(t, root, "list_dir")
-	result = runTool(t, list, `{"path":"src"}`)
-	if result.Content != "b.go\ndeep/\nnode_modules/" {
-		t.Fatalf("list_dir = %+v", result)
-	}
-	result = runTool(t, list, `{"path":"src","limit":1}`)
-	if !strings.HasPrefix(result.Content, "b.go\n[truncated:") {
-		t.Fatalf("limited list = %+v", result)
-	}
-	if result := runTool(t, list, `{"limit":0}`); !result.IsError {
-		t.Fatal("list_dir accepted a nonpositive limit")
-	}
 	grep := lookup(t, root, "grep")
 	result = runTool(t, grep, `{"pattern":"needle","include":"*.go"}`)
 	if result.IsError || result.Content != "a.go:1:needle\nsrc/b.go:1:needle\nsrc/deep/c.go:1:needle" {
@@ -273,7 +261,6 @@ func TestReadOnlyToolsHonorCancellation(t *testing.T) {
 		input string
 	}{
 		{"read_file", `{"path":"f.txt"}`},
-		{"list_dir", `{}`},
 		{"glob", `{"pattern":"**"}`},
 		{"grep", `{"pattern":"text"}`},
 	} {

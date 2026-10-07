@@ -62,7 +62,7 @@ func newWorkspace(ctx context.Context, o *options, root string, stderr io.Writer
 	if err != nil {
 		return nil, err
 	}
-	ext, err := loadExtensions(projectContext.WorkDir, o.diagnostics)
+	ext, err := loadExtensions(projectContext.WorkDir)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +94,7 @@ func newWorkspace(ctx context.Context, o *options, root string, stderr io.Writer
 }
 
 // configure gives a turn the policy of the workspace: rules, hooks,
-// diagnostics, approval, and job notices.
+// approval, and job notices.
 func (w *workspace) configure(config *agent.Config, policy turnPolicy, ask func(context.Context, anthropic.ToolUseBlock) (bool, error)) {
 	w.ext.configure(config, w.toolSet, policy, ask)
 	config.Notices = w.jobs.Notices

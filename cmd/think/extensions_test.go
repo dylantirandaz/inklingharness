@@ -47,7 +47,7 @@ func TestExtensionPolicy(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "src", "link")); err != nil {
 		t.Fatal(err)
 	}
-	ext, err := loadExtensions(root, false)
+	ext, err := loadExtensions(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestCustomCommands(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, ".inkling", "commands", "review.md"), "---\ndescription: review a file\n---\nReview $ARGUMENTS for bugs.\n")
-	ext, err := loadExtensions(root, false)
+	ext, err := loadExtensions(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestCustomCommands(t *testing.T) {
 		t.Fatalf("help = %q", ext.commandHelp())
 	}
 	writeFile(t, filepath.Join(root, ".inkling", "commands", "status.md"), "Show status.\n")
-	if _, err := loadExtensions(root, false); err == nil || !strings.Contains(err.Error(), "/status") {
+	if _, err := loadExtensions(root); err == nil || !strings.Contains(err.Error(), "/status") {
 		t.Fatalf("a command that hides /status loaded: %v", err)
 	}
 }

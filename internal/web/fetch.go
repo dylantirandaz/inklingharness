@@ -43,8 +43,8 @@ func FetchTool() tools.Tool {
 	client := &http.Client{CheckRedirect: checkRedirect}
 	return tools.Tool{
 		Name:        "web_fetch",
-		Description: "Fetch one http or https URL with GET and return its text. HTML becomes Markdown-like text with a Title and URL line; links show as text (absolute-url). Plain text, Markdown, JSON and XML stay as they are. Images, PDF and other binary types are refused. Long text comes in slices: offset is the 1-based first character (default 1) and max_chars the slice length (default 50000, at most 200000); the result gives the total length and the next offset. Example: {\"url\":\"https://go.dev/doc/\"}.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"Absolute http or https URL."},"offset":{"type":"integer","minimum":1,"default":1,"description":"1-based character offset of the first character to return."},"max_chars":{"type":"integer","minimum":1,"maximum":200000,"default":50000,"description":"Maximum number of characters to return."}},"required":["url"]}`),
+		Description: "Fetch an http or https URL and return its text; HTML becomes plain text with links. A long page comes in parts; the result gives the next offset.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"url":{"type":"string"},"offset":{"type":"integer","minimum":1},"max_chars":{"type":"integer","minimum":1,"maximum":200000}},"required":["url"]}`),
 		ReadOnly:    false,
 		Run: func(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 			request, err := parseRequest(input)

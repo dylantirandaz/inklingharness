@@ -54,48 +54,6 @@ func (o *searchOutput) result(sorted bool, notice string) Result {
 	return Result{Content: text}
 }
 
-func listDirTool(root string) Tool {
-	return Tool{
-		Name:        "list_dir",
-		Description: "List sorted names in a directory, adding / to directories. path defaults to ., limit to 500. Output is capped at 256 KiB.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","default":"."},"limit":{"type":"integer","minimum":1,"default":500}}}`),
-		ReadOnly:    true,
-		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {
-			arguments := struct {
-				Path  string `json:"path"`
-				Limit int    `json:"limit"`
-			}{Path: ".", Limit: 500}
-			if err := json.Unmarshal(input, &arguments); err != nil {
-				return invalidInput(err), nil
-			}
-			if arguments.Limit < 1 {
-				return invalidInput(errors.New("limit must be positive")), nil
-			}
-			if err := ctx.Err(); err != nil {
-				return Result{}, err
-			}
-			entries, err := os.ReadDir(resolvePath(root, arguments.Path))
-			if err != nil {
-				return fileFailure(err)
-			}
-			output := searchOutput{limit: arguments.Limit}
-			for _, entry := range entries {
-				if err := ctx.Err(); err != nil {
-					return Result{}, err
-				}
-				name := entry.Name()
-				if entry.IsDir() {
-					name += "/"
-				}
-				if !output.add(name) {
-					break
-				}
-			}
-			return output.result(true, ""), nil
-		},
-	}
-}
-
 // Patterns use slash-separated path segments; ** matches zero or more segments.
 func parseGlob(pattern string) ([]string, error) {
 	if pattern == "" || strings.HasPrefix(pattern, "/") {
@@ -182,8 +140,8 @@ func walkFiles(ctx context.Context, base string, visit func(string, string, fs.D
 func globTool(root string) Tool {
 	return Tool{
 		Name:        "glob",
-		Description: "Find sorted relative file paths using slash-separated glob patterns; ** matches zero or more directories. path defaults to ., limit to 1000. Skips .git, node_modules and symlinks. Output is capped at 256 KiB.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."},"limit":{"type":"integer","minimum":1,"default":1000}},"required":["pattern"]}`),
+		Description: "Find files by glob pattern; ** matches any directories. Returns sorted relative paths. Skips .git, node_modules, and symlinks.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
 		ReadOnly:    true,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {
 			arguments := struct {
@@ -219,8 +177,8 @@ func globTool(root string) Tool {
 func grepTool(root string) Tool {
 	return Tool{
 		Name:        "grep",
-		Description: "Search Go regular expressions and return path:line:text. path defaults to ., limit to 100, case_sensitive to true. include is a glob (a basename glob applies at every depth). Skips .git, node_modules, symlinks, NUL-containing files, files over 2 MiB, and lines over 16 KiB; reports skip counts. Output is capped at 256 KiB.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."},"include":{"type":"string"},"limit":{"type":"integer","minimum":1,"default":100},"case_sensitive":{"type":"boolean","default":true}},"required":["pattern"]}`),
+		Description: "Search file contents with a Go regular expression. Returns path:line:text. include is a file glob. Skips .git, node_modules, binary files, and files over 2 MiB.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"include":{"type":"string"},"limit":{"type":"integer","minimum":1},"case_sensitive":{"type":"boolean"}},"required":["pattern"]}`),
 		ReadOnly:    true,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {
 			arguments := struct {

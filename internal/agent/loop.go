@@ -2,6 +2,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,19 +37,14 @@ type Config struct {
 	// parallel.
 	Gate func(context.Context, anthropic.ToolUseBlock) (*Refusal, error)
 	// AfterTool sees the result of every tool that ran and returns text for
-	// the model, such as hook output or compiler diagnostics; the text goes
-	// after the result. An error stops the run, so a broken hook is never
-	// silent. A nil AfterTool does nothing.
+	// the model, such as hook output; the text goes after the result. An
+	// error stops the run, so a broken hook is never silent. A nil AfterTool
+	// does nothing.
 	AfterTool func(context.Context, anthropic.ToolUseBlock, tools.Result) (string, error)
 	// Notices returns news that arrived outside the conversation, such as a
 	// background job that ended. Each notice goes to the model once, with
 	// the next tool results or prompt. A nil Notices has none.
 	Notices func() []string
-	// TaskModel answers research tasks and CompactModel writes summaries.
-	// Empty means Model. A research task has its own context, so a smaller
-	// model costs no cache; a summary request with another model cannot read
-	// the cached prefix of Model.
-	TaskModel, CompactModel string
 }
 
 // Refusal is why a Gate stops one tool call.
@@ -101,9 +97,18 @@ type Prompt struct {
 }
 
 // Run adds a user prompt to history and runs until the model stops or fails.
-// It does not change history. Completed tool effects are not repeated on resume.
+// It does not change the history slice; the outcome holds the new history.
+// Completed tool effects are not repeated on resume.
+//
+// The provider bills reasoning in history as input, and the model does not
+// need the reasoning of earlier prompts, so the outcome history drops the
+// reasoning of every assistant message before the last one.
 func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, history []anthropic.EncodedMessage, prompt Prompt, observer Observer) (*Outcome, error) {
-	outcome := &Outcome{Messages: slices.Clone(history)}
+	earlier, err := withoutOldReasoning(history)
+	if err != nil {
+		return &Outcome{Messages: slices.Clone(history)}, fmt.Errorf("agent: %w", err)
+	}
+	outcome := &Outcome{Messages: earlier}
 	if config.MaxTurns <= 0 || config.MaxTokens <= 0 || config.CompactTokens < 0 || strings.TrimSpace(prompt.Text) == "" {
 		return outcome, errors.New("agent: positive turn/token limits, a nonnegative compaction limit, and a prompt are required")
 	}
@@ -193,6 +198,48 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 		}
 	}
 	return outcome, fmt.Errorf("task not complete after %d turns", config.MaxTurns)
+}
+
+// withoutOldReasoning returns a copy of history in which no assistant message
+// before the last one has thinking or redacted thinking blocks. The last
+// assistant message stays whole, because some APIs need its reasoning when
+// its tool calls are not answered yet. A message that has only reasoning
+// stays whole too, so no message becomes empty.
+func withoutOldReasoning(history []anthropic.EncodedMessage) ([]anthropic.EncodedMessage, error) {
+	result := slices.Clone(history)
+	last := -1
+	for index, message := range history {
+		if message.Role() == anthropic.RoleAssistant {
+			last = index
+		}
+	}
+	for index := range last {
+		message := history[index]
+		if message.Role() != anthropic.RoleAssistant || !bytes.Contains(message.Wire(), []byte(`thinking"`)) {
+			continue
+		}
+		decoded, err := message.Decode()
+		if err != nil {
+			return nil, err
+		}
+		kept := slices.DeleteFunc(slices.Clone(decoded.Content), func(block anthropic.ContentBlock) bool {
+			switch block.(type) {
+			case anthropic.ThinkingBlock, anthropic.RedactedThinkingBlock:
+				return true
+			default:
+				return false
+			}
+		})
+		if len(kept) == len(decoded.Content) || len(kept) == 0 {
+			continue
+		}
+		encoded, err := anthropic.EncodeMessage(anthropic.Message{Role: decoded.Role, Content: kept})
+		if err != nil {
+			return nil, err
+		}
+		result[index] = encoded
+	}
+	return result, nil
 }
 
 func checkpoint(ctx context.Context, config Config, outcome *Outcome) (err error) {

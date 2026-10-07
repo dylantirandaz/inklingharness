@@ -18,8 +18,8 @@ const maxReadBytes = 256 * 1024
 func readFileTool(root string) Tool {
 	return Tool{
 		Name:        "read_file",
-		Description: "Read numbered lines from a text file. path is required in every call, e.g. {\"path\":\"main.go\"}. offset is 1-based (default 1); limit defaults to 2000. Output is capped at 256 KiB and ends with an end-of-file or truncation notice.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"File path, absolute or relative to the working directory."},"offset":{"type":"integer","minimum":1,"default":1},"limit":{"type":"integer","minimum":1,"default":2000}},"required":["path"]}`),
+		Description: "Read a text file as numbered lines. Give path in every call. offset is 1-based; limit defaults to 2000 lines.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`),
 		ReadOnly:    true,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {
 			arguments := struct {
@@ -44,8 +44,8 @@ func readFileTool(root string) Tool {
 func writeFileTool(root string) Tool {
 	return Tool{
 		Name:        "write_file",
-		Description: "Create or replace a file with the given content. Both path and content are required, e.g. {\"path\":\"notes.txt\",\"content\":\"hello\"}. Use content:\"\" for an empty file. Missing parent directories are created.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"File path, absolute or relative to the working directory."},"content":{"type":"string","description":"Complete new content of the file."}},"required":["path","content"]}`),
+		Description: "Create or replace a file. Missing parent directories are created.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`),
 		ReadOnly:    false,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {
 			var arguments struct {
@@ -76,8 +76,8 @@ func writeFileTool(root string) Tool {
 func editFileTool(root string) Tool {
 	return Tool{
 		Name:        "edit_file",
-		Description: "Replace one exact occurrence of old_string with new_string in a file. Include path, old_string and new_string in every call, even after reading the file, e.g. {\"path\":\"main.go\",\"old_string\":\"return 1\",\"new_string\":\"return 2\"}. Use new_string:\"\" to delete text. The call fails when old_string is empty, absent or occurs more than once; include enough surrounding lines to make it unique.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"File path, absolute or relative to the working directory."},"old_string":{"type":"string","description":"Exact text to replace. Must occur exactly once."},"new_string":{"type":"string","description":"Replacement text."}},"required":["path","old_string","new_string"]}`),
+		Description: "Replace the one exact occurrence of old_string with new_string. Give path, old_string, and new_string in every call. Fails if old_string is absent or not unique; include enough context to make it unique.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"]}`),
 		ReadOnly:    false,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {
 			var arguments struct {

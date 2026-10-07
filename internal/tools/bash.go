@@ -24,8 +24,8 @@ const (
 func bashTool(root string, jobs *Jobs) Tool {
 	return Tool{
 		Name:        "bash",
-		Description: "Run a bash command in the working directory. Returns stdout and stderr together, then the exit code when it is not zero. Output larger than 32 KiB returns only its start and end, plus the path of a file with the full output; use read_file to read that file. The default timeout is 120 seconds; the maximum is 600. For a command that does not stop by itself, for example a dev server or a watcher, set background to true: the command then runs as a job, the call returns at once, and bash_job reads the job output or stops the job. At most 8 jobs run at the same time.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"Command line for bash -c."},"timeout_seconds":{"type":"integer","minimum":1,"maximum":600,"description":"Kill the command after this many seconds. Default 120. Not for background commands."},"background":{"type":"boolean","description":"Run the command as a background job and return at once. Default false."}},"required":["command"]}`),
+		Description: "Run a bash command in the working directory. Returns stdout and stderr, and the exit code when not 0. Output over 32 KiB keeps its start and end and names a file with all of it. Timeout: 120 s by default, 600 at most. For servers and watchers set background, then use bash_job.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":600},"background":{"type":"boolean"}},"required":["command"]}`),
 		ReadOnly:    false,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {
 			var arguments struct {

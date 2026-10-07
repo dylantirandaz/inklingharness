@@ -869,7 +869,7 @@ func describeACPToolCall(id, name string, input json.RawMessage) acpToolCallRepo
 
 func acpToolKindOf(name string) acpToolKind {
 	switch name {
-	case "read_file", "list_dir":
+	case "read_file":
 		return acpKindRead
 	case "glob", "grep":
 		return acpKindSearch

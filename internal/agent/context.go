@@ -68,7 +68,7 @@ func Compact(ctx context.Context, client *anthropic.Client, config Config, toolS
 	started := display.Start()
 	observer.Status("compacting older messages")
 	display.Add(started, nil)
-	response, err := client.Stream(ctx, anthropic.Request{Model: roleModel(config.CompactModel, config), MaxTokens: min(config.MaxTokens, 8192), System: config.System, Messages: messages, Tools: RequestTools(config, toolSet), Thinking: config.Thinking, Extra: config.Extra}, func(event anthropic.StreamEvent) error {
+	response, err := client.Stream(ctx, anthropic.Request{Model: config.Model, MaxTokens: min(config.MaxTokens, 8192), System: config.System, Messages: messages, Tools: RequestTools(config, toolSet), Thinking: config.Thinking, Extra: config.Extra}, func(event anthropic.StreamEvent) error {
 		switch event := event.(type) {
 		case anthropic.RetryEvent:
 			return forward(event, observer)
@@ -114,7 +114,7 @@ func Compact(ctx context.Context, client *anthropic.Client, config Config, toolS
 }
 
 func taskDefinition() anthropic.ToolDefinition {
-	return anthropic.ToolDefinition{Name: "task", Description: "Run a read-only research task in a separate model context. It can read and search files, but cannot run commands, change files, or create child tasks. Give it a complete question and paths. Returns findings, not shared conversation state.", InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"],"additionalProperties":false}`)}
+	return anthropic.ToolDefinition{Name: "task", Description: "Run read-only research in a separate context that can only read and search files. Give a complete question with paths; it returns findings.", InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"],"additionalProperties":false}`)}
 }
 
 func runTask(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, input json.RawMessage) (tools.Result, anthropic.Usage, error) {
@@ -138,7 +138,6 @@ func runTask(ctx context.Context, client *anthropic.Client, config Config, toolS
 		return tools.Result{}, anthropic.Usage{}, err
 	}
 	childConfig := config
-	childConfig.Model = roleModel(config.TaskModel, config)
 	childConfig.EnableTasks = false
 	childConfig.Approve = nil
 	childConfig.Checkpoint = nil
@@ -151,12 +150,4 @@ func runTask(ctx context.Context, client *anthropic.Client, config Config, toolS
 		return tools.Result{}, outcome.Usage, fmt.Errorf("research task: %w", err)
 	}
 	return tools.Result{Content: outcome.FinalText}, outcome.Usage, nil
-}
-
-// roleModel is the model of a role, or the main model when the role has none.
-func roleModel(role string, config Config) string {
-	if role == "" {
-		return config.Model
-	}
-	return role
 }

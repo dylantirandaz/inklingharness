@@ -51,6 +51,13 @@ func TestMemoryRoundTrip(t *testing.T) {
 	if err != nil || !strings.Contains(text, "check a fact before you depend on it") || !strings.HasSuffix(text, "- The API key lives in OPENROUTER_API_KEY.") {
 		t.Fatalf("loaded = %q, %v", text, err)
 	}
+	// The same fact again, with other case and spacing, changes nothing.
+	if message, failed := remember(t, workDir, "the api key  lives in OPENROUTER_API_KEY."); failed || message != "Already saved." {
+		t.Fatalf("duplicate = %q %t", message, failed)
+	}
+	if again, err := os.ReadFile(MemoryPath(workDir)); err != nil || string(again) != string(data) {
+		t.Fatalf("file after duplicate = %q, %v", again, err)
+	}
 }
 
 func TestMemoryRejectsBadFacts(t *testing.T) {
@@ -87,9 +94,12 @@ func TestMemoryLoadKeepsTheEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := text[strings.Index(text, "(Older facts are omitted"):]
-	lines := strings.Split(body, "\n")
-	if !strings.HasSuffix(text, "- newest fact") || !strings.HasPrefix(lines[1], "- fact number") || len(text) > memoryLoadLimit+300 {
+	marker := strings.Index(text, "(Older facts omitted.)")
+	if marker < 0 {
+		t.Fatalf("no omission marker in %q", text[:200])
+	}
+	lines := strings.Split(text[marker:], "\n")
+	if !strings.HasSuffix(text, "- newest fact") || !strings.HasPrefix(lines[1], "- fact number") || len(text) > memoryLoadLimit+200 {
 		t.Fatalf("loaded %d bytes, first line %q", len(text), lines[1])
 	}
 }

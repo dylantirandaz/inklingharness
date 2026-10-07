@@ -302,7 +302,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		return 2
 	}
 	prewarm(ctx, client)
-	ext, err := loadExtensions(projectContext.WorkDir, o.diagnostics)
+	ext, err := loadExtensions(projectContext.WorkDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "inkling: %v\n", err)
 		return 1

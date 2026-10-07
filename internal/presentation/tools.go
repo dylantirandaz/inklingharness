@@ -64,7 +64,7 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		return ToolView{}, errors.New("tool input must be a JSON object")
 	}
 	switch name {
-	case "read_file", "write_file", "edit_file", "list_dir", "glob", "grep", "bash", "bash_job", "todo_write", "task", "mcp_list", "mcp_call", "web_fetch", "remember", "ask_user":
+	case "read_file", "write_file", "edit_file", "glob", "grep", "bash", "bash_job", "todo_write", "task", "mcp_list", "mcp_call", "web_fetch", "remember", "ask_user":
 	default:
 		return describeOtherTool(name, input, details)
 	}
@@ -116,28 +116,18 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 			view.Details = "Replace one exact occurrence in " + singleLine(*args.Path) + "\n" +
 				diffLines(*args.OldString, "- ", theme.Red, theme) + "\n" + diffLines(*args.NewString, "+ ", theme.Green, theme)
 		}
-	case "list_dir", "glob", "grep":
+	case "glob", "grep":
 		path := "."
 		if args.Path != nil {
 			path = *args.Path
 		}
-		defaultLimit := 500
-		if name == "glob" {
-			defaultLimit = 1000
-		}
+		defaultLimit := 1000
 		if name == "grep" {
 			defaultLimit = 100
 		}
 		limit, err := positive(args.Limit, defaultLimit, "limit")
 		if err != nil {
 			return ToolView{}, err
-		}
-		if name == "list_dir" {
-			view.Title = "List " + brief(path)
-			if details {
-				view.Details = fmt.Sprintf("Directory: %s\nResult limit: %d", singleLine(path), limit)
-			}
-			break
 		}
 		if err := requiredText(args.Pattern, "pattern", false); err != nil {
 			return ToolView{}, err

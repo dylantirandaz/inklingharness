@@ -21,7 +21,7 @@ type question struct {
 
 // questionAsker shows a question and returns the answer: one of the options
 // or the user's own text. A nil asker means that no user can answer, as in
-// run -json, rpc, and eval.
+// run, rpc, acp, and eval; then the model does not get ask_user.
 type questionAsker func(ctx context.Context, asked question) (string, error)
 
 const (
@@ -33,21 +33,17 @@ const (
 
 // askUserTool lets the model ask a multiple-choice question instead of
 // guessing. It changes nothing, but it is not read-only: two questions must
-// not run in parallel.
+// not run in parallel. ask must not be nil; without a user the tool is not
+// offered at all.
 func askUserTool(ask questionAsker) tools.Tool {
 	return tools.Tool{
-		Name: "ask_user",
-		Description: "Ask the user one multiple-choice question when a decision is theirs and a wrong guess would waste work, for example between two designs. " +
-			"Give 2 to 6 short options; the user can also type a different answer. Do not ask for facts that you can find with tools. " +
-			"When no user is present, the result says so; then choose, state your assumption, and continue.",
+		Name:        "ask_user",
+		Description: "Ask the user a multiple-choice question when the decision is theirs and a guess could waste work. Give 2 to 6 short options; the user can also answer in their own words. Do not ask for facts that tools can find.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"},"minItems":2,"maxItems":6}},"required":["question","options"],"additionalProperties":false}`),
 		Run: func(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 			asked, err := parseQuestion(input)
 			if err != nil {
 				return tools.Result{Content: "invalid input: " + err.Error(), IsError: true}, nil
-			}
-			if ask == nil {
-				return tools.Result{Content: "No user can answer now: this run is not interactive. Choose the most reasonable option, state your assumption in your reply, and continue.", IsError: true}, nil
 			}
 			answer, err := ask(ctx, asked)
 			if err != nil {

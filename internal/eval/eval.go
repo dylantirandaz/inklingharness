@@ -85,10 +85,8 @@ func LoadTasks(path string) ([]Task, error) {
 
 // Setup builds the tools of one task and changes its configuration, as a
 // real session would. It gets the fresh working directory, the output
-// directory, and the background jobs, which RunTask closes. The returned
-// close function runs after the task check, before the directories are
-// removed.
-type Setup func(workDir, outputDirectory string, jobs *tools.Jobs, config *agent.Config) (*tools.Set, func() error, error)
+// directory, and the background jobs, which RunTask closes.
+type Setup func(workDir, outputDirectory string, jobs *tools.Jobs, config *agent.Config) (*tools.Set, error)
 
 // RunTask runs one task in a fresh working directory and checks the result.
 // Bash output files go to a separate temporary directory, so the task check
@@ -133,19 +131,11 @@ func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config,
 			result.Error += "stop background jobs: " + err.Error()
 		}
 	}()
-	toolSet, closeSetup, err := setup(workDir, outputDirectory, jobs, &config)
+	toolSet, err := setup(workDir, outputDirectory, jobs, &config)
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
-	defer func() {
-		if err := closeSetup(); err != nil {
-			if result.Error != "" {
-				result.Error += "; "
-			}
-			result.Error += "close task setup: " + err.Error()
-		}
-	}()
 
 	projectContext, err := project.Inspect(ctx, workDir)
 	if err != nil {
