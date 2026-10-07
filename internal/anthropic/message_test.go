@@ -122,7 +122,7 @@ func TestEncodedMessageKeepsCompactWireAndEstimate(t *testing.T) {
 		t.Fatalf("estimate bytes = %d", encoded.EstimateBytes())
 	}
 	image := Message{Role: RoleUser, Content: []ContentBlock{ImageBlock{MediaType: "image/webp", Data: strings.Repeat("A", 4000)}}}
-	if encoded := mustEncode(t, image)[0]; encoded.EstimateBytes() != 32+imageEstimateBytes {
+	if encoded := mustEncode(t, image)[0]; encoded.EstimateBytes() != 32+ImageEstimateBytes {
 		t.Fatalf("image estimate bytes = %d", encoded.EstimateBytes())
 	}
 	if _, err := EncodeMessage(Message{Role: "system"}); err == nil {

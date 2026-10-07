@@ -3,8 +3,10 @@
 // does not resolve symbolic links.
 //
 // A rule is "tool" or "tool(pattern)". The bare form covers every call of
-// the tool. Only bash, write_file, edit_file and mcp_call accept a pattern,
-// because only their inputs have a known meaning.
+// the tool. Only bash, write_file, edit_file, mcp_call and web_fetch accept a
+// pattern, because only their inputs have a known meaning. A web_fetch
+// pattern matches only the host of the first URL; the fetch can follow
+// redirects to other hosts.
 package permission
 
 import (
@@ -47,6 +49,7 @@ type Rules struct {
 	commands          ruleLists[commandPattern]
 	files             map[string]ruleLists[pathPattern]
 	mcpCalls          ruleLists[mcpPattern]
+	webFetches        ruleLists[hostPattern]
 }
 
 type ruleLists[P any] struct {
@@ -73,6 +76,7 @@ const (
 	shellTool
 	fileTool
 	mcpTool
+	webTool
 )
 
 func kindOf(tool string) toolKind {
@@ -83,6 +87,8 @@ func kindOf(tool string) toolKind {
 		return fileTool
 	case "mcp_call":
 		return mcpTool
+	case "web_fetch":
+		return webTool
 	default:
 		return customTool
 	}
@@ -142,6 +148,12 @@ func (rules *Rules) add(text string, verdict Verdict) error {
 			return err
 		}
 		rules.mcpCalls = rules.mcpCalls.with(verdict, patternRule[mcpPattern]{text, parsed})
+	case webTool:
+		parsed, err := parseHostPattern(pattern)
+		if err != nil {
+			return err
+		}
+		rules.webFetches = rules.webFetches.with(verdict, patternRule[hostPattern]{text, parsed})
 	case customTool:
 		return fmt.Errorf("tool %s does not accept a pattern; use the bare form %s", tool, tool)
 	default:
@@ -227,7 +239,7 @@ func balanced(pattern string) bool {
 // Empty reports whether there are no rules.
 func (rules Rules) Empty() bool {
 	return len(rules.denyAll) == 0 && len(rules.allowAll) == 0 && len(rules.files) == 0 &&
-		rules.commands.empty() && rules.mcpCalls.empty()
+		rules.commands.empty() && rules.mcpCalls.empty() && rules.webFetches.empty()
 }
 
 func (lists ruleLists[P]) empty() bool {
@@ -255,6 +267,8 @@ func (rules Rules) Check(root string, tool string, input json.RawMessage) (Verdi
 		return decide(rules.files[tool], allowed, tool, func() (target, bool) { return decodeFile(root, input) })
 	case mcpTool:
 		return decide(rules.mcpCalls, allowed, tool, func() (mcpCall, bool) { return decodeMCPCall(input) })
+	case webTool:
+		return decide(rules.webFetches, allowed, tool, func() (string, bool) { return decodeHost(input) })
 	case customTool:
 		if allowed && isObject(input) {
 			return Allow, tool

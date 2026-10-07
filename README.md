@@ -45,9 +45,10 @@ think
 # Resume the latest chat in this directory.
 think chat -resume last
 
-# List sessions, or resume one by its full ID.
+# List sessions, resume one by its full ID, or pick one from a list.
 think sessions
 think chat -resume SESSION_ID
+think chat -resume pick
 
 # Run one task. Approve file changes and commands at the terminal.
 think run "Find and fix the failing test"
@@ -164,7 +165,11 @@ text stays hidden unless `-show-thinking` is set.
 | `/effort [LEVEL]` | Show or change reasoning effort. `default` restores the model default. |
 | `/compact` | Summarize older messages with the selected model. |
 | `/clear` | Start a new session. Keep the old session on disk. |
+| `/fork` | Continue in a copy of this session, titled "fork of ...". The original stays saved as it was. |
+| `/title [TEXT]` | Show or set the session title. `think sessions` and `-resume pick` show it. |
+| `/context` | Show what fills the context: system prompt, tool definitions, and the history by kind, largest first. |
 | `/plan TASK` | Investigate with read-only tools and reply with a numbered plan. Changes are refused. |
+| `/goal [CMD\|off]` | Run the bash command `CMD` now and after each turn. While it fails, its exit status and the end of its output go to the model as the next prompt, at most 5 times. A failed or cancelled turn ends the goal. |
 | `/undo` | Restore the files and the conversation from before the last prompt. |
 | `/rewind [N]` | List the prompts of this run, or restore the state from before prompt N. |
 | `/NAME [ARGS]` | Run your command from `.inkling/commands/NAME.md`; see [Extensions](#extensions). |
@@ -262,6 +267,9 @@ that must be isolated from your files or network.
 | `todo_write` | Required `items` list with `content` and `status`: `pending`, `in_progress`, or `completed`. At most one item can be in progress. Replaces the task list; `[]` clears it. |
 | `task` | Required `prompt`. Runs read-only research with the same model in a separate conversation. Returns findings to the parent. |
 | `mcp_list`, `mcp_call` | Only when MCP servers are set. `mcp_list` starts a server on first use and lists its tools with their input schemas; `mcp_call` calls one. |
+| `web_fetch` | Required `url`; optional `offset` and `max_chars`. Gets an http or https page and returns its text: HTML becomes plain text with headings, lists, code, and absolute links. At most 5 redirects, 30 seconds, and 5 MiB; long pages come in parts. Needs approval; the rule `web_fetch(*.go.dev)` matches the host. |
+| `remember` | Required `fact`, one line. Adds the fact to `.inkling/memory.md`. The next session loads the file into the system prompt; the current session does not, so the prompt cache stays valid. Needs no approval. |
+| `ask_user` | Required `question` and 2 to 6 `options`. Chat shows a numbered question; answer with a number or your own words. Without a user (`run`, `rpc`, `acp`, `eval`) the model is told to choose and state its assumption. |
 
 Custom tools from `.inkling/tools/` follow the standard tools, in name order.
 
@@ -293,8 +301,22 @@ model response; partial streamed tool arguments are never executed.
 Research tasks cannot write files, run commands, or start more research
 tasks. They can use the read and search tools and take at most 20 model turns.
 The parent waits for their results. `-tasks=false` removes the task tool.
+`-task-model ID` runs them with another model, for example a smaller and
+faster one. `-compact-model ID` writes context summaries with another model;
+the default is the chat model, because only it can reuse the cached prefix.
 The task list is local to the current tool set; its reported results remain
 in conversation history, but its in-memory state resets on resume.
+
+After `write_file` or `edit_file` succeeds, a language server checks the file
+and its errors and warnings follow the result, at most 20 lines. The servers
+are `gopls`, `rust-analyzer`, `typescript-language-server`, `pyright`, and
+`clangd`, when they are on `PATH`. A server starts at the first change to a
+file of its language and stops at exit. The first check waits at most 15
+seconds, later checks 3 seconds; a slow or missing server adds nothing.
+`-diagnostics=false` turns this off.
+
+When a background job ends, the next tool results or the next prompt tell the
+model, once: the job, its exit code, and its last output lines.
 
 ## Extensions
 
@@ -336,8 +358,9 @@ starts, and the requests are the same as without the feature. Project files in
 - **Hooks** run with `bash -c` in the folder and get the event as JSON on
   stdin. A `before_tool` hook that exits 2 refuses the call, and its stderr
   goes to the model; any other non-zero exit stops the turn, so a broken hook
-  is never silent. `after_tool` hooks see the result. The stdout of `prompt`
-  hooks goes after your prompt as context. Each hook has 30 seconds.
+  is never silent. The stdout of `after_tool` hooks goes after the result,
+  so a formatter or linter can report problems to the model. The stdout of
+  `prompt` hooks goes after your prompt as context. Each hook has 30 seconds.
 - **MCP servers** speak the Model Context Protocol over stdio. The model sees
   only the server names and descriptions, plus two fixed tools, `mcp_list` and
   `mcp_call`. A server starts when the model first lists or calls it, and
@@ -360,6 +383,10 @@ the name of a chat command.
 system prompt; the model reads the file with `read_file` when a task needs
 it, so a long skill costs nothing until it is used.
 
+**Memory**, `memory.md`, project only: facts that the `remember` tool adds,
+one per line. You can edit it. It loads into the system prompt at the start
+of each session; above 16 KiB, the newest facts load.
+
 ## Undo and rewind
 
 Before each prompt, chat records the conversation and, inside a git
@@ -380,7 +407,9 @@ objects are unreachable, so `git gc` can remove them after its grace period.
 `think run -json` writes one JSON object for each event on stdout:
 `text`, `thinking`, `tool_call`, `tool_result`, `turn`, `status`, and last
 `done` or `error`. `think run -plan` investigates with read-only tools and
-prints a plan. Without a terminal, a change needs `-yes` or an allow rule.
+prints a plan. `think run -goal "go test ./..."` works like `/goal`; it exits
+with 1 when the check does not pass. Without a terminal, a change needs `-yes`
+or an allow rule.
 
 `think rpc` serves one conversation over stdin and stdout, one JSON object
 per line, for editors:
@@ -397,6 +426,18 @@ per line, for editors:
 One prompt runs at a time; a second one gets an error. History stays in the
 process for later prompts and is not saved. At end of input the running
 prompt is cancelled.
+
+`think acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com)
+version 1 over stdin and stdout, for Zed and other editors. Each
+`session/new` opens its folder with the same tools, rules, hooks, memory, and
+diagnostics as chat. Tool calls stream as `tool_call` updates; a change asks
+with `session/request_permission` (allow once, allow always, reject). Images
+and embedded resources in prompts are supported; `session/load` and client
+MCP servers are not. In Zed:
+
+```json
+{"agent_servers": {"Inkling": {"command": "think", "args": ["acp"]}}}
+```
 
 ## Sessions and context
 
@@ -896,17 +937,61 @@ each build cannot separate a gain from model variance; it shows no
 regression from the longer tool list. `scripts/limits` on the release build:
 7.15 MiB, 25.7 ms startup (median of 7), no measurable idle CPU.
 
+The model-success and daily-use release was checked with the same model
+settings, with real `gopls`, real processes, and a real terminal:
+
+- Writing a Go file with a type error gave the model
+  `bad.go:3:25: error: cannot use "x" ...` from `gopls`, then the output of
+  an `after_tool` hook, in the same tool result.
+- `run -goal "go test ./..."` on a task that left a failing test: the check
+  failed, the model got its output, fixed the code, and the check passed.
+- `web_fetch` returned the text of a real page. `remember` wrote a fact; a
+  new session answered with it and used no tools. A background job that
+  exited with code 3 reached the model as a notice in the next request.
+  Without a user, `ask_user` told the model to choose, and it stated its
+  choice.
+- In the chat TUI in a PTY: `/title`, `/context`, a numbered `ask_user`
+  question answered with `2`, `/goal` with one failed round and then a pass,
+  `/fork`, and `-resume pick`; `think sessions` showed both titles.
+- A scripted ACP client: `initialize`, `session/new`, `session/prompt`, two
+  `session/request_permission` round trips, tool updates, `end_turn`, and the
+  file on disk.
+- `-task-model` and `-compact-model` sent the research and summary requests
+  to `thinkingmachines/inkling`, and the other requests to the main model.
+
+The 20-task eval, 3 runs of each build, all builds at the same time in each
+round. Each value is the mean of one run of 20 tasks:
+
+| Build | Passed (of 60) | Turns | Input tokens | Output tokens | Turn p95 |
+| --- | --- | --- | --- | --- | --- |
+| v0.4.0 | 59 | 157 | 550k | 31.4k | 3.40 s |
+| this release | 58 | 157 | 583k | 32.7k | 3.51 s |
+| this release, `-diagnostics=false` | 58 | 158 | 589k | 37.6k | 4.06 s |
+| this release, hashline edits | 59 | 191 | 815k | 28.7k | 2.99 s |
+
+Every failure in every build was a reply that hit `max_tokens` in a tool
+call, not a wrong result. Against the same release with replace edits, the
+hashline edit format (line anchors instead of old text) took 22% more turns
+and 40% more input tokens, so it was removed. Diagnostics fired in 4 of 20
+tasks of a recorded run, each on a real compile error; with them, output
+tokens were 13% lower and turn p95 was lower, which is inside the
+run-to-run spread but worse on no measure. The three new tools add about 6%
+input tokens. `scripts/limits`: 7.52 MiB, 26.7 ms startup, no measurable
+idle CPU.
+
 ## Layout
 
-- `cmd/think`: the `think` command: login, interactive chat, sessions, one-shot runs, JSON events, RPC, evaluation, and extension wiring.
+- `cmd/think`: the `think` command: login, interactive chat, sessions, one-shot runs, JSON events, RPC, ACP, goals, questions, evaluation, and extension wiring.
 - `internal/anthropic`: streaming Messages client, encoded history messages, images, and bounded retries.
 - `internal/agent`: conversation loop, tool gate, approval hook, compaction, and research tasks.
 - `internal/terminal`: terminal input, live display, resize, and state restoration.
 - `internal/presentation`: safe text, Markdown styles, tool views, and approval details.
 - `internal/tools`: local coding tools and background jobs.
-- `internal/extend`: settings, hooks, custom tools, commands, and skills from files.
+- `internal/extend`: settings, hooks, custom tools, commands, skills, project memory, and goal checks from files.
 - `internal/permission`: permission rules for tool calls.
 - `internal/mcp`: MCP client over stdio.
+- `internal/lsp`: language-server client for diagnostics after file changes.
+- `internal/web`: the `web_fetch` tool and its HTML-to-text conversion.
 - `internal/rewind`: working-tree snapshots for undo.
 - `internal/session`: private append-only conversation storage.
 - `internal/project`: project instruction and Git status.

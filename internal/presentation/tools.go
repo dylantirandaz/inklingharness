@@ -33,6 +33,11 @@ type toolInput struct {
 	Server         *string         `json:"server"`
 	Tool           *string         `json:"tool"`
 	Arguments      json.RawMessage `json:"arguments"`
+	URL            *string         `json:"url"`
+	MaxChars       *int            `json:"max_chars"`
+	Fact           *string         `json:"fact"`
+	Question       *string         `json:"question"`
+	Options        *[]string       `json:"options"`
 }
 
 type todoItem struct {
@@ -59,7 +64,7 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		return ToolView{}, errors.New("tool input must be a JSON object")
 	}
 	switch name {
-	case "read_file", "write_file", "edit_file", "list_dir", "glob", "grep", "bash", "bash_job", "todo_write", "task", "mcp_list", "mcp_call":
+	case "read_file", "write_file", "edit_file", "list_dir", "glob", "grep", "bash", "bash_job", "todo_write", "task", "mcp_list", "mcp_call", "web_fetch", "remember", "ask_user":
 	default:
 		return describeOtherTool(name, input, details)
 	}
@@ -248,6 +253,35 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		view.Title = "MCP " + brief(*args.Server+"/"+*args.Tool)
 		if details {
 			view.Details = "Call " + singleLine(*args.Tool) + " on MCP server " + singleLine(*args.Server) + "\nArguments\n" + indentedJSON(args.Arguments)
+		}
+	case "web_fetch":
+		if err := requiredText(args.URL, "url", false); err != nil {
+			return ToolView{}, err
+		}
+		view.Title = "Fetch " + brief(*args.URL)
+		if details {
+			view.Details = "Fetch " + singleLine(*args.URL) + "\nThe page text goes to the model provider."
+		}
+	case "remember":
+		if err := requiredText(args.Fact, "fact", false); err != nil {
+			return ToolView{}, err
+		}
+		view.Title = "Remember " + brief(*args.Fact)
+		if details {
+			view.Details = "Add to .inkling/memory.md\n" + Safe(*args.Fact)
+		}
+	case "ask_user":
+		if err := requiredText(args.Question, "question", false); err != nil {
+			return ToolView{}, err
+		}
+		view.Title = "Ask " + brief(*args.Question)
+		if details {
+			view.Details = Safe(*args.Question)
+			if args.Options != nil {
+				for index, option := range *args.Options {
+					view.Details += fmt.Sprintf("\n%d. %s", index+1, singleLine(option))
+				}
+			}
 		}
 	}
 	return view, nil

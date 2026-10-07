@@ -27,28 +27,44 @@ type workspace struct {
 	jobs    *tools.Jobs
 }
 
-// openWorkspace returns an exit code other than 0 when it fails; it has then
-// written the reason to stderr.
+// usageError is a setup failure that the user's flags or key cause, which
+// exits with code 2 like other usage errors.
+type usageError struct{ error }
+
+// openWorkspace opens the workspace of the current directory. It returns an
+// exit code other than 0 when it fails; it has then written the reason to
+// stderr.
 func openWorkspace(ctx context.Context, o *options, stderr io.Writer) (*workspace, int) {
-	config, err := o.agentConfig()
-	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
+	root, err := os.Getwd()
+	if err == nil {
+		var work *workspace
+		if work, err = newWorkspace(ctx, o, root, stderr); err == nil {
+			return work, 0
+		}
+	}
+	fmt.Fprintf(stderr, "inkling: %v\n", err)
+	var usage usageError
+	if errors.As(err, &usage) {
 		return nil, 2
 	}
-	root, err := os.Getwd()
+	return nil, 1
+}
+
+// newWorkspace sets up tools and extensions rooted at root. Warnings, such as
+// stale output folders that cannot be removed, go to stderr. No user can
+// answer ask_user in a workspace.
+func newWorkspace(ctx context.Context, o *options, root string, stderr io.Writer) (*workspace, error) {
+	config, err := o.agentConfig()
 	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return nil, 1
+		return nil, usageError{err}
 	}
 	projectContext, err := project.Inspect(ctx, root)
 	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return nil, 1
+		return nil, err
 	}
-	ext, err := loadExtensions(projectContext.WorkDir)
+	ext, err := loadExtensions(projectContext.WorkDir, o.diagnostics)
 	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return nil, 1
+		return nil, err
 	}
 	config.System += "\n\n" + projectContext.SystemPrompt()
 	if text := ext.systemPrompt(); text != "" {
@@ -56,29 +72,32 @@ func openWorkspace(ctx context.Context, o *options, stderr io.Writer) (*workspac
 	}
 	client, err := o.client()
 	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return nil, 2
+		return nil, errors.Join(usageError{err}, ext.close())
 	}
 	prewarm(ctx, client)
 	store, err := session.DefaultStore()
 	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return nil, 1
+		return nil, errors.Join(err, ext.close())
 	}
 	removeStaleOutputs(store, stderr)
-	// run and rpc never save this session. Its ID only names the directory
-	// that keeps large command outputs after the command ends.
+	// run, rpc, and acp never save this session. Its ID only names the
+	// directory that keeps large command outputs after the command ends.
 	outputs, err := session.New(projectContext.WorkDir, o.model, o.effort)
 	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return nil, 1
+		return nil, errors.Join(err, ext.close())
 	}
-	toolSet, jobs, err := sessionTools(store, projectContext.WorkDir, outputs.ID, ext)
+	toolSet, jobs, err := sessionTools(store, projectContext.WorkDir, outputs.ID, ext, nil)
 	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return nil, 1
+		return nil, errors.Join(err, ext.close())
 	}
-	return &workspace{config: config, client: client, project: projectContext, toolSet: toolSet, ext: ext, jobs: jobs}, 0
+	return &workspace{config: config, client: client, project: projectContext, toolSet: toolSet, ext: ext, jobs: jobs}, nil
+}
+
+// configure gives a turn the policy of the workspace: rules, hooks,
+// diagnostics, approval, and job notices.
+func (w *workspace) configure(config *agent.Config, policy turnPolicy, ask func(context.Context, anthropic.ToolUseBlock) (bool, error)) {
+	w.ext.configure(config, w.toolSet, policy, ask)
+	config.Notices = w.jobs.Notices
 }
 
 // close stops background jobs and MCP servers.
@@ -130,7 +149,7 @@ func rpcCommand(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		if o.approveAll {
 			ask = func(context.Context, anthropic.ToolUseBlock) (bool, error) { return true, nil }
 		}
-		work.ext.configure(&config, work.toolSet, turnPolicy{}, ask)
+		work.configure(&config, turnPolicy{}, ask)
 		_, prompt, err := work.prompt(ctx, text, nil)
 		if err != nil {
 			return &agent.Outcome{Messages: history}, err

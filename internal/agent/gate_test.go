@@ -64,20 +64,44 @@ func TestGateAndAfterTool(t *testing.T) {
 	}
 
 	var seen []string
-	config = Config{Approve: approve, AfterTool: func(_ context.Context, call anthropic.ToolUseBlock, result tools.Result) error {
+	config = Config{Approve: approve, AfterTool: func(_ context.Context, call anthropic.ToolUseBlock, result tools.Result) (string, error) {
 		seen = append(seen, call.Name+"="+result.Content)
 		if call.Name == "change" {
-			return broken
+			return "", broken
 		}
-		return nil
+		return "vet: line 3: unused x", nil
 	}}
-	_, _, err = runTools(context.Background(), nil, config, toolSet, []anthropic.ToolUseBlock{look}, SilentObserver{})
+	results, _, err = runTools(context.Background(), nil, config, toolSet, []anthropic.ToolUseBlock{look}, SilentObserver{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := results[0].(anthropic.ToolResultBlock).Content; got != "seen\n\nvet: line 3: unused x" {
+		t.Fatalf("result with after-tool text = %q", got)
 	}
 	_, _, err = runTools(context.Background(), nil, config, toolSet, []anthropic.ToolUseBlock{change}, SilentObserver{})
 	if !errors.Is(err, broken) || writes.Load() != 1 || strings.Join(seen, ",") != "look=seen,change=changed" {
 		t.Fatalf("after-tool error = %v, writes %d, seen %v", err, writes.Load(), seen)
+	}
+}
+
+// A notice reaches the model once: with the prompt when it is pending at
+// the start, else with the next tool results.
+func TestNoticesReachTheModelOnce(t *testing.T) {
+	var pending []string
+	config := Config{Notices: func() []string {
+		taken := pending
+		pending = nil
+		return taken
+	}}
+	if got := withNotices("fix it", config); got != "fix it" {
+		t.Fatalf("no notices: %q", got)
+	}
+	pending = []string{"background job 1 exited with code 2", "background job 2 exited with code 0"}
+	if got := withNotices("fix it", config); got != "fix it\n\nNotices since the last message:\n- background job 1 exited with code 2\n- background job 2 exited with code 0" {
+		t.Fatalf("with notices: %q", got)
+	}
+	if got := withNotices("", config); got != "" {
+		t.Fatalf("a notice repeated: %q", got)
 	}
 }
 

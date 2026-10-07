@@ -10,9 +10,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type jobTools struct {
@@ -374,5 +376,110 @@ func TestBashJobRejectsInvalidInput(t *testing.T) {
 	}
 	if list := runTool(t, tools.bashJob, `{"action":"list"}`); list.Content != "no jobs" {
 		t.Fatalf("a rejected call started a job: %+v", list)
+	}
+}
+
+func TestJobNoticesReportEachEndOnceInEndOrder(t *testing.T) {
+	tools := newJobTools(t)
+	slow, _ := tools.start(t, `printf 'one\ntwo\nthree\nfour\n'; until [ -e go ]; do sleep 0.01; done; exit 3`)
+	fast, _ := tools.start(t, "exit 0")
+	tools.waitForEnd(t, fast)
+	if err := os.WriteFile(filepath.Join(tools.root, "go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tools.waitForEnd(t, slow)
+	// A read of the final output does not hide the end, and the notice
+	// still holds the output.
+	tools.readOutput(t, slow)
+	want := []string{
+		"background job 2 (exit 0) exited with code 0; no output",
+		`background job 1 (printf 'one\ntwo\nthree\nfour\n'; until [ -e go ]; do sleep 0.01; done; exit 3) exited with code 3; last output: "two\nthree\nfour"`,
+	}
+	if got := tools.jobs.Notices(); !slices.Equal(got, want) {
+		t.Fatalf("notices = %q, want %q", got, want)
+	}
+	if again := tools.jobs.Notices(); again != nil {
+		t.Fatalf("second notices = %q, want none", again)
+	}
+}
+
+func TestJobNoticesSkipEndsThatKillReported(t *testing.T) {
+	tools := newJobTools(t)
+	running, _ := tools.start(t, "sleep 30")
+	if result := tools.call(t, "kill", running); result.IsError {
+		t.Fatalf("kill = %+v", result)
+	}
+	ended, _ := tools.start(t, "exit 4")
+	tools.waitForEnd(t, ended)
+	if result := tools.call(t, "kill", ended); result.Content != "job 2 already ended: exited(4)" {
+		t.Fatalf("kill of an ended job = %+v", result)
+	}
+	signaled, _ := tools.start(t, "echo bye; kill -TERM $$")
+	tools.waitForEnd(t, signaled)
+	want := []string{`background job 3 (echo bye; kill -TERM $$) was killed (signal: terminated); last output: "bye"`}
+	if got := tools.jobs.Notices(); !slices.Equal(got, want) {
+		t.Fatalf("notices = %q, want %q", got, want)
+	}
+}
+
+func TestJobNoticesBoundTheOutput(t *testing.T) {
+	tools := newJobTools(t)
+	long, _ := tools.start(t, `printf 'first\n%0500d\n' 0`)
+	tools.waitForEnd(t, long)
+	// 1000 two-byte runes are more than the kept tail, so the tail starts
+	// inside a rune.
+	wide, _ := tools.start(t, `s=$(printf '%1000s' ''); printf '%s\n' "${s// /é}"`)
+	tools.waitForEnd(t, wide)
+	notices := tools.jobs.Notices()
+	want := []string{
+		`last output: "...` + strings.Repeat("0", noticeRunes) + `"`,
+		`last output: "...` + strings.Repeat("é", noticeRunes) + `"`,
+	}
+	if len(notices) != len(want) {
+		t.Fatalf("notices = %q", notices)
+	}
+	for index, notice := range notices {
+		if !strings.HasSuffix(notice, want[index]) || !utf8.ValidString(notice) {
+			t.Errorf("notice %d = %q, want suffix %q", index, notice, want[index])
+		}
+	}
+}
+
+func TestJobNoticesUnderConcurrentEnds(t *testing.T) {
+	tools := newJobTools(t)
+	const count = 6
+	for range count {
+		tools.start(t, "exit 1")
+	}
+	var mutex sync.Mutex
+	seen := make(map[string]int)
+	var group sync.WaitGroup
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+				notices := tools.jobs.Notices()
+				mutex.Lock()
+				for _, notice := range notices {
+					seen[notice]++
+				}
+				complete := len(seen) == count
+				mutex.Unlock()
+				if complete {
+					return
+				}
+			}
+		}()
+	}
+	group.Wait()
+	for id := 1; id <= count; id++ {
+		notice := fmt.Sprintf("background job %d (exit 1) exited with code 1; no output", id)
+		if seen[notice] != 1 {
+			t.Errorf("notice %q came %d times, want once", notice, seen[notice])
+		}
+	}
+	if len(seen) != count {
+		t.Errorf("notices = %q", seen)
 	}
 }

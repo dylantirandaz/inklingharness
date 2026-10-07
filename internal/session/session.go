@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dylantirandaz/inklingharness/internal/anthropic"
 )
@@ -54,8 +56,15 @@ const (
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
+// MaxTitleRunes is the maximum number of characters in a session title.
+const MaxTitleRunes = 80
+
 type Session struct {
-	ID        string
+	ID string
+	// Title is a name that the user gives the session. The empty title means
+	// that the session has no title. Save rejects a title that ValidTitle
+	// rejects.
+	Title     string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	WorkDir   string
@@ -67,6 +76,7 @@ type Session struct {
 
 type Summary struct {
 	ID           string
+	Title        string
 	UpdatedAt    time.Time
 	WorkDir      string
 	Model        string
@@ -111,6 +121,10 @@ type recordHead struct {
 	Model     string          `json:"model"`
 	Effort    string          `json:"effort"`
 	Usage     anthropic.Usage `json:"usage"`
+	// Title is absent from logs of earlier builds and from records of
+	// sessions without a title. Earlier builds of this log format ignore the
+	// field, so they can read the log, but their next save drops the title.
+	Title string `json:"title,omitempty"`
 }
 
 type recordBody struct {
@@ -123,6 +137,7 @@ type recordBody struct {
 type indexFile struct {
 	Version      int       `json:"version"`
 	ID           string    `json:"id"`
+	Title        string    `json:"title,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	WorkDir      string    `json:"work_dir"`
@@ -132,7 +147,7 @@ type indexFile struct {
 }
 
 // legacyFile is the session format of earlier releases: one JSON object that
-// each save replaced.
+// each save replaced. It has no title.
 type legacyFile struct {
 	ID        string                     `json:"id"`
 	CreatedAt time.Time                  `json:"created_at"`
@@ -175,15 +190,23 @@ func New(workDir, model, effort string) (Session, error) {
 	if err != nil {
 		return Session{}, fmt.Errorf("session: work directory: %w", err)
 	}
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
-		return Session{}, fmt.Errorf("session: generate ID: %w", err)
+	id, err := newID()
+	if err != nil {
+		return Session{}, err
 	}
 	now := time.Now().UTC()
 	return Session{
-		ID: hex.EncodeToString(id[:]), CreatedAt: now, UpdatedAt: now,
+		ID: id, CreatedAt: now, UpdatedAt: now,
 		WorkDir: absolute, Model: model, Effort: effort,
 	}, nil
+}
+
+func newID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", fmt.Errorf("session: generate ID: %w", err)
+	}
+	return hex.EncodeToString(id[:]), nil
 }
 
 func validID(id string) bool {
@@ -196,6 +219,30 @@ func validID(id string) bool {
 		}
 	}
 	return true
+}
+
+// ValidTitle returns an error unless title is a valid session title: one line
+// without control characters, without space at the start or the end, and with
+// at most MaxTitleRunes characters. The empty title is valid. Callers trim
+// the text that the user types before they check it.
+func ValidTitle(title string) error {
+	if !utf8.ValidString(title) {
+		return errors.New("title is not valid UTF-8")
+	}
+	if count := utf8.RuneCountInString(title); count > MaxTitleRunes {
+		return fmt.Errorf("title has %d characters, more than the limit of %d", count, MaxTitleRunes)
+	}
+	for _, char := range title {
+		// Cc includes the line feed and the carriage return. Zl and Zp are
+		// the Unicode line and paragraph separators.
+		if unicode.In(char, unicode.Cc, unicode.Zl, unicode.Zp) {
+			return errors.New("title must be one line without control characters")
+		}
+	}
+	if strings.TrimSpace(title) != title {
+		return errors.New("title has space at the start or the end")
+	}
+	return nil
 }
 
 // base returns the path of session id in the store without a file suffix.
@@ -224,15 +271,26 @@ func (s *Store) OutputDirectory(id string) (string, error) {
 }
 
 // Save writes only what changed since this Store last saved or loaded the same
-// session, usually as one appended record. It rewrites the whole log when this
-// Store does not know the log on disk, or when old records use too much space.
-// Save refreshes the stored UpdatedAt and does not modify value.
+// session, usually as one appended record. A change of only the title or the
+// usage is one small record. Save rewrites the whole log when this Store does
+// not know the log on disk, or when old records use too much space. Save
+// refreshes the stored UpdatedAt and does not modify value.
 func (s *Store) Save(value Session) error {
-	base, err := s.base(value.ID)
+	stored := value
+	stored.UpdatedAt = time.Now().UTC()
+	return s.save(stored)
+}
+
+// save writes stored with its UpdatedAt unchanged.
+func (s *Store) save(stored Session) error {
+	base, err := s.base(stored.ID)
 	if err != nil {
 		return err
 	}
-	for index, message := range value.Messages {
+	if err := ValidTitle(stored.Title); err != nil {
+		return fmt.Errorf("session: %w", err)
+	}
+	for index, message := range stored.Messages {
 		if len(message.Wire()) == 0 {
 			return fmt.Errorf("session: message %d is empty", index)
 		}
@@ -240,11 +298,9 @@ func (s *Store) Save(value Session) error {
 	if err := s.prepareRoot(); err != nil {
 		return err
 	}
-	stored := value
-	stored.UpdatedAt = time.Now().UTC()
 	// The clone keeps the saved history correct if the caller changes its
 	// slice in place later. The wire bytes stay shared.
-	stored.Messages = slices.Clone(value.Messages)
+	stored.Messages = slices.Clone(stored.Messages)
 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -260,6 +316,47 @@ func (s *Store) Save(value Session) error {
 		return err
 	}
 	return removeLegacy(s.root, base+legacySuffix)
+}
+
+// Fork saves a copy of session id with a new ID and returns the copy. The copy
+// has the work directory, model, effort, usage, and history of the source. Its
+// title names the source. Fork does not change the files of the source.
+func (s *Store) Fork(id string) (Session, error) {
+	source, err := s.Load(id)
+	if err != nil {
+		return Session{}, err
+	}
+	forkID, err := newID()
+	if err != nil {
+		return Session{}, err
+	}
+	now := time.Now().UTC()
+	// Load gives a history that only this call has, so the fork can keep it.
+	fork := Session{
+		ID: forkID, Title: forkTitle(source), CreatedAt: now, UpdatedAt: now,
+		WorkDir: source.WorkDir, Model: source.Model, Effort: source.Effort,
+		Messages: source.Messages, Usage: source.Usage,
+	}
+	if err := s.save(fork); err != nil {
+		return Session{}, err
+	}
+	return fork, nil
+}
+
+// forkTitle names the source of a fork by its title, or by the start of its ID
+// when it has no title. A name that makes the title too long is cut, and an
+// ellipsis shows the cut.
+func forkTitle(source Session) string {
+	name := source.Title
+	if name == "" {
+		name = source.ID[:8]
+	}
+	title := "fork of " + name
+	if utf8.RuneCountInString(title) <= MaxTitleRunes {
+		return title
+	}
+	cut := string([]rune(title)[:MaxTitleRunes-1])
+	return strings.TrimRightFunc(cut, unicode.IsSpace) + "…"
 }
 
 func (s *Store) prepareRoot() error {
@@ -360,7 +457,7 @@ func newRecord(value Session, keep int) (record, error) {
 		Version: formatVersion, Keep: keep,
 		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 		WorkDir: value.WorkDir, Model: value.Model, Effort: value.Effort,
-		Usage: value.Usage,
+		Usage: value.Usage, Title: value.Title,
 	})
 	if err != nil {
 		return record{}, fmt.Errorf("session: encode record: %w", err)
@@ -491,7 +588,7 @@ func writeAtomically(root, path string, write func(io.Writer) error) (fs.FileInf
 
 func writeIndex(root, path string, stored Session) error {
 	data, err := json.Marshal(indexFile{
-		Version: formatVersion, ID: stored.ID,
+		Version: formatVersion, ID: stored.ID, Title: stored.Title,
 		CreatedAt: stored.CreatedAt, UpdatedAt: stored.UpdatedAt,
 		WorkDir: stored.WorkDir, Model: stored.Model, Effort: stored.Effort,
 		MessageCount: len(stored.Messages),
@@ -592,7 +689,9 @@ func (s *Store) Load(id string) (Session, error) {
 // Export writes session id in the legacy single-file format, so a build that
 // predates the log format can open it. It returns the path of that file. The
 // next Save by this build replaces the export with the log again; Load uses
-// whichever copy changed last.
+// whichever copy changed last. The legacy format has no title, so the export
+// does not keep it. If an older build changes the export, the session loads
+// from the export without its title.
 func (s *Store) Export(id string) (string, error) {
 	value, err := s.Load(id)
 	if err != nil {
@@ -697,7 +796,8 @@ func loadLog(path, id string, info fs.FileInfo) (Session, logState, error) {
 		return Session{}, logState{}, fmt.Errorf("session: read %s: %w", name, err)
 	}
 	value := Session{
-		ID: id, CreatedAt: history.head.CreatedAt, UpdatedAt: history.head.UpdatedAt,
+		ID: id, Title: history.head.Title,
+		CreatedAt: history.head.CreatedAt, UpdatedAt: history.head.UpdatedAt,
 		WorkDir: history.head.WorkDir, Model: history.head.Model, Effort: history.head.Effort,
 		Messages: history.messages, Usage: history.head.Usage,
 	}
@@ -769,6 +869,9 @@ func replay(reader io.Reader, size int64) (replayed, error) {
 		}
 		if body.Version != formatVersion {
 			return replayed{}, fmt.Errorf("record at offset %d has unsupported version %d", result.valid, body.Version)
+		}
+		if err := ValidTitle(body.Title); err != nil {
+			return replayed{}, fmt.Errorf("record at offset %d: %w", result.valid, err)
 		}
 		if body.Keep < 0 || body.Keep > len(result.messages) {
 			return replayed{}, fmt.Errorf("record at offset %d keeps %d messages of %d", result.valid, body.Keep, len(result.messages))
@@ -947,8 +1050,11 @@ func readIndex(path, id string) (Summary, error) {
 	if index.ID != id {
 		return Summary{}, fmt.Errorf("session: stored ID %q does not match filename %q", index.ID, id)
 	}
+	if err := ValidTitle(index.Title); err != nil {
+		return Summary{}, fmt.Errorf("session: %s: %w", filepath.Base(path), err)
+	}
 	return Summary{
-		ID: index.ID, UpdatedAt: index.UpdatedAt, WorkDir: index.WorkDir,
+		ID: index.ID, Title: index.Title, UpdatedAt: index.UpdatedAt, WorkDir: index.WorkDir,
 		Model: index.Model, MessageCount: index.MessageCount,
 	}, nil
 }

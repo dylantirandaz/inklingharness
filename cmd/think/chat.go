@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,11 @@ const chatHelp = `Commands:
   /effort [LEVEL]   show or change effort; default restores the model default
   /compact          summarize older messages; keep the last message or tool pair
   /clear            start a new session; keep the old session on disk
+  /fork             continue in a copy of this session; keep the original
+  /title [TEXT]     show or set the session title
   /plan TASK        investigate with read-only tools and reply with a plan
+  /goal [CMD|off]   keep working until CMD passes (at most 5 rounds); off clears it
+  /context          show what fills the context window
   /undo             restore the files and conversation from before the last prompt
   /rewind [N]       list prompts, or restore the state from before prompt N
   /quit             save and exit
@@ -195,7 +200,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	flags.SetOutput(stderr)
 	o := bindOptions(flags)
 	flags.Var(&o.files, "file", "attach a text file to the first request; repeat for more files")
-	resume := flags.String("resume", "", "saved session ID, or last for this directory")
+	resume := flags.String("resume", "", "saved session ID, last for the newest in this directory, or pick to choose from a list")
 	if err := flags.Parse(args); err != nil {
 		return flagExit(err)
 	}
@@ -253,6 +258,12 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		current, err = session.New(projectContext.WorkDir, o.model, o.effort)
 	case "last":
 		current, err = store.Latest(projectContext.WorkDir)
+	case "pick":
+		var picked string
+		picked, err = pickSession(ctx, store, projectContext.WorkDir, stdin, stderr)
+		if err == nil {
+			current, err = store.Load(picked)
+		}
 	default:
 		current, err = store.Load(*resume)
 	}
@@ -291,12 +302,16 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		return 2
 	}
 	prewarm(ctx, client)
-	ext, err := loadExtensions(projectContext.WorkDir)
+	ext, err := loadExtensions(projectContext.WorkDir, o.diagnostics)
 	if err != nil {
 		fmt.Fprintf(stderr, "inkling: %v\n", err)
 		return 1
 	}
-	toolSet, jobs, err := sessionTools(store, projectContext.WorkDir, current.ID, ext)
+	// The screen does not exist yet; ask_user reaches it through answerer,
+	// which is set before the first prompt.
+	var answerer questionAsker
+	ask := func(ctx context.Context, asked question) (string, error) { return answerer(ctx, asked) }
+	toolSet, jobs, err := sessionTools(store, projectContext.WorkDir, current.ID, ext, ask)
 	if err != nil {
 		fmt.Fprintf(stderr, "inkling: %v\n", errors.Join(err, ext.close()))
 		return 1
@@ -342,6 +357,11 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		stderr = safeWriter{target: screen}
 	} else {
 		input = newLineInput(ctx, stdin)
+	}
+	if screen != nil {
+		answerer = screenAsker(screen, progressOutput, theme)
+	} else {
+		answerer = lineAsker(input, progressOutput)
 	}
 	signals := shipSignals{screen: screen, place: filepath.Base(projectContext.WorkDir)}
 	approval := &approvals{output: progressOutput, allowAll: o.approveAll, screen: screen, theme: theme, signals: signals}
@@ -445,10 +465,17 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	// checkpoints hold the state before each prompt of this process, oldest
 	// first, for /undo and /rewind. They are not saved with the session.
 	var checkpoints []checkpoint
+	// activeGoal is the check of /goal; queued is a prompt that a failed check
+	// sends next, without user input.
+	var activeGoal goal
+	var queued string
 	for {
 		var line string
 		var err error
-		if screen != nil {
+		goalTurn := queued != ""
+		if goalTurn {
+			line, queued = queued, ""
+		} else if screen != nil {
 			screen.SetContext(contextUse(o, current.Messages))
 			signals.ready()
 			var start func() *backgroundCompaction
@@ -601,7 +628,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				}
 				var nextJobs *tools.Jobs
 				if err == nil {
-					toolSet, nextJobs, err = sessionTools(store, projectContext.WorkDir, current.ID, ext)
+					toolSet, nextJobs, err = sessionTools(store, projectContext.WorkDir, current.ID, ext, ask)
 				}
 				if err != nil {
 					fmt.Fprintf(stderr, "inkling: new session: %v\n", err)
@@ -609,6 +636,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				}
 				jobs = nextJobs
 				checkpoints = nil
+				activeGoal = goal{}
 				approval.allowAll = o.approveAll
 				fmt.Fprintf(stderr, "New session %s; the old session is still saved.\n", current.ID)
 				saveChanges = true
@@ -662,6 +690,81 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				}
 				commandError = compactErr
 				saveChanges = true
+			case "/goal":
+				switch argument {
+				case "":
+					if activeGoal.active() {
+						fmt.Fprintf(stderr, "Goal: %s (round %d of %d)\n", activeGoal.command, activeGoal.rounds, maxGoalRounds)
+					} else {
+						fmt.Fprintln(stderr, "No goal. Use /goal COMMAND, for example /goal go test ./...")
+					}
+					continue
+				case "off":
+					activeGoal = goal{}
+					fmt.Fprintln(stderr, "Goal cleared.")
+					continue
+				}
+				activeGoal = goal{command: argument}
+				step, prompt, goalErr := activeGoal.next(ctx, projectContext.WorkDir, stderr, theme)
+				if goalErr != nil {
+					fmt.Fprintf(stderr, "inkling: %v\n", goalErr)
+					activeGoal = goal{}
+					continue
+				}
+				if step == goalContinue {
+					queued = prompt
+				}
+				continue
+			case "/context":
+				config, configErr := chatConfig(o, projectContext, ext)
+				if configErr == nil {
+					configErr = writeContext(stderr, config, toolSet, current.Messages, o.compactTokens)
+				}
+				if configErr != nil {
+					fmt.Fprintf(stderr, "inkling: %v\n", configErr)
+				}
+				continue
+			case "/title":
+				if argument == "" {
+					fmt.Fprintln(stderr, describeTitle(current.Title))
+					continue
+				}
+				if err := session.ValidTitle(argument); err != nil {
+					fmt.Fprintf(stderr, "inkling: title: %v\n", err)
+					continue
+				}
+				current.Title = argument
+				saveChanges = true
+			case "/fork":
+				if err := stopBackground(); err != nil {
+					fmt.Fprintf(stderr, "inkling: %v\n", err)
+					return 1
+				}
+				if err := store.Save(current); err != nil {
+					fmt.Fprintf(stderr, "inkling: save session: %v\n", err)
+					return 1
+				}
+				forked, forkErr := store.Fork(current.ID)
+				if forkErr != nil {
+					fmt.Fprintf(stderr, "inkling: fork: %v\n", forkErr)
+					continue
+				}
+				// The fork is a new session with its own output folder, so the
+				// jobs of the original end, as with /clear.
+				err = jobs.Close()
+				var nextJobs *tools.Jobs
+				if err == nil {
+					toolSet, nextJobs, err = sessionTools(store, projectContext.WorkDir, forked.ID, ext, ask)
+				}
+				if err != nil {
+					fmt.Fprintf(stderr, "inkling: fork: %v\n", err)
+					return 1
+				}
+				jobs = nextJobs
+				fmt.Fprintf(stderr, "Forked into %s (%s); the original %s stays saved.\n", forked.ID, presentation.Safe(forked.Title), current.ID)
+				current = forked
+				checkpoints = nil
+				activeGoal = goal{}
 			default:
 				fmt.Fprintln(stderr, "Unknown command. Use /help.")
 				continue
@@ -689,6 +792,9 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			continue
 		}
 		shown := line
+		if goalTurn {
+			shown = fmt.Sprintf("goal round %d of %d: %s", activeGoal.rounds, maxGoalRounds, activeGoal.command)
+		}
 		var policy turnPolicy
 		if isCustom {
 			line = custom.Expand(customArgument)
@@ -700,6 +806,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		pending := startSnapshot(ctx, projectContext.WorkDir)
 		policy.beforeChange = pending.settled
 		ext.configure(&config, toolSet, policy, approval.check)
+		config.Notices = jobs.Notices
 		printUser(displayOutput, shown, theme)
 		signals.working()
 		turnCtx, finish := control.begin(ctx)
@@ -773,6 +880,23 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			fmt.Fprintf(stderr, "inkling: %v\n", runErr)
 		}
 		signals.finished(time.Since(started), outcome.FinalText, runErr)
+		if activeGoal.active() {
+			switch {
+			case runErr != nil || ctx.Err() != nil:
+				// A failed or cancelled turn ends the goal; the user decides.
+				fmt.Fprintln(stderr, "Goal stopped. Use /goal COMMAND to start it again.")
+				activeGoal = goal{}
+			default:
+				step, prompt, goalErr := activeGoal.next(ctx, projectContext.WorkDir, progressOutput, theme)
+				switch {
+				case goalErr != nil:
+					fmt.Fprintf(stderr, "inkling: %v\n", goalErr)
+					activeGoal = goal{}
+				case step == goalContinue:
+					queued = prompt
+				}
+			}
+		}
 		// Compact while the user reads and types, so the next turn does not
 		// wait for it. Nothing changes history until the chat settles it.
 		if ctx.Err() == nil && agent.ShouldCompact(config, current.Messages, outcome.LastInputTokens) {
@@ -881,7 +1005,11 @@ func sessionsCommand(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	for _, saved := range sessions {
-		fmt.Fprintf(stdout, "%s  %s  %d messages  %s  %s\n", saved.ID, saved.UpdatedAt.Format(time.RFC3339), saved.MessageCount, saved.Model, saved.WorkDir)
+		title := ""
+		if saved.Title != "" {
+			title = "  " + strconv.Quote(saved.Title)
+		}
+		fmt.Fprintf(stdout, "%s  %s  %d messages  %s  %s%s\n", saved.ID, saved.UpdatedAt.Format(time.RFC3339), saved.MessageCount, saved.Model, saved.WorkDir, title)
 	}
 	if len(sessions) == 0 {
 		fmt.Fprintln(stdout, "No saved sessions.")

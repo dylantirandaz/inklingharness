@@ -35,9 +35,20 @@ type Config struct {
 	// be safe for concurrent calls, because read-only batches run in
 	// parallel.
 	Gate func(context.Context, anthropic.ToolUseBlock) (*Refusal, error)
-	// AfterTool sees the result of every tool that ran. An error stops the
-	// run, so a broken hook is never silent. A nil AfterTool does nothing.
-	AfterTool func(context.Context, anthropic.ToolUseBlock, tools.Result) error
+	// AfterTool sees the result of every tool that ran and returns text for
+	// the model, such as hook output or compiler diagnostics; the text goes
+	// after the result. An error stops the run, so a broken hook is never
+	// silent. A nil AfterTool does nothing.
+	AfterTool func(context.Context, anthropic.ToolUseBlock, tools.Result) (string, error)
+	// Notices returns news that arrived outside the conversation, such as a
+	// background job that ended. Each notice goes to the model once, with
+	// the next tool results or prompt. A nil Notices has none.
+	Notices func() []string
+	// TaskModel answers research tasks and CompactModel writes summaries.
+	// Empty means Model. A research task has its own context, so a smaller
+	// model costs no cache; a summary request with another model cannot read
+	// the cached prefix of Model.
+	TaskModel, CompactModel string
 }
 
 // Refusal is why a Gate stops one tool call.
@@ -96,7 +107,7 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 	if config.MaxTurns <= 0 || config.MaxTokens <= 0 || config.CompactTokens < 0 || strings.TrimSpace(prompt.Text) == "" {
 		return outcome, errors.New("agent: positive turn/token limits, a nonnegative compaction limit, and a prompt are required")
 	}
-	content := []anthropic.ContentBlock{anthropic.TextBlock{Text: prompt.Text}}
+	content := []anthropic.ContentBlock{anthropic.TextBlock{Text: withNotices(prompt.Text, config)}}
 	for _, image := range prompt.Images {
 		content = append(content, image)
 	}
@@ -108,7 +119,7 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 	if err := checkpoint(ctx, config, outcome); err != nil {
 		return outcome, err
 	}
-	definitions := requestTools(config, toolSet)
+	definitions := RequestTools(config, toolSet)
 	for turn := 1; turn <= config.MaxTurns; turn++ {
 		if ShouldCompact(config, outcome.Messages, outcome.LastInputTokens) {
 			compacted, err := Compact(ctx, client, config, toolSet, outcome.Messages, observer)
@@ -152,6 +163,9 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 			results, childUsage, err := runTools(requestContext, client, config, toolSet, calls, observer)
 			outcome.Usage = outcome.Usage.Add(childUsage)
 			runErr = err
+			if notices := withNotices("", config); notices != "" {
+				results = append(results, anthropic.TextBlock{Text: notices})
+			}
 			// History keeps a tool call only together with its results.
 			completed, err = appendMessage(completed, anthropic.Message{Role: anthropic.RoleUser, Content: results})
 			if err != nil {
@@ -193,9 +207,9 @@ func checkpoint(ctx context.Context, config Config, outcome *Outcome) (err error
 	return nil
 }
 
-// requestTools returns the tool definitions of every request for this
+// RequestTools returns the tool definitions of every request for this
 // configuration. Compaction sends the same list so the cached prefix stays valid.
-func requestTools(config Config, toolSet *tools.Set) []anthropic.ToolDefinition {
+func RequestTools(config Config, toolSet *tools.Set) []anthropic.ToolDefinition {
 	definitions := toolDefinitions(toolSet)
 	if config.EnableTasks {
 		definitions = append(definitions, taskDefinition())
@@ -391,7 +405,7 @@ func runTool(ctx context.Context, client *anthropic.Client, config Config, toolS
 	if config.EnableTasks && call.Name == "task" {
 		result, usage, err := runTask(ctx, client, config, toolSet, call.Input)
 		if err == nil {
-			err = afterTool(ctx, config, call, result)
+			result, err = afterTool(ctx, config, call, result)
 		}
 		return finish(result, usage, err)
 	}
@@ -399,9 +413,10 @@ func runTool(ctx context.Context, client *anthropic.Client, config Config, toolS
 	if !found {
 		return finish(tools.Result{Content: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}, anthropic.Usage{}, nil)
 	}
-	// todo_write changes only the task list, and bash_job only reads or stops
-	// jobs that an approved bash call started, so neither asks again.
-	if !tool.ReadOnly && call.Name != "todo_write" && call.Name != "bash_job" {
+	// These change only the agent's own state, so they need no approval:
+	// todo_write the task list, bash_job the jobs that an approved bash call
+	// started, remember the project memory file, and ask_user asks the user.
+	if !tool.ReadOnly && !slices.Contains([]string{"todo_write", "bash_job", "remember", "ask_user"}, call.Name) {
 		allowed := false
 		var err error
 		approval := latency.Begin(ctx, latency.Approval, call.Name)
@@ -427,17 +442,39 @@ func runTool(ctx context.Context, client *anthropic.Client, config Config, toolS
 	}
 	result, err := tool.Run(ctx, call.Input)
 	if err == nil {
-		err = afterTool(ctx, config, call, result)
+		result, err = afterTool(ctx, config, call, result)
 	}
 	return finish(result, anthropic.Usage{}, err)
 }
 
-func afterTool(ctx context.Context, config Config, call anthropic.ToolUseBlock, result tools.Result) error {
+// afterTool adds the text of config.AfterTool after the result.
+func afterTool(ctx context.Context, config Config, call anthropic.ToolUseBlock, result tools.Result) (tools.Result, error) {
 	if config.AfterTool == nil {
-		return nil
+		return result, nil
 	}
-	if err := config.AfterTool(ctx, call, result); err != nil {
-		return fmt.Errorf("after-tool hook for %s: %w", call.Name, err)
+	extra, err := config.AfterTool(ctx, call, result)
+	if err != nil {
+		return result, fmt.Errorf("after-tool hook for %s: %w", call.Name, err)
 	}
-	return nil
+	if extra != "" {
+		result.Content += "\n\n" + extra
+	}
+	return result, nil
+}
+
+// withNotices adds the pending notices after text. With no notices it
+// returns text unchanged.
+func withNotices(text string, config Config) string {
+	if config.Notices == nil {
+		return text
+	}
+	notices := config.Notices()
+	if len(notices) == 0 {
+		return text
+	}
+	block := "Notices since the last message:\n- " + strings.Join(notices, "\n- ")
+	if text == "" {
+		return block
+	}
+	return text + "\n\n" + block
 }

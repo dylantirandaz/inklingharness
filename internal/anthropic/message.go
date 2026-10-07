@@ -69,10 +69,10 @@ type ImageBlock struct {
 	Data      string
 }
 
-// imageEstimateBytes is the estimate size of one image. The API scales a large
+// ImageEstimateBytes is the estimate size of one image. The API scales a large
 // image down, so one image costs at most about 1,600 tokens. The base64 length
 // would overstate the cost many times and start compaction too early.
-const imageEstimateBytes = 1600 * 3
+const ImageEstimateBytes = 1600 * 3
 
 // OpaqueBlock holds a block kind that this client does not know. The raw JSON
 // goes back to the server unchanged, so a new server block kind does not break
@@ -202,7 +202,7 @@ func estimateBytes(m Message) (int, error) {
 		case ToolResultBlock:
 			size += len(typed.ToolUseID) + len(typed.Content)
 		case ImageBlock:
-			size += imageEstimateBytes
+			size += ImageEstimateBytes
 		case OpaqueBlock:
 			size += len(typed.Raw)
 		default:

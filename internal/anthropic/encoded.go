@@ -115,7 +115,7 @@ func (b *measuredBlock) UnmarshalJSON(raw []byte) error {
 		if fields.Source.err != nil {
 			return fmt.Errorf("image block: %w", fields.Source.err)
 		}
-		*b = imageEstimateBytes
+		*b = ImageEstimateBytes
 	}
 	return nil
 }

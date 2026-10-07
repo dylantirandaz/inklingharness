@@ -370,9 +370,14 @@ func TestLatestTieKeepsCompleteHistoryAndReportsCorruption(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(latest, expected) {
 		t.Fatalf("timestamp tie selected the wrong conversation: %+v, %v", latest, err)
 	}
-	for _, name := range []string{strings.Repeat("f", 32) + ".json", strings.Repeat("e", 32) + ".meta.json"} {
+	titled := strings.Repeat("d", 32)
+	for name, content := range map[string]string{
+		strings.Repeat("f", 32) + ".json":      "{",
+		strings.Repeat("e", 32) + ".meta.json": "{",
+		titled + ".meta.json":                  `{"version":2,"id":"` + titled + `","title":"first\nsecond"}`,
+	} {
 		path := filepath.Join(store.root, name)
-		if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.Latest(work); err == nil {
@@ -492,8 +497,10 @@ func TestTornFinalRecordIsIgnored(t *testing.T) {
 			store := NewStore(t.TempDir())
 			value := newTestSession(t, t.TempDir())
 			history := texts(t, "turn", 3, 1000)
+			value.Title = "before the crash"
 			saveMessages(t, store, value, history[:2])
 			complete := logSize(t, store.root, value.ID)
+			value.Title = "lost in the crash"
 			saveMessages(t, store, value, history)
 			path := filepath.Join(store.root, value.ID+".log")
 			data, err := os.ReadFile(path)
@@ -505,13 +512,14 @@ func TestTornFinalRecordIsIgnored(t *testing.T) {
 			}
 			resumed := NewStore(store.root)
 			loaded, err := resumed.Load(value.ID)
-			if err != nil || !sameHistory(loaded.Messages, history[:2]) {
-				t.Fatalf("torn record changed the history: %d messages, %v", len(loaded.Messages), err)
+			if err != nil || !sameHistory(loaded.Messages, history[:2]) || loaded.Title != "before the crash" {
+				t.Fatalf("torn record changed the session: %d messages, title %q, %v", len(loaded.Messages), loaded.Title, err)
 			}
 			next := append(loaded.Messages, text(t, "after crash"))
+			loaded.Title = "after the crash"
 			saveMessages(t, resumed, loaded, next)
-			if reloaded := loadFresh(t, store.root, value.ID); !sameHistory(reloaded.Messages, next) {
-				t.Fatalf("save after a torn record = %d messages", len(reloaded.Messages))
+			if reloaded := loadFresh(t, store.root, value.ID); !sameHistory(reloaded.Messages, next) || reloaded.Title != loaded.Title {
+				t.Fatalf("save after a torn record = %d messages, title %q", len(reloaded.Messages), reloaded.Title)
 			}
 			requireCompleteRecords(t, store.root, value.ID)
 		})
@@ -566,16 +574,19 @@ func TestCorruptRecordIsAnError(t *testing.T) {
 		damaged[offset] ^= 0xff
 		return damaged
 	}
-	invalidJSON := []byte("{")
-	frame := binary.LittleEndian.AppendUint32(nil, uint32(len(invalidJSON)))
-	frame = binary.LittleEndian.AppendUint32(frame, crc32.Checksum(invalidJSON, testCastagnoli))
+	withRecord := func(payload string) []byte {
+		data := binary.LittleEndian.AppendUint32(bytes.Clone(original), uint32(len(payload)))
+		data = binary.LittleEndian.AppendUint32(data, crc32.Checksum([]byte(payload), testCastagnoli))
+		return append(data, payload...)
+	}
 	cases := map[string][]byte{
-		"first record checksum":       flip(recordHeaderSize + 2),
-		"middle record checksum":      flip(firstEnd + recordHeaderSize + 2),
-		"valid checksum, bad JSON":    append(bytes.Clone(original), append(frame, invalidJSON...)...),
-		"empty log":                   {},
-		"only a partial first record": original[:firstEnd-1],
-		"zero bytes before data":      append(append(bytes.Clone(original), make([]byte, 16)...), 1),
+		"first record checksum":          flip(recordHeaderSize + 2),
+		"middle record checksum":         flip(firstEnd + recordHeaderSize + 2),
+		"valid checksum, bad JSON":       withRecord("{"),
+		"valid checksum, two-line title": withRecord(`{"version":2,"keep":3,"title":"first\nsecond","messages":[]}`),
+		"empty log":                      {},
+		"only a partial first record":    original[:firstEnd-1],
+		"zero bytes before data":         append(append(bytes.Clone(original), make([]byte, 16)...), 1),
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -638,7 +649,7 @@ func TestLegacySessionMigratesOnSave(t *testing.T) {
 	listOne := func(messageCount int) {
 		t.Helper()
 		all, err := store.List("")
-		if err != nil || len(all) != 1 || all[0].ID != value.ID || all[0].MessageCount != messageCount || all[0].WorkDir != value.WorkDir {
+		if err != nil || len(all) != 1 || all[0].ID != value.ID || all[0].MessageCount != messageCount || all[0].WorkDir != value.WorkDir || all[0].Title != "" {
 			t.Fatalf("List = %+v, %v", all, err)
 		}
 	}
@@ -675,7 +686,7 @@ func TestLegacySessionMigratesOnSave(t *testing.T) {
 			t.Fatalf("message %d changed in migration:\n%s\n%s", index, legacy.Messages[index].Wire(), migrated.Messages[index].Wire())
 		}
 	}
-	if len(migrated.Messages) != len(legacy.Messages) || migrated.Usage != value.Usage || migrated.WorkDir != value.WorkDir {
+	if len(migrated.Messages) != len(legacy.Messages) || migrated.Usage != value.Usage || migrated.WorkDir != value.WorkDir || migrated.Title != "" {
 		t.Fatalf("migrated session = %+v", migrated)
 	}
 
@@ -699,6 +710,7 @@ func TestExportRoundTripsThroughAnOlderBuild(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)
 	value := newTestSession(t, t.TempDir())
+	value.Title = "exported session"
 	history := allBlockKinds(t)
 	saveMessages(t, store, value, history)
 	path, err := store.Export(value.ID)
@@ -719,12 +731,16 @@ func TestExportRoundTripsThroughAnOlderBuild(t *testing.T) {
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
 		t.Fatalf("export mode = %v, %v", info, err)
 	}
+	// The legacy format has no title, so the legacy loader gives none.
+	if exported, err := loadLegacy(path, value.ID); err != nil || !sameHistory(exported.Messages, history) || exported.Title != "" {
+		t.Fatalf("legacy loader read the export as %+v, %v", exported, err)
+	}
 	all, err := store.List("")
-	if err != nil || len(all) != 1 || all[0].MessageCount != len(history) {
+	if err != nil || len(all) != 1 || all[0].MessageCount != len(history) || all[0].Title != value.Title {
 		t.Fatalf("List with export = %+v, %v", all, err)
 	}
-	if unchanged := loadFresh(t, root, value.ID); !sameHistory(unchanged.Messages, history) {
-		t.Fatal("an unchanged export replaced the log history")
+	if unchanged := loadFresh(t, root, value.ID); !sameHistory(unchanged.Messages, history) || unchanged.Title != value.Title {
+		t.Fatal("an unchanged export replaced the log history or title")
 	}
 
 	// The older build adds a turn and saves its own format.
@@ -733,12 +749,12 @@ func TestExportRoundTripsThroughAnOlderBuild(t *testing.T) {
 	changed.UpdatedAt = changed.UpdatedAt.Add(time.Minute)
 	writeLegacy(t, root, changed)
 	all, err = store.List("")
-	if err != nil || len(all) != 1 || all[0].MessageCount != len(history)+1 {
+	if err != nil || len(all) != 1 || all[0].MessageCount != len(history)+1 || all[0].Title != "" {
 		t.Fatalf("List after older-build change = %+v, %v", all, err)
 	}
 	loaded, err := store.Load(value.ID)
-	if err != nil || !sameHistory(loaded.Messages, changed.Messages) {
-		t.Fatalf("Load lost the older-build turn: %d messages, %v", len(loaded.Messages), err)
+	if err != nil || !sameHistory(loaded.Messages, changed.Messages) || loaded.Title != "" {
+		t.Fatalf("Load lost the older-build turn or kept the title: %d messages, title %q, %v", len(loaded.Messages), loaded.Title, err)
 	}
 	if err := store.Save(loaded); err != nil {
 		t.Fatal(err)
@@ -831,5 +847,197 @@ func TestConcurrentUseKeepsOneCompleteHistory(t *testing.T) {
 	all, err := store.List("")
 	if err != nil || len(all) != 1 || all[0].MessageCount != len(loaded.Messages) {
 		t.Fatalf("index disagrees with log: %+v, %v", all, err)
+	}
+}
+
+func TestValidTitleAndSave(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+		valid bool
+	}{
+		{"empty", "", true},
+		{"plain", "Fix the parser", true},
+		{"JSON and HTML characters", `<b> & "quoted" \ path`, true},
+		{"emoji with joiners", "👨‍👩‍👧 family", true},
+		{"limit in ASCII", strings.Repeat("x", MaxTitleRunes), true},
+		{"limit in multibyte characters", strings.Repeat("é", MaxTitleRunes), true},
+		{"one character over the limit", strings.Repeat("x", MaxTitleRunes+1), false},
+		{"line feed", "first\nsecond", false},
+		{"carriage return", "first\rsecond", false},
+		{"line separator", "first\u2028second", false},
+		{"next line control", "first\u0085second", false},
+		{"tab", "first\tsecond", false},
+		{"terminal escape", "\x1b[31mred", false},
+		{"leading space", " title", false},
+		{"trailing space", "title ", false},
+		{"invalid UTF-8", "bad \xff byte", false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidTitle(test.title); (err == nil) != test.valid {
+				t.Fatalf("ValidTitle(%q) = %v, want valid %v", test.title, err, test.valid)
+			}
+			store := NewStore(filepath.Join(t.TempDir(), "sessions"))
+			value := newTestSession(t, t.TempDir())
+			value.Title = test.title
+			value.Messages = texts(t, "turn", 1, 10)
+			err := store.Save(value)
+			if !test.valid {
+				if err == nil {
+					t.Fatal("Save accepted an invalid title")
+				}
+				if _, statErr := os.Lstat(store.root); !errors.Is(statErr, fs.ErrNotExist) {
+					t.Fatalf("Save with an invalid title created the store: %v", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded := loadFresh(t, store.root, value.ID); loaded.Title != test.title {
+				t.Fatalf("loaded title = %q, want %q", loaded.Title, test.title)
+			}
+			if all, err := store.List(""); err != nil || len(all) != 1 || all[0].Title != test.title {
+				t.Fatalf("List = %+v, %v", all, err)
+			}
+		})
+	}
+}
+
+func TestTitleChangeAppendsOneSmallRecord(t *testing.T) {
+	store := NewStore(t.TempDir())
+	value := newTestSession(t, t.TempDir())
+	history := texts(t, "turn", 20, 4096)
+	saveMessages(t, store, value, history)
+	for _, title := range []string{"first title", "second title", "", "kept in the index"} {
+		before := readLog(t, store.root, value.ID)
+		value.Title = title
+		saveMessages(t, store, value, history)
+		after := readLog(t, store.root, value.ID)
+		if growth := len(after) - len(before); !bytes.HasPrefix(after, before) || growth > 1024 {
+			t.Fatalf("title %q rewrote the log or grew it by %d bytes", title, growth)
+		}
+		if loaded := loadFresh(t, store.root, value.ID); loaded.Title != title || !sameHistory(loaded.Messages, history) {
+			t.Fatalf("Load after title %q = title %q, %d messages", title, loaded.Title, len(loaded.Messages))
+		}
+		if all, err := store.List(value.WorkDir); err != nil || len(all) != 1 || all[0].Title != title {
+			t.Fatalf("List after title %q = %+v, %v", title, all, err)
+		}
+		if latest, err := store.Latest(value.WorkDir); err != nil || latest.Title != title {
+			t.Fatalf("Latest after title %q = %q, %v", title, latest.Title, err)
+		}
+	}
+	// List reads the title from the index, not from the log.
+	if err := os.Remove(filepath.Join(store.root, value.ID+".log")); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := store.List(""); err != nil || len(all) != 1 || all[0].Title != "kept in the index" {
+		t.Fatalf("List without the log = %+v, %v", all, err)
+	}
+}
+
+func TestForkCopiesHistoryAndLeavesSourceUnchanged(t *testing.T) {
+	store := NewStore(t.TempDir())
+	source := newTestSession(t, t.TempDir())
+	source.Title = "parser fix"
+	source.Usage = anthropic.Usage{InputTokens: 5, OutputTokens: 6, CacheReadInputTokens: 7}
+	history := append(allBlockKinds(t), texts(t, "turn", 3, 100)...)
+	saveMessages(t, store, source, history)
+	sourceFiles := func() map[string][]byte {
+		t.Helper()
+		files := make(map[string][]byte)
+		for _, name := range []string{source.ID + ".log", source.ID + ".meta.json"} {
+			data, err := os.ReadFile(filepath.Join(store.root, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			files[name] = data
+		}
+		return files
+	}
+	before := sourceFiles()
+	start := time.Now()
+	fork, err := store.Fork(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validID(fork.ID) || fork.ID == source.ID || fork.Title != "fork of parser fix" || fork.WorkDir != source.WorkDir ||
+		fork.Model != source.Model || fork.Effort != source.Effort || fork.Usage != source.Usage || fork.UpdatedAt.Before(start) {
+		t.Fatalf("fork = %+v", fork)
+	}
+	if len(fork.Messages) != len(history) {
+		t.Fatalf("fork has %d messages, want %d", len(fork.Messages), len(history))
+	}
+	for index := range history {
+		if !bytes.Equal(fork.Messages[index].Wire(), history[index].Wire()) {
+			t.Fatalf("fork message %d changed:\n%s\n%s", index, history[index].Wire(), fork.Messages[index].Wire())
+		}
+	}
+	if loaded := loadFresh(t, store.root, fork.ID); !reflect.DeepEqual(loaded, fork) {
+		t.Fatalf("stored fork differs from the returned fork:\nwant %#v\ngot  %#v", fork, loaded)
+	}
+	// A change to the fork must not reach the source.
+	fork.Title = "experiment"
+	saveMessages(t, store, fork, append(slices.Clone(fork.Messages), text(t, "only in the fork")))
+	if after := sourceFiles(); !reflect.DeepEqual(before, after) {
+		t.Fatal("Fork or a save of the fork changed the files of the source")
+	}
+	if loaded := loadFresh(t, store.root, source.ID); loaded.Title != source.Title || !sameHistory(loaded.Messages, history) || loaded.Usage != source.Usage {
+		t.Fatalf("source after fork = %+v", loaded)
+	}
+	if all, err := store.List(""); err != nil || len(all) != 2 {
+		t.Fatalf("List after fork = %+v, %v", all, err)
+	}
+}
+
+func TestForkTitleNamesSourceWithinLimit(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+		// want is the fork title. "<id>" stands for the start of the source ID.
+		want string
+	}{
+		{"no title uses the ID", "", "fork of <id>"},
+		{"short title", "parser fix", "fork of parser fix"},
+		{"exactly at the limit", strings.Repeat("x", 72), "fork of " + strings.Repeat("x", 72)},
+		{"one over the limit", strings.Repeat("x", 73), "fork of " + strings.Repeat("x", 71) + "…"},
+		{"cut after a space", strings.Repeat("a", 70) + " " + strings.Repeat("b", 9), "fork of " + strings.Repeat("a", 70) + "…"},
+		{"multibyte characters", strings.Repeat("é", MaxTitleRunes), "fork of " + strings.Repeat("é", 71) + "…"},
+		{"fork of a fork", "fork of " + strings.Repeat("y", 72), "fork of fork of " + strings.Repeat("y", 63) + "…"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewStore(t.TempDir())
+			source := newTestSession(t, t.TempDir())
+			source.Title = test.title
+			saveMessages(t, store, source, texts(t, "turn", 1, 10))
+			fork, err := store.Fork(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := strings.ReplaceAll(test.want, "<id>", source.ID[:8])
+			if fork.Title != want || ValidTitle(fork.Title) != nil {
+				t.Fatalf("fork title = %q, want %q", fork.Title, want)
+			}
+			if loaded := loadFresh(t, store.root, fork.ID); loaded.Title != want {
+				t.Fatalf("stored fork title = %q, want %q", loaded.Title, want)
+			}
+		})
+	}
+}
+
+func TestForkOfMissingOrInvalidSessionFails(t *testing.T) {
+	store := NewStore(t.TempDir())
+	saved := newTestSession(t, t.TempDir())
+	saveMessages(t, store, saved, texts(t, "turn", 1, 10))
+	if _, err := store.Fork(newTestSession(t, t.TempDir()).ID); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Fork of a missing session error = %v", err)
+	}
+	if _, err := store.Fork("../" + saved.ID); err == nil {
+		t.Fatal("Fork accepted an invalid ID")
+	}
+	if entries, err := os.ReadDir(store.root); err != nil || len(entries) != 2 {
+		t.Fatalf("failed forks changed the store: %v, %v", entries, err)
 	}
 }

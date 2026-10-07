@@ -99,17 +99,21 @@ func (h Hooks) beforeTool(ctx context.Context, workDir string, event ToolEvent, 
 	return Decision{}, nil
 }
 
-// RunAfterTool runs the matching after_tool hooks in order. A non-zero exit or
-// a timeout is an error. event.Result must not be nil.
-func (h Hooks) RunAfterTool(ctx context.Context, workDir string, event ToolEvent) error {
+// RunAfterTool runs the matching after_tool hooks in order and returns their
+// output for the model: the trimmed stdout of each hook, joined by newlines,
+// so a hook that runs a formatter or a linter can report problems. Empty
+// outputs are skipped. A non-zero exit or a timeout is an error.
+// event.Result must not be nil.
+func (h Hooks) RunAfterTool(ctx context.Context, workDir string, event ToolEvent) (string, error) {
 	return h.afterTool(ctx, workDir, event, hookTimeout)
 }
 
-func (h Hooks) afterTool(ctx context.Context, workDir string, event ToolEvent, timeout time.Duration) error {
+func (h Hooks) afterTool(ctx context.Context, workDir string, event ToolEvent, timeout time.Duration) (string, error) {
 	if event.Result == nil {
 		panic("extend: RunAfterTool needs the tool result")
 	}
 	var payload []byte
+	var outputs []string
 	for _, hook := range h.AfterTool {
 		if !hook.matches(event.Tool) {
 			continue
@@ -117,20 +121,24 @@ func (h Hooks) afterTool(ctx context.Context, workDir string, event ToolEvent, t
 		if payload == nil {
 			encoded, err := encodeToolPayload("after_tool", event, &resultPayload{Content: event.Result.Content, IsError: event.Result.IsError})
 			if err != nil {
-				return err
+				return "", err
 			}
 			payload = encoded
 		}
+		stdout := &cappedBuffer{limit: hookOutputLimit}
 		stderr := &cappedBuffer{limit: hookStderrLimit}
-		status, err := runShell(ctx, workDir, hook.Command, payload, nil, stderr, timeout)
+		status, err := runShell(ctx, workDir, hook.Command, payload, stdout, stderr, timeout)
 		if err != nil {
-			return fmt.Errorf("extend: after_tool hook %q: %w", hook.Command, err)
+			return "", fmt.Errorf("extend: after_tool hook %q: %w", hook.Command, err)
 		}
 		if status.timedOut || status.code != 0 {
-			return hookFailure("after_tool", hook.Command, status, timeout, stderr)
+			return "", hookFailure("after_tool", hook.Command, status, timeout, stderr)
+		}
+		if output := strings.TrimSpace(stdout.String()); output != "" {
+			outputs = append(outputs, output)
 		}
 	}
-	return nil
+	return strings.Join(outputs, "\n"), nil
 }
 
 // RunPrompt runs every prompt hook in order and returns extra context for the

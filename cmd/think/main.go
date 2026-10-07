@@ -22,6 +22,7 @@ import (
 	"github.com/dylantirandaz/inklingharness/internal/credentials"
 	"github.com/dylantirandaz/inklingharness/internal/eval"
 	"github.com/dylantirandaz/inklingharness/internal/latency"
+	"github.com/dylantirandaz/inklingharness/internal/lsp"
 	"github.com/dylantirandaz/inklingharness/internal/openrouter"
 	"github.com/dylantirandaz/inklingharness/internal/presentation"
 	"github.com/dylantirandaz/inklingharness/internal/record"
@@ -38,6 +39,7 @@ const usageText = `usage:
   think login [flags]              check and store an OpenRouter API key
   think run [flags] <prompt...>    run one task in the current directory; -json for events, -plan to only plan
   think rpc [flags]                serve one conversation to an editor over stdin and stdout (JSON lines)
+  think acp [flags]                serve editors that speak the Agent Client Protocol, such as Zed
   think eval -yes [flags] <file>   run a JSONL task set with tool approval
   think timings <file>             summarize stage timing JSONL records
 
@@ -75,6 +77,8 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return runCommand(ctx, args[1:], stdin, stdout, stderr)
 	case "rpc":
 		return rpcCommand(ctx, args[1:], stdin, stdout, stderr)
+	case "acp":
+		return acpCommand(ctx, args[1:], stdin, stdout, stderr)
 	case "eval":
 		return evalCommand(ctx, args[1:], stdout, stderr)
 	case "timings":
@@ -112,6 +116,9 @@ type options struct {
 	timings       string
 	cpuProfile    string
 	runtimeTrace  string
+	taskModel     string
+	compactModel  string
+	diagnostics   bool
 }
 
 func bindOptions(flags *flag.FlagSet) *options {
@@ -134,6 +141,9 @@ func bindOptions(flags *flag.FlagSet) *options {
 	flags.StringVar(&o.timings, "timings", "", "append private stage timing records to this JSONL file")
 	flags.StringVar(&o.cpuProfile, "cpu-profile", "", "write a CPU profile to a new private file")
 	flags.StringVar(&o.runtimeTrace, "runtime-trace", "", "write a Go runtime trace to a new private file")
+	flags.StringVar(&o.taskModel, "task-model", "", "model for read-only research tasks; empty uses -model")
+	flags.StringVar(&o.compactModel, "compact-model", "", "model that writes context summaries; empty uses -model, which can reuse the cached prefix")
+	flags.BoolVar(&o.diagnostics, "diagnostics", true, "report language-server errors after each file change, when a server for the language is installed")
 	return &o
 }
 
@@ -141,7 +151,8 @@ func (o *options) agentConfig() (agent.Config, error) {
 	if o.maxTokens <= 0 || o.maxTurns <= 0 || o.compactTokens < 0 || strings.TrimSpace(o.model) == "" {
 		return agent.Config{}, errors.New("model, positive token/turn limits, and nonnegative compact-tokens are required")
 	}
-	config := agent.Config{Model: o.model, MaxTokens: o.maxTokens, MaxTurns: o.maxTurns, System: agent.CodingInstructions, CompactTokens: o.compactTokens, EnableTasks: o.enableTasks}
+	config := agent.Config{Model: o.model, MaxTokens: o.maxTokens, MaxTurns: o.maxTurns, System: agent.CodingInstructions, CompactTokens: o.compactTokens, EnableTasks: o.enableTasks,
+		TaskModel: strings.TrimSpace(o.taskModel), CompactModel: strings.TrimSpace(o.compactModel)}
 	if o.systemFile != "" {
 		system, err := os.ReadFile(o.systemFile)
 		if err != nil {
@@ -233,7 +244,8 @@ func prewarm(ctx context.Context, client *anthropic.Client) {
 // sessionTools keeps large command outputs in the output directory of the
 // session, under the state directory. The caller must close the jobs when
 // the session ends, so that no background command outlives the session.
-func sessionTools(store *session.Store, workDir, sessionID string, ext *extensions) (*tools.Set, *tools.Jobs, error) {
+// ask is nil when no user can answer questions.
+func sessionTools(store *session.Store, workDir, sessionID string, ext *extensions, ask questionAsker) (*tools.Set, *tools.Jobs, error) {
 	outputDirectory, err := store.OutputDirectory(sessionID)
 	if err != nil {
 		return nil, nil, err
@@ -243,7 +255,7 @@ func sessionTools(store *session.Store, workDir, sessionID string, ext *extensio
 	if err != nil {
 		return nil, nil, errors.Join(err, jobs.Close())
 	}
-	toolSet, err := ext.toolSet(standard)
+	toolSet, err := ext.toolSet(standard, ask)
 	if err != nil {
 		return nil, nil, errors.Join(err, jobs.Close())
 	}
@@ -362,6 +374,7 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 	flags.Var(&o.files, "file", "attach a text or image file to this request; repeat for more files")
 	jsonEvents := flags.Bool("json", false, "write events as JSON lines on stdout instead of text")
 	readOnly := flags.Bool("plan", false, "investigate with read-only tools and reply with a plan; change nothing")
+	goalCommand := flags.String("goal", "", "after the task, run this bash command; while it fails, continue (at most 5 rounds); exit 1 if it never passes")
 	if err := flags.Parse(args); err != nil {
 		return flagExit(err)
 	}
@@ -409,7 +422,7 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 	}
 	approval := &approvals{input: input, output: stderr, allowAll: o.approveAll}
 	config := work.config
-	work.ext.configure(&config, work.toolSet, turnPolicy{readOnly: *readOnly}, approval.check)
+	work.configure(&config, turnPolicy{readOnly: *readOnly}, approval.check)
 	ctx, timing := timedContext(ctx, o)
 	preparation := latency.Begin(ctx, latency.Preparation, "attachments")
 	prepared, request, err := work.prompt(ctx, prompt, o.files)
@@ -422,7 +435,7 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 	printPrivacyNotice(stderr, o.model)
 	if *jsonEvents {
 		events := newJSONObserver(stdout)
-		outcome, runErr := agent.Run(ctx, work.client, config, work.toolSet, nil, request, events)
+		outcome, runErr := runWithGoal(ctx, work, config, request, events, *goalCommand, stderr)
 		runErr = finishTiming(timing, o.timings, runErr)
 		if runErr != nil {
 			events.writeError(runErr)
@@ -441,7 +454,7 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 	observer := newConsoleObserver(stdout, stderr, nil, false, presentation.Theme{}, o.showThinking, o.verbose)
 	started := time.Now()
 	observer.Begin()
-	outcome, err := agent.Run(ctx, work.client, config, work.toolSet, nil, request, observer)
+	outcome, err := runWithGoal(ctx, work, config, request, observer, *goalCommand, stderr)
 	observer.Finish()
 	err = finishTiming(timing, o.timings, err)
 	if o.verbose {
@@ -452,6 +465,43 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 		return 1
 	}
 	return 0
+}
+
+var errGoalNotMet = errors.New("the goal check did not pass")
+
+// runWithGoal runs the task, then, when goalCommand is set, runs the check
+// and continues the same conversation while the check fails, for at most
+// maxGoalRounds more prompts. Goal progress goes to status.
+func runWithGoal(ctx context.Context, work *workspace, config agent.Config, request agent.Prompt, observer agent.Observer, goalCommand string, status io.Writer) (*agent.Outcome, error) {
+	outcome, err := agent.Run(ctx, work.client, config, work.toolSet, nil, request, observer)
+	if err != nil || goalCommand == "" {
+		return outcome, err
+	}
+	total := *outcome
+	current := goal{command: goalCommand}
+	for {
+		step, prompt, err := current.next(ctx, work.project.WorkDir, status, presentation.Theme{})
+		if err != nil {
+			return &total, err
+		}
+		switch step {
+		case goalMet:
+			return &total, nil
+		case goalGiveUp:
+			return &total, errGoalNotMet
+		case goalContinue:
+		}
+		next, err := agent.Run(ctx, work.client, config, work.toolSet, total.Messages, agent.Prompt{Text: prompt}, observer)
+		total.Messages = next.Messages
+		total.Turns += next.Turns
+		total.Usage = total.Usage.Add(next.Usage)
+		total.TurnLatencies = append(total.TurnLatencies, next.TurnLatencies...)
+		total.FinalText = next.FinalText
+		total.LastInputTokens = next.LastInputTokens
+		if err != nil {
+			return &total, err
+		}
+	}
 }
 
 func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) (exitCode int) {
@@ -518,7 +568,7 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) (
 			return 1
 		}
 		taskContext, timing := timedContext(ctx, o)
-		result := eval.RunTask(taskContext, client, config, task, taskFileDir, *keepWorkDirs)
+		result := eval.RunTask(taskContext, client, config, evalSetup(o), task, taskFileDir, *keepWorkDirs)
 		var taskError error
 		if !result.Pass {
 			taskError = errors.New("evaluation failed")
@@ -551,6 +601,34 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) (
 		return 0
 	}
 	return 1
+}
+
+// evalSetup gives each eval task the tools and turn policy of a real session,
+// so a feature that changes the model's success shows in the score. It reads
+// no user settings, hooks, or memory, so the score does not depend on the
+// files of this machine. No user answers ask_user.
+func evalSetup(o *options) eval.Setup {
+	return func(workDir, outputDirectory string, jobs *tools.Jobs, config *agent.Config) (*tools.Set, func() error, error) {
+		ext := &extensions{workDir: workDir}
+		if o.diagnostics {
+			languages, err := lsp.NewManager(lsp.DefaultServers(), workDir)
+			if err != nil {
+				return nil, nil, fmt.Errorf("language servers: %w", err)
+			}
+			ext.languages = languages
+		}
+		standard, err := tools.Standard(workDir, outputDirectory, jobs)
+		if err != nil {
+			return nil, nil, errors.Join(err, ext.close())
+		}
+		toolSet, err := ext.toolSet(standard, nil)
+		if err != nil {
+			return nil, nil, errors.Join(err, ext.close())
+		}
+		ext.configure(config, toolSet, turnPolicy{}, config.Approve)
+		config.Notices = jobs.Notices
+		return toolSet, ext.close, nil
+	}
 }
 
 func formatResult(result eval.Result) string {

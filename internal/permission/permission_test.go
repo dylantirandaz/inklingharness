@@ -206,11 +206,50 @@ func TestMCPRules(t *testing.T) {
 	})
 }
 
+func urlInput(address string) string {
+	encoded, err := json.Marshal(map[string]any{"url": address, "max_chars": 10})
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
+
+func TestWebFetchRules(t *testing.T) {
+	goDev := []string{"web_fetch(*.go.dev)"}
+	github := []string{"web_fetch(github.com)"}
+	runCheckCases(t, []checkCase{
+		{goDev, nil, "web_fetch", urlInput("https://pkg.go.dev/net/http"), Allow, "web_fetch(*.go.dev)"},
+		{goDev, nil, "web_fetch", urlInput("https://a.b.go.dev/"), Allow, "web_fetch(*.go.dev)"},
+		{goDev, nil, "web_fetch", urlInput("https://go.dev/"), Ask, ""},
+		{goDev, nil, "web_fetch", urlInput("https://evilgo.dev/"), Ask, ""},
+		{goDev, nil, "web_fetch", urlInput("https://pkg.go.dev.evil.com/"), Ask, ""},
+		{github, nil, "web_fetch", urlInput("https://github.com/x/y?q=1#f"), Allow, "web_fetch(github.com)"},
+		{github, nil, "web_fetch", urlInput("http://github.com"), Allow, "web_fetch(github.com)"},
+		// The port does not take part in the match.
+		{github, nil, "web_fetch", urlInput("https://github.com:8443/x"), Allow, "web_fetch(github.com)"},
+		// Hosts and patterns ignore letter case.
+		{github, nil, "web_fetch", urlInput("HTTPS://GitHub.COM/x"), Allow, "web_fetch(github.com)"},
+		{[]string{"web_fetch(GitHub.com)"}, nil, "web_fetch", urlInput("https://github.com/"), Allow, "web_fetch(GitHub.com)"},
+		// The user information is not the host.
+		{github, nil, "web_fetch", urlInput("https://github.com@evil.com/"), Ask, ""},
+		{github, nil, "web_fetch", urlInput("https://github.com.evil.com/"), Ask, ""},
+		{github, nil, "web_fetch", urlInput("https://api.github.com/"), Ask, ""},
+		// A trailing dot names the same host, so it cannot get past a deny rule.
+		{[]string{"web_fetch"}, github, "web_fetch", urlInput("https://github.com./"), Deny, "web_fetch(github.com)"},
+		{[]string{"web_fetch"}, github, "web_fetch", urlInput("https://GITHUB.com:443/"), Deny, "web_fetch(github.com)"},
+		{[]string{"web_fetch"}, github, "web_fetch", urlInput("https://gitlab.com/"), Allow, "web_fetch"},
+		{[]string{"web_fetch(127.0.0.1)"}, nil, "web_fetch", urlInput("http://127.0.0.1:8080/"), Allow, "web_fetch(127.0.0.1)"},
+		{[]string{"web_fetch(*)"}, nil, "web_fetch", urlInput("https://example.org/"), Allow, "web_fetch(*)"},
+		{github, []string{"web_fetch(*)"}, "web_fetch", urlInput("https://github.com/"), Deny, "web_fetch(*)"},
+	})
+}
+
 func TestInvalidInputAsks(t *testing.T) {
 	allowBash := []string{"bash"}
 	allowWrite := []string{"write_file"}
 	allowMCP := []string{"mcp_call"}
 	allowCustom := []string{"my_tool"}
+	allowWeb := []string{"web_fetch"}
 	runCheckCases(t, []checkCase{
 		{allowBash, nil, "bash", `{"command":`, Ask, ""},
 		{allowBash, nil, "bash", `{"command":5}`, Ask, ""},
@@ -231,6 +270,17 @@ func TestInvalidInputAsks(t *testing.T) {
 		{allowCustom, nil, "my_tool", `{`, Ask, ""},
 		{allowCustom, nil, "my_tool", `null`, Ask, ""},
 		{allowCustom, nil, "my_tool", `"text"`, Ask, ""},
+		{allowWeb, nil, "web_fetch", `{}`, Ask, ""},
+		{allowWeb, nil, "web_fetch", `{"url":5}`, Ask, ""},
+		{allowWeb, nil, "web_fetch", `not json`, Ask, ""},
+		{allowWeb, nil, "web_fetch", urlInput(""), Ask, ""},
+		{allowWeb, nil, "web_fetch", urlInput("ftp://github.com/x"), Ask, ""},
+		{allowWeb, nil, "web_fetch", urlInput("file:///etc/passwd"), Ask, ""},
+		{allowWeb, nil, "web_fetch", urlInput("github.com/x"), Ask, ""},
+		{allowWeb, nil, "web_fetch", urlInput("https:///x"), Ask, ""},
+		{allowWeb, nil, "web_fetch", urlInput("https://github.com/%zz"), Ask, ""},
+		{[]string{"web_fetch(*)"}, nil, "web_fetch", urlInput("ftp://github.com/x"), Ask, ""},
+		{allowWeb, []string{"web_fetch(github.com)"}, "web_fetch", `{"url":`, Ask, ""},
 	})
 }
 
@@ -262,6 +312,11 @@ func TestParseErrors(t *testing.T) {
 		{[]string{"mcp_call(github)"}, nil, `allow rule "mcp_call(github)"`, "server/tool"},
 		{[]string{"mcp_call(/x)"}, nil, `allow rule "mcp_call(/x)"`, "server/tool"},
 		{[]string{"mcp_call(github/)"}, nil, `allow rule "mcp_call(github/)"`, "server/tool"},
+		{[]string{"web_fetch()"}, nil, `allow rule "web_fetch()"`, "pattern is empty"},
+		{[]string{"web_fetch(https://github.com)"}, nil, `allow rule "web_fetch(https://github.com)"`, "without scheme, port or path"},
+		{[]string{"web_fetch(github.com:443)"}, nil, `allow rule "web_fetch(github.com:443)"`, "without scheme, port or path"},
+		{nil, []string{"web_fetch(github.com/x)"}, `deny rule "web_fetch(github.com/x)"`, "without scheme, port or path"},
+		{[]string{"web_fetch( github.com )"}, nil, `allow rule "web_fetch( github.com )"`, "without scheme, port or path"},
 	}
 	for _, test := range cases {
 		t.Run(test.bad, func(t *testing.T) {
@@ -290,6 +345,7 @@ func TestEmpty(t *testing.T) {
 		{nil, []string{"bash(rm *)"}, false},
 		{[]string{"edit_file(src/**)"}, nil, false},
 		{nil, []string{"mcp_call(*/*)"}, false},
+		{[]string{"web_fetch(*.go.dev)"}, nil, false},
 	}
 	for _, test := range cases {
 		rules, err := Parse(test.allow, test.deny)

@@ -140,7 +140,8 @@ func TestHookTimeoutIsAnErrorAndKillsProcessGroup(t *testing.T) {
 			return err
 		}},
 		{"after_tool", func(workDir string) error {
-			return Hooks{AfterTool: []Hook{{Command: slowHook}}}.afterTool(context.Background(), workDir, ToolEvent{Tool: "bash", Result: &tools.Result{}}, time.Second)
+			_, err := Hooks{AfterTool: []Hook{{Command: slowHook}}}.afterTool(context.Background(), workDir, ToolEvent{Tool: "bash", Result: &tools.Result{}}, time.Second)
+			return err
 		}},
 		{"prompt", func(workDir string) error {
 			_, err := Hooks{Prompt: []Hook{{Command: slowHook}}}.prompt(context.Background(), workDir, "hello", time.Second)
@@ -168,12 +169,18 @@ func TestHookTimeoutIsAnErrorAndKillsProcessGroup(t *testing.T) {
 func TestAfterToolHooks(t *testing.T) {
 	workDir := t.TempDir()
 	hooks := Hooks{AfterTool: []Hook{
-		{Command: "cat > event.json"},
-		{Command: "touch grep-ran", Tools: []string{"grep"}},
+		{Command: "cat > event.json; echo '  vet: sum.go:3: unused x  '"},
+		{Command: "true"},
+		{Command: "touch grep-ran; echo grep", Tools: []string{"grep"}},
+		{Command: "echo 'fmt: ok'; echo ignored >&2"},
 	}}
 	event := ToolEvent{Tool: "bash", Input: json.RawMessage(`{"command":"ls"}`), Result: &tools.Result{Content: "a\nb", IsError: true}}
-	if err := hooks.RunAfterTool(context.Background(), workDir, event); err != nil {
+	output, err := hooks.RunAfterTool(context.Background(), workDir, event)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if output != "vet: sum.go:3: unused x\nfmt: ok" {
+		t.Fatalf("output = %q", output)
 	}
 	var got map[string]any
 	if err := json.Unmarshal([]byte(readText(t, filepath.Join(workDir, "event.json"))), &got); err != nil {
@@ -193,7 +200,11 @@ func TestAfterToolHooks(t *testing.T) {
 	}
 
 	failing := Hooks{AfterTool: []Hook{{Command: "echo bad >&2; exit 2"}}}
-	wantErrorContaining(t, failing.RunAfterTool(context.Background(), workDir, event), "after_tool hook", "exit code 2", "bad")
+	output, err = failing.RunAfterTool(context.Background(), workDir, event)
+	wantErrorContaining(t, err, "after_tool hook", "exit code 2", "bad")
+	if output != "" {
+		t.Fatalf("output = %q after a failure, want empty", output)
+	}
 }
 
 func TestPromptHooksJoinOutput(t *testing.T) {
@@ -234,7 +245,7 @@ func TestNoHooksRunNothing(t *testing.T) {
 	if err != nil || decision != (Decision{}) {
 		t.Fatalf("RunBeforeTool = %+v, %v", decision, err)
 	}
-	if err := hooks.RunAfterTool(context.Background(), missing, ToolEvent{Tool: "bash", Result: &tools.Result{}}); err != nil {
+	if output, err := hooks.RunAfterTool(context.Background(), missing, ToolEvent{Tool: "bash", Result: &tools.Result{}}); err != nil || output != "" {
 		t.Fatal(err)
 	}
 	extra, err := hooks.RunPrompt(context.Background(), missing, "x")

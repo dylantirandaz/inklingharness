@@ -83,12 +83,19 @@ func LoadTasks(path string) ([]Task, error) {
 	return tasks, nil
 }
 
+// Setup builds the tools of one task and changes its configuration, as a
+// real session would. It gets the fresh working directory, the output
+// directory, and the background jobs, which RunTask closes. The returned
+// close function runs after the task check, before the directories are
+// removed.
+type Setup func(workDir, outputDirectory string, jobs *tools.Jobs, config *agent.Config) (*tools.Set, func() error, error)
+
 // RunTask runs one task in a fresh working directory and checks the result.
 // Bash output files go to a separate temporary directory, so the task check
 // sees only the files that the agent made and the model sees the same working
 // directory path as before output files existed. When keepWorkDir is true both
 // directories stay on disk and Result.WorkDir names the working directory.
-func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config, task Task, taskFileDir string, keepWorkDir bool) (result Result) {
+func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config, setup Setup, task Task, taskFileDir string, keepWorkDir bool) (result Result) {
 	result = Result{Task: task.Name}
 	workDir, err := os.MkdirTemp("", "inkling-eval-"+task.Name+"-")
 	if err != nil {
@@ -126,11 +133,19 @@ func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config,
 			result.Error += "stop background jobs: " + err.Error()
 		}
 	}()
-	toolSet, err := tools.Standard(workDir, outputDirectory, jobs)
+	toolSet, closeSetup, err := setup(workDir, outputDirectory, jobs, &config)
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
+	defer func() {
+		if err := closeSetup(); err != nil {
+			if result.Error != "" {
+				result.Error += "; "
+			}
+			result.Error += "close task setup: " + err.Error()
+		}
+	}()
 
 	projectContext, err := project.Inspect(ctx, workDir)
 	if err != nil {

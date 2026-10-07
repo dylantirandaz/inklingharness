@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -22,6 +24,11 @@ const (
 	jobStopDelay = 2 * time.Second
 	// listedCommandRunes bounds the command text on one line of a job list.
 	listedCommandRunes = 80
+	// noticeLines and noticeRunes bound the output in a notice about a job
+	// end. noticeTailBytes holds noticeRunes runes of up to 3 bytes each.
+	noticeLines     = 3
+	noticeRunes     = 300
+	noticeTailBytes = 1024
 )
 
 // Jobs owns the background commands of one session. Each job runs in its own
@@ -33,7 +40,10 @@ type Jobs struct {
 	mutex sync.Mutex
 	// all holds every job of the session in start order. The ID of a job is
 	// its index plus one, so an ID never names two jobs.
-	all    []*job
+	all []*job
+	// ended holds the jobs that ended since the last Notices call, in the
+	// order in which they ended.
+	ended  []*job
 	closed bool
 }
 
@@ -54,6 +64,9 @@ type job struct {
 	// without a lock.
 	done chan struct{}
 	end  jobEnd
+	// known is true when a bash_job kill result tells the model how the job
+	// ended, so Notices must not tell it again. Jobs.mutex guards it.
+	known bool
 }
 
 // jobEnd records how the shell of a job ended.
@@ -93,18 +106,70 @@ func (j *job) finished() (jobEnd, bool) {
 	}
 }
 
-// wait records how the shell ended. It runs in its own goroutine for the
-// life of the job.
-func (j *job) wait(command *exec.Cmd) {
+// sentence describes the end for a notice, e.g. "exited with code 1".
+func (end jobEnd) sentence() string {
+	var description string
+	switch {
+	case end.state == nil:
+		return "ended; the wait for its shell failed: " + oneLine(end.problem)
+	case end.state.Exited():
+		description = fmt.Sprintf("exited with code %d", end.state.ExitCode())
+	default:
+		description = "was killed (" + end.state.String() + ")"
+	}
+	if end.problem != nil {
+		description += " (" + oneLine(end.problem) + ")"
+	}
+	return description
+}
+
+// watch records how the shell of target ended and puts the job in the queue
+// for Notices before done closes, so a job that shows as ended is also in
+// the queue. It runs in its own goroutine for the life of the job.
+func (j *Jobs) watch(target *job, command *exec.Cmd) {
 	waitErr := command.Wait()
-	j.output.closeFile()
+	target.output.closeFile()
 	end := jobEnd{at: time.Now(), state: command.ProcessState}
 	var exitError *exec.ExitError
 	if waitErr != nil && !errors.As(waitErr, &exitError) {
 		end.problem = waitErr
 	}
-	j.end = end
-	close(j.done)
+	target.end = end
+	j.mutex.Lock()
+	j.ended = append(j.ended, target)
+	j.mutex.Unlock()
+	close(target.done)
+}
+
+// Notices returns one line for each job that ended since the last call,
+// oldest end first, so the session can tell the model about ends that it
+// did not ask for. Each job is in at most one result. A job that bash_job
+// kill stopped is in none, because the kill result told the model already.
+func (j *Jobs) Notices() []string {
+	j.mutex.Lock()
+	var unknown []*job
+	for _, target := range j.ended {
+		if !target.known {
+			unknown = append(unknown, target)
+		}
+	}
+	j.ended = nil
+	j.mutex.Unlock()
+	if len(unknown) == 0 {
+		return nil
+	}
+	notices := make([]string, len(unknown))
+	for index, target := range unknown {
+		notices[index] = fmt.Sprintf("background job %d (%s) %s; %s", target.id, shortCommand(target.commandLine), target.end.sentence(), target.output.lastOutput())
+	}
+	return notices
+}
+
+// setKnown records whether a kill result tells the model how target ended.
+func (j *Jobs) setKnown(target *job, known bool) {
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+	target.known = known
 }
 
 // jobRefusal is an expected reason not to start a job. The model gets it as
@@ -174,7 +239,7 @@ func (j *Jobs) launch(root, commandLine string) (*job, error) {
 		done:        make(chan struct{}),
 	}
 	j.all = append(j.all, started)
-	go started.wait(command)
+	go j.watch(started, command)
 	return started, nil
 }
 
@@ -273,10 +338,15 @@ func (j *Jobs) kill(id int) Result {
 	if !found {
 		return unknownJob(id)
 	}
+	// Each successful result below tells the model how the job ended. The
+	// mark comes before the signal, so a Notices call during the stop cannot
+	// report the job. A failed stop removes the mark again.
+	j.setKnown(target, true)
 	if end, finished := target.finished(); finished {
 		return Result{Content: fmt.Sprintf("job %d already ended: %s", id, end)}
 	}
 	if err := signalGroup(target.pid, syscall.SIGTERM); err != nil {
+		j.setKnown(target, false)
 		return Result{Content: fmt.Sprintf("cannot stop job %d: %v", id, err), IsError: true}
 	}
 	timer := time.NewTimer(jobStopDelay)
@@ -286,6 +356,7 @@ func (j *Jobs) kill(id int) Result {
 	case <-timer.C:
 	}
 	if err := signalGroup(target.pid, syscall.SIGKILL); err != nil {
+		j.setKnown(target, false)
 		return Result{Content: fmt.Sprintf("cannot kill job %d: %v", id, err), IsError: true}
 	}
 	<-target.done
@@ -346,6 +417,10 @@ type jobOutput struct {
 	// larger than unreadLength, the ring dropped the oldest bytes.
 	pending int64
 	total   int64
+	// tail holds the last bytes of the output, also when an output call
+	// read them already, for the notice about the end of the job.
+	tail       [noticeTailBytes]byte
+	tailLength int
 
 	path string
 	// file is nil after the job ends or after a write fails. The writes are
@@ -361,10 +436,50 @@ func (o *jobOutput) Write(chunk []byte) (int, error) {
 	o.total += int64(len(chunk))
 	o.pending += int64(len(chunk))
 	o.keepUnread(chunk)
+	o.keepTail(chunk)
 	if o.file != nil {
 		o.save(chunk)
 	}
 	return len(chunk), nil
+}
+
+func (o *jobOutput) keepTail(chunk []byte) {
+	if len(chunk) >= len(o.tail) {
+		o.tailLength = copy(o.tail[:], chunk[len(chunk)-len(o.tail):])
+		return
+	}
+	kept := min(o.tailLength, len(o.tail)-len(chunk))
+	copy(o.tail[:kept], o.tail[o.tailLength-kept:o.tailLength])
+	o.tailLength = kept + copy(o.tail[kept:], chunk)
+}
+
+// lastOutput describes the end of the output for a notice: at most the last
+// noticeLines lines and noticeRunes runes, quoted, so the notice stays on
+// one line.
+func (o *jobOutput) lastOutput() string {
+	o.mutex.Lock()
+	tail := o.tail[:o.tailLength]
+	if o.total > int64(o.tailLength) {
+		tail = trimIncompleteRuneStart(tail)
+	}
+	text := strings.TrimRight(string(tail), "\r\n")
+	o.mutex.Unlock()
+	if text == "" {
+		return "no output"
+	}
+	if lines := strings.Split(text, "\n"); len(lines) > noticeLines {
+		text = strings.Join(lines[len(lines)-noticeLines:], "\n")
+	}
+	if extra := utf8.RuneCountInString(text) - noticeRunes; extra > 0 {
+		for index := range text {
+			if extra == 0 {
+				text = "..." + text[index:]
+				break
+			}
+			extra--
+		}
+	}
+	return "last output: " + strconv.Quote(text)
 }
 
 func (o *jobOutput) keepUnread(chunk []byte) {
