@@ -1,0 +1,20 @@
+package fixture
+
+import "testing"
+
+func TestSum(t *testing.T) {
+	cases := []struct {
+		values []int
+		want   int
+	}{
+		{nil, 0},
+		{[]int{4}, 4},
+		{[]int{1, 2, 3}, 6},
+		{[]int{-5, 5, 10}, 10},
+	}
+	for _, c := range cases {
+		if got := Sum(c.values); got != c.want {
+			t.Errorf("Sum(%v) = %d, want %d", c.values, got, c.want)
+		}
+	}
+}

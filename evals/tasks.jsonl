@@ -1,0 +1,2 @@
+{"name":"hello-file","prompt":"Create a file named hello.txt that contains exactly the text hello followed by one newline.","check":"test \"$(cat hello.txt)\" = hello"}
+{"name":"fix-go-sum","prompt":"The test in this Go module fails. Find the bug in sum.go and fix it. Do not change sum_test.go.","template":"templates/fix-go-sum","check":"go test ./..."}

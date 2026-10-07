@@ -1,0 +1,276 @@
+package presentation
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// ToolView separates a compact activity label from the complete approval text.
+type ToolView struct {
+	Title   string
+	Details string
+}
+
+type toolInput struct {
+	Path           *string     `json:"path"`
+	Offset         *int        `json:"offset"`
+	Limit          *int        `json:"limit"`
+	Content        *string     `json:"content"`
+	OldString      *string     `json:"old_string"`
+	NewString      *string     `json:"new_string"`
+	Pattern        *string     `json:"pattern"`
+	Include        *string     `json:"include"`
+	CaseSensitive  *bool       `json:"case_sensitive"`
+	Command        *string     `json:"command"`
+	TimeoutSeconds *int        `json:"timeout_seconds"`
+	Items          *[]todoItem `json:"items"`
+	Prompt         *string     `json:"prompt"`
+}
+
+type todoItem struct {
+	Content *string `json:"content"`
+	Status  string  `json:"status"`
+}
+
+// DescribeTool formats only declared tools. Details never abbreviates a command,
+// file body, replacement, or task prompt; it does not inspect the filesystem.
+func DescribeTool(name string, input json.RawMessage, theme Theme) (ToolView, error) {
+	return describeTool(name, input, theme, true)
+}
+
+// ToolTitle shares tool validation and labels without formatting approval
+// bodies. The title is plain text, so callers can style or measure it.
+func ToolTitle(name string, input json.RawMessage) (string, error) {
+	view, err := describeTool(name, input, Theme{}, false)
+	return view.Title, err
+}
+
+func describeTool(name string, input json.RawMessage, theme Theme, details bool) (ToolView, error) {
+	switch name {
+	case "read_file", "write_file", "edit_file", "list_dir", "glob", "grep", "bash", "todo_write", "task":
+	default:
+		return ToolView{}, fmt.Errorf("unknown tool %q", singleLine(name))
+	}
+	input = bytes.TrimSpace(input)
+	if len(input) == 0 || input[0] != '{' {
+		return ToolView{}, errors.New("tool input must be a JSON object")
+	}
+	var args toolInput
+	if err := json.Unmarshal(input, &args); err != nil {
+		return ToolView{}, fmt.Errorf("invalid %s input: %w", name, err)
+	}
+	var view ToolView
+	switch name {
+	case "read_file":
+		if err := requiredText(args.Path, "path", false); err != nil {
+			return ToolView{}, err
+		}
+		offset, err := positive(args.Offset, 1, "offset")
+		if err != nil {
+			return ToolView{}, err
+		}
+		limit, err := positive(args.Limit, 2000, "limit")
+		if err != nil {
+			return ToolView{}, err
+		}
+		view.Title = "Read " + brief(*args.Path)
+		if details {
+			view.Details = fmt.Sprintf("Read %s\nStart line: %d\nLine limit: %d", singleLine(*args.Path), offset, limit)
+		}
+	case "write_file":
+		if err := requiredText(args.Path, "path", false); err != nil {
+			return ToolView{}, err
+		}
+		if err := requiredText(args.Content, "content", true); err != nil {
+			return ToolView{}, err
+		}
+		view.Title = "Write " + brief(*args.Path)
+		if details {
+			view.Details = "Write or replace " + singleLine(*args.Path) + "\n" + diffLines(*args.Content, "+ ", theme.Verdant, theme)
+		}
+	case "edit_file":
+		if err := requiredText(args.Path, "path", false); err != nil {
+			return ToolView{}, err
+		}
+		if err := requiredText(args.OldString, "old_string", false); err != nil {
+			return ToolView{}, err
+		}
+		if err := requiredText(args.NewString, "new_string", true); err != nil {
+			return ToolView{}, err
+		}
+		view.Title = "Edit " + brief(*args.Path)
+		if details {
+			view.Details = "Replace one exact occurrence in " + singleLine(*args.Path) + "\n" +
+				diffLines(*args.OldString, "- ", theme.Ember, theme) + "\n" + diffLines(*args.NewString, "+ ", theme.Verdant, theme)
+		}
+	case "list_dir", "glob", "grep":
+		path := "."
+		if args.Path != nil {
+			path = *args.Path
+		}
+		defaultLimit := 500
+		if name == "glob" {
+			defaultLimit = 1000
+		}
+		if name == "grep" {
+			defaultLimit = 100
+		}
+		limit, err := positive(args.Limit, defaultLimit, "limit")
+		if err != nil {
+			return ToolView{}, err
+		}
+		if name == "list_dir" {
+			view.Title = "List " + brief(path)
+			if details {
+				view.Details = fmt.Sprintf("Directory: %s\nResult limit: %d", singleLine(path), limit)
+			}
+			break
+		}
+		if err := requiredText(args.Pattern, "pattern", false); err != nil {
+			return ToolView{}, err
+		}
+		label := "Find files "
+		if name == "grep" {
+			label = "Search "
+		}
+		view.Title = label + brief(*args.Pattern) + " in " + brief(path)
+		if details {
+			view.Details = fmt.Sprintf("Pattern: %s\nDirectory: %s\nResult limit: %d", singleLine(*args.Pattern), singleLine(path), limit)
+		}
+		if name == "grep" && details {
+			caseSensitive := true
+			if args.CaseSensitive != nil {
+				caseSensitive = *args.CaseSensitive
+			}
+			view.Details += fmt.Sprintf("\nCase sensitive: %t", caseSensitive)
+			if args.Include != nil {
+				view.Details += "\nInclude: " + singleLine(*args.Include)
+			}
+		}
+	case "bash":
+		if err := requiredText(args.Command, "command", false); err != nil {
+			return ToolView{}, err
+		}
+		timeout, err := positive(args.TimeoutSeconds, 120, "timeout_seconds")
+		if err != nil {
+			return ToolView{}, err
+		}
+		if timeout > 600 {
+			return ToolView{}, errors.New("timeout_seconds must not exceed 600")
+		}
+		view.Title = "Run " + brief(*args.Command)
+		if details {
+			view.Details = fmt.Sprintf("Bash · timeout %ds\n%s", timeout, Safe(*args.Command))
+		}
+	case "todo_write":
+		if args.Items == nil {
+			return ToolView{}, errors.New("items is required and must be an array")
+		}
+		view.Title = fmt.Sprintf("Update tasks · %d items", len(*args.Items))
+		var body strings.Builder
+		if details {
+			body.WriteString("Replace task list")
+		}
+		active := 0
+		for index, item := range *args.Items {
+			if err := requiredText(item.Content, "item content", false); err != nil {
+				return ToolView{}, err
+			}
+			switch item.Status {
+			case "pending", "completed":
+			case "in_progress":
+				active++
+			default:
+				return ToolView{}, errors.New("item status must be pending, in_progress, or completed")
+			}
+			if details {
+				fmt.Fprintf(&body, "\n%d. [%s] %s", index+1, item.Status, Safe(*item.Content))
+			}
+		}
+		if active > 1 {
+			return ToolView{}, errors.New("at most one task may be in_progress")
+		}
+		if details {
+			if len(*args.Items) == 0 {
+				body.WriteString("\nClear all tasks")
+			}
+			view.Details = body.String()
+		}
+	case "task":
+		if err := requiredText(args.Prompt, "prompt", false); err != nil {
+			return ToolView{}, err
+		}
+		view.Title = "Delegate " + brief(*args.Prompt)
+		if details {
+			view.Details = "Task prompt\n" + Safe(*args.Prompt)
+		}
+	}
+	return view, nil
+}
+
+// Approval includes the complete safe command or change, never a preview. A
+// plasma bar marks every row: this block needs the user. Details pass through
+// Safe again, which also removes their styles; diff prefixes then select the
+// color, so they remain readable without color.
+func Approval(view ToolView, theme Theme) string {
+	bar := theme.Plasma("┃ ")
+	var out strings.Builder
+	out.WriteString(bar + theme.Bold(theme.Plasma("◆ Approval needed")))
+	out.WriteString("\n" + bar + theme.Haze("  Full filesystem access · not sandboxed"))
+	out.WriteString("\n" + bar)
+	out.WriteString("\n" + bar + "  " + theme.Bold(singleLine(view.Title)))
+	for line := range strings.SplitSeq(Safe(view.Details), "\n") {
+		out.WriteString("\n" + bar + "  ")
+		switch {
+		case strings.HasPrefix(line, "+ "):
+			out.WriteString(theme.Verdant(line))
+		case strings.HasPrefix(line, "- "):
+			out.WriteString(theme.Ember(line))
+		default:
+			out.WriteString(line)
+		}
+	}
+	return out.String()
+}
+
+func requiredText(value *string, name string, emptyOK bool) error {
+	if value == nil {
+		return fmt.Errorf("%s is required and must be a string", name)
+	}
+	if !emptyOK && *value == "" {
+		return fmt.Errorf("%s must not be empty", name)
+	}
+	return nil
+}
+
+func positive(value *int, fallback int, name string) (int, error) {
+	if value == nil {
+		return fallback, nil
+	}
+	if *value < 1 {
+		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return *value, nil
+}
+
+func diffLines(text, prefix string, style func(string) string, theme Theme) string {
+	text = Safe(text)
+	if text == "" {
+		return style(prefix + "[empty content]")
+	}
+	var out strings.Builder
+	for line := range strings.SplitSeq(strings.TrimSuffix(text, "\n"), "\n") {
+		if out.Len() > 0 {
+			out.WriteByte('\n')
+		}
+		out.WriteString(style(prefix + line))
+	}
+	if !strings.HasSuffix(text, "\n") {
+		out.WriteString("\n")
+		out.WriteString(theme.Haze("\\ No newline at end of content"))
+	}
+	return out.String()
+}

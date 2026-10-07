@@ -1,0 +1,392 @@
+// Package agent runs the model and tool loop.
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/dylantirandaz/inklingharness/internal/anthropic"
+	"github.com/dylantirandaz/inklingharness/internal/latency"
+	"github.com/dylantirandaz/inklingharness/internal/tools"
+)
+
+// Config holds settings for one user request. A nil Approve denies file changes
+// and commands. Checkpoint receives only complete messages and paired tool results.
+type Config struct {
+	Model         string
+	MaxTokens     int
+	System        string
+	Thinking      json.RawMessage
+	Extra         map[string]json.RawMessage
+	MaxTurns      int
+	CompactTokens int
+	EnableTasks   bool
+	Approve       func(context.Context, anthropic.ToolUseBlock) (bool, error)
+	Checkpoint    func(Outcome) error
+}
+
+// Observer methods run on the caller's goroutine, including parallel tool results.
+type Observer interface {
+	Text(string)
+	Thinking(string)
+	ToolCallStart(string)
+	ToolCall(string, json.RawMessage)
+	ToolResult(string, tools.Result, time.Duration)
+	TurnDone(int, anthropic.Usage, anthropic.StopReason, time.Duration)
+	UnknownEvent(string)
+	Status(string)
+}
+
+// SilentObserver discards display events, not failures or usage.
+type SilentObserver struct{}
+
+func (SilentObserver) Text(string)                                                        {}
+func (SilentObserver) Thinking(string)                                                    {}
+func (SilentObserver) ToolCallStart(string)                                               {}
+func (SilentObserver) ToolCall(string, json.RawMessage)                                   {}
+func (SilentObserver) ToolResult(string, tools.Result, time.Duration)                     {}
+func (SilentObserver) TurnDone(int, anthropic.Usage, anthropic.StopReason, time.Duration) {}
+func (SilentObserver) UnknownEvent(string)                                                {}
+func (SilentObserver) Status(string)                                                      {}
+
+// Outcome is also returned on failure. Messages never contain partial streams or
+// unpaired tool calls. Usage includes completed compaction and child requests.
+type Outcome struct {
+	Messages      []anthropic.EncodedMessage
+	Turns         int
+	Usage         anthropic.Usage
+	TurnLatencies []time.Duration
+	FinalText     string
+	// LastInputTokens is the input, cache-read, and cache-creation token count
+	// of the latest completed model request. It is 0 when no request completed
+	// or after compaction.
+	LastInputTokens int
+}
+
+// Run adds a user prompt to history and runs until the model stops or fails.
+// It does not change history. Completed tool effects are not repeated on resume.
+func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, history []anthropic.EncodedMessage, prompt string, observer Observer) (*Outcome, error) {
+	outcome := &Outcome{Messages: slices.Clone(history)}
+	if config.MaxTurns <= 0 || config.MaxTokens <= 0 || config.CompactTokens < 0 || strings.TrimSpace(prompt) == "" {
+		return outcome, errors.New("agent: positive turn/token limits, a nonnegative compaction limit, and a prompt are required")
+	}
+	withPrompt, err := appendMessage(outcome.Messages, anthropic.Message{Role: anthropic.RoleUser, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: prompt}}})
+	if err != nil {
+		return outcome, fmt.Errorf("agent: add prompt: %w", err)
+	}
+	outcome.Messages = withPrompt
+	if err := checkpoint(ctx, config, outcome); err != nil {
+		return outcome, err
+	}
+	definitions := requestTools(config, toolSet)
+	for turn := 1; turn <= config.MaxTurns; turn++ {
+		if ShouldCompact(config, outcome.Messages, outcome.LastInputTokens) {
+			compacted, err := Compact(ctx, client, config, toolSet, outcome.Messages, observer)
+			outcome.Usage = outcome.Usage.Add(compacted.Usage)
+			if err != nil {
+				return outcome, err
+			}
+			outcome.Messages = compacted.Messages
+			outcome.LastInputTokens = 0
+			if err := checkpoint(ctx, config, outcome); err != nil {
+				return outcome, err
+			}
+		}
+		requestContext := latency.RequestContext(ctx)
+		started := time.Now()
+		response, err := client.Stream(requestContext, anthropic.Request{Model: config.Model, MaxTokens: config.MaxTokens, System: config.System, Messages: outcome.Messages, Tools: definitions, Thinking: config.Thinking, Extra: config.Extra}, func(event anthropic.StreamEvent) error { return forward(event, observer) })
+		if err != nil {
+			return outcome, fmt.Errorf("turn %d: %w", turn, err)
+		}
+		elapsed := time.Since(started)
+		outcome.Turns++
+		outcome.TurnLatencies = append(outcome.TurnLatencies, elapsed)
+		outcome.Usage = outcome.Usage.Add(response.Usage)
+		outcome.LastInputTokens = response.Usage.InputTokens + response.Usage.CacheReadInputTokens + response.Usage.CacheCreationInputTokens
+		display := latency.Begin(requestContext, latency.Observer, "turn_done")
+		observer.TurnDone(turn, response.Usage, response.StopReason, elapsed)
+		display.End(nil)
+		calls := toolCalls(response.Message)
+		if len(calls) > 0 && response.StopReason != anthropic.StopToolUse {
+			return outcome, fmt.Errorf("turn %d: tool calls with stop reason %q were not executed", turn, response.StopReason)
+		}
+		if response.StopReason == anthropic.StopToolUse && len(calls) == 0 {
+			return outcome, fmt.Errorf("turn %d: tool_use without tool calls", turn)
+		}
+		completed, err := appendMessage(outcome.Messages, response.Message)
+		if err != nil {
+			return outcome, fmt.Errorf("turn %d: %w", turn, err)
+		}
+		var runErr error
+		if response.StopReason == anthropic.StopToolUse {
+			results, childUsage, err := runTools(requestContext, client, config, toolSet, calls, observer)
+			outcome.Usage = outcome.Usage.Add(childUsage)
+			runErr = err
+			// History keeps a tool call only together with its results.
+			completed, err = appendMessage(completed, anthropic.Message{Role: anthropic.RoleUser, Content: results})
+			if err != nil {
+				return outcome, fmt.Errorf("turn %d: %w", turn, errors.Join(runErr, err))
+			}
+		}
+		outcome.Messages = completed
+		if err := checkpoint(requestContext, config, outcome); err != nil {
+			return outcome, errors.Join(runErr, err)
+		}
+		if runErr != nil {
+			return outcome, fmt.Errorf("turn %d: %w", turn, runErr)
+		}
+		switch response.StopReason {
+		case anthropic.StopToolUse, anthropic.StopPauseTurn:
+		case anthropic.StopEndTurn, anthropic.StopStopSequence:
+			outcome.FinalText = finalText(response.Message)
+			return outcome, nil
+		case anthropic.StopMaxTokens:
+			return outcome, fmt.Errorf("turn %d: reply hit max_tokens=%d", turn, config.MaxTokens)
+		case anthropic.StopRefusal:
+			return outcome, fmt.Errorf("turn %d: model refused the request", turn)
+		default:
+			return outcome, fmt.Errorf("turn %d: unknown stop reason %q", turn, response.StopReason)
+		}
+	}
+	return outcome, fmt.Errorf("task not complete after %d turns", config.MaxTurns)
+}
+
+func checkpoint(ctx context.Context, config Config, outcome *Outcome) (err error) {
+	if config.Checkpoint == nil {
+		return nil
+	}
+	span := latency.Begin(ctx, latency.Checkpoint, "save")
+	defer func() { span.End(err) }()
+	if err := config.Checkpoint(*outcome); err != nil {
+		return fmt.Errorf("save conversation: %w", err)
+	}
+	return nil
+}
+
+// requestTools returns the tool definitions of every request for this
+// configuration. Compaction sends the same list so the cached prefix stays valid.
+func requestTools(config Config, toolSet *tools.Set) []anthropic.ToolDefinition {
+	definitions := toolDefinitions(toolSet)
+	if config.EnableTasks {
+		definitions = append(definitions, taskDefinition())
+	}
+	return definitions
+}
+
+// appendMessage encodes message once and adds it to history. A message with
+// the same role as the last one is joined to it, because the API requires
+// alternate roles. The join builds a new backing array, so slices that share
+// the old array, such as a saved checkpoint, keep their elements.
+func appendMessage(messages []anthropic.EncodedMessage, message anthropic.Message) ([]anthropic.EncodedMessage, error) {
+	last := len(messages) - 1
+	if last < 0 || messages[last].Role() != message.Role {
+		encoded, err := anthropic.EncodeMessage(message)
+		if err != nil {
+			return nil, err
+		}
+		return append(messages, encoded), nil
+	}
+	previous, err := messages[last].Decode()
+	if err != nil {
+		return nil, err
+	}
+	joined, err := anthropic.EncodeMessage(anthropic.Message{Role: message.Role, Content: slices.Concat(previous.Content, message.Content)})
+	if err != nil {
+		return nil, err
+	}
+	return append(messages[:last:last], joined), nil
+}
+
+// appendEncoded adds a stored message without encoding it again, unless it
+// must be joined to a last message of the same role.
+func appendEncoded(messages []anthropic.EncodedMessage, message anthropic.EncodedMessage) ([]anthropic.EncodedMessage, error) {
+	if len(messages) == 0 || messages[len(messages)-1].Role() != message.Role() {
+		return append(messages, message), nil
+	}
+	typed, err := message.Decode()
+	if err != nil {
+		return nil, err
+	}
+	return appendMessage(messages, typed)
+}
+
+func forward(event anthropic.StreamEvent, observer Observer) error {
+	switch typed := event.(type) {
+	case anthropic.TextDelta:
+		observer.Text(typed.Text)
+	case anthropic.ThinkingDelta:
+		observer.Thinking(typed.Thinking)
+	case anthropic.ToolUseStart:
+		observer.ToolCallStart(typed.Name)
+	case anthropic.BlockStop:
+		if call, ok := typed.Block.(anthropic.ToolUseBlock); ok {
+			observer.ToolCall(call.Name, call.Input)
+		}
+	case anthropic.UnknownEvent:
+		observer.UnknownEvent(typed.Type)
+	case anthropic.RetryEvent:
+		observer.Status(fmt.Sprintf("retry %d in %s: %s", typed.Attempt, typed.Delay.Round(time.Millisecond), typed.Reason))
+	default:
+		return fmt.Errorf("agent: unknown stream event %T", event)
+	}
+	return nil
+}
+
+func toolDefinitions(toolSet *tools.Set) []anthropic.ToolDefinition {
+	definitions := make([]anthropic.ToolDefinition, 0, len(toolSet.All()))
+	for _, tool := range toolSet.All() {
+		definitions = append(definitions, anthropic.ToolDefinition{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
+	}
+	return definitions
+}
+
+func toolCalls(message anthropic.Message) []anthropic.ToolUseBlock {
+	var calls []anthropic.ToolUseBlock
+	for _, block := range message.Content {
+		if call, ok := block.(anthropic.ToolUseBlock); ok {
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
+func finalText(message anthropic.Message) string {
+	var text strings.Builder
+	for _, block := range message.Content {
+		if block, ok := block.(anthropic.TextBlock); ok {
+			text.WriteString(block.Text)
+		}
+	}
+	return text.String()
+}
+
+type execution struct {
+	result  tools.Result
+	elapsed time.Duration
+	usage   anthropic.Usage
+	err     error
+}
+
+// Read batches use at most four workers. Display events stay in call order.
+func runTools(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, calls []anthropic.ToolUseBlock, observer Observer) ([]anthropic.ContentBlock, anthropic.Usage, error) {
+	executions := make([]execution, len(calls))
+	runOne := func(index int) { executions[index] = runTool(ctx, client, config, toolSet, calls[index]) }
+	if allReadOnly(toolSet, calls, config.EnableTasks) {
+		var group sync.WaitGroup
+		work := make(chan int)
+		for range min(4, len(calls)) {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				for index := range work {
+					runOne(index)
+				}
+			}()
+		}
+		for index := range calls {
+			work <- index
+		}
+		close(work)
+		group.Wait()
+	} else {
+		failed := false
+		for index := range calls {
+			if failed {
+				executions[index] = execution{result: tools.Result{Content: "not run: an earlier tool failed", IsError: true}}
+				continue
+			}
+			runOne(index)
+			failed = executions[index].err != nil || executions[index].result.IsError
+		}
+	}
+	results := make([]anthropic.ContentBlock, len(calls))
+	var usage anthropic.Usage
+	var failures []error
+	display := latency.NewMeter(ctx, latency.Observer, "tool_results")
+	defer display.End()
+	for index, executed := range executions {
+		started := display.Start()
+		observer.ToolResult(calls[index].Name, executed.result, executed.elapsed)
+		display.Add(started, nil)
+		results[index] = anthropic.ToolResultBlock{ToolUseID: calls[index].ID, Content: executed.result.Content, IsError: executed.result.IsError}
+		usage = usage.Add(executed.usage)
+		if executed.err != nil {
+			failures = append(failures, executed.err)
+		}
+	}
+	return results, usage, errors.Join(failures...)
+}
+
+func allReadOnly(toolSet *tools.Set, calls []anthropic.ToolUseBlock, enableTasks bool) bool {
+	for _, call := range calls {
+		if enableTasks && call.Name == "task" {
+			continue
+		}
+		tool, found := toolSet.Lookup(call.Name)
+		if !found || !tool.ReadOnly {
+			return false
+		}
+	}
+	return true
+}
+
+func runTool(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, call anthropic.ToolUseBlock) execution {
+	started := time.Now()
+	span := latency.Begin(ctx, latency.Tool, call.Name)
+	finish := func(result tools.Result, usage anthropic.Usage, err error) execution {
+		if span != nil {
+			timingErr := err
+			if timingErr == nil && result.IsError {
+				timingErr = errors.New("tool result failed")
+			}
+			span.End(timingErr)
+		}
+		if err != nil {
+			result = tools.Result{Content: "tool stopped: " + err.Error() + ". Check file state before another attempt.", IsError: true}
+		}
+		return execution{result: result, usage: usage, err: err, elapsed: time.Since(started)}
+	}
+	if err := ctx.Err(); err != nil {
+		return finish(tools.Result{}, anthropic.Usage{}, err)
+	}
+	if config.EnableTasks && call.Name == "task" {
+		result, usage, err := runTask(ctx, client, config, toolSet, call.Input)
+		return finish(result, usage, err)
+	}
+	tool, found := toolSet.Lookup(call.Name)
+	if !found {
+		return finish(tools.Result{Content: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}, anthropic.Usage{}, nil)
+	}
+	if !tool.ReadOnly && call.Name != "todo_write" {
+		allowed := false
+		var err error
+		approval := latency.Begin(ctx, latency.Approval, call.Name)
+		if config.Approve != nil {
+			allowed, err = config.Approve(ctx, call)
+		}
+		if approval != nil {
+			approvalErr := err
+			if approvalErr == nil && !allowed {
+				approvalErr = errors.New("approval denied")
+			}
+			approval.End(approvalErr)
+		}
+		if err != nil {
+			return finish(tools.Result{}, anthropic.Usage{}, err)
+		}
+		if !allowed {
+			return finish(tools.Result{Content: "The user did not approve this operation. Do not try another tool to bypass this decision.", IsError: true}, anthropic.Usage{}, nil)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return finish(tools.Result{}, anthropic.Usage{}, err)
+	}
+	result, err := tool.Run(ctx, call.Input)
+	return finish(result, anthropic.Usage{}, err)
+}
