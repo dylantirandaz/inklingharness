@@ -35,6 +35,9 @@ type Context struct {
 	WorkDir      string
 	Instructions []Instructions
 	Git          *GitInfo
+	// Files are the project files at inspection, relative to WorkDir, or nil
+	// for a project with more than fileListLimit files.
+	Files []string
 }
 
 // Inspect reads only AGENTS.md and CLAUDE.md along the repository-root-to-workdir
@@ -107,6 +110,11 @@ func Inspect(ctx context.Context, workDir string) (Context, error) {
 			}
 		}
 	}
+	files, err := listFiles(ctx, absolute, result.Git != nil)
+	if err != nil {
+		return Context{}, fmt.Errorf("project: list files: %w", err)
+	}
+	result.Files = files
 	return result, nil
 }
 
@@ -257,6 +265,16 @@ func (c Context) SystemPrompt() string {
 			prompt.WriteString(strconv.Quote(field[1]))
 			prompt.WriteByte('\n')
 		}
+	}
+	if c.Files != nil {
+		// Each name is quoted, so a name cannot end the data block.
+		quoted := make([]string, len(c.Files))
+		for index, file := range c.Files {
+			quoted[index] = strconv.Quote(file)
+		}
+		prompt.WriteString("Files at session start (no need to list them): ")
+		prompt.WriteString(strings.Join(quoted, " "))
+		prompt.WriteByte('\n')
 	}
 	prompt.WriteString("END GIT SNAPSHOT DATA\n")
 	return prompt.String()

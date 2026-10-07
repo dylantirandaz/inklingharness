@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -213,42 +212,6 @@ func TestMissingReplacementFieldsNeverMutateFiles(t *testing.T) {
 			t.Fatalf("explicit empty %s = %q, %v", name, content, err)
 		}
 	}
-}
-
-func TestTodoWriteValidationReplacementAndConcurrency(t *testing.T) {
-	tool := lookup(t, t.TempDir(), "todo_write")
-	if tool.ReadOnly {
-		t.Fatal("todo_write must not be ReadOnly")
-	}
-	result := runTool(t, tool, `{"items":[{"content":"first","status":"in_progress"},{"content":"second","status":"pending"}]}`)
-	if result.IsError || !strings.Contains(result.Content, "1. [in_progress] first\n2. [pending] second") {
-		t.Fatalf("todo_write = %+v", result)
-	}
-	for _, input := range []string{`{}`, `{"items":null}`, `{"items":[{"content":"x","status":"bad"}]}`, `{"items":[{"status":"pending"}]}`, `{"items":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}`} {
-		if result := runTool(t, tool, input); !result.IsError {
-			t.Fatalf("invalid todo accepted: %s", input)
-		}
-	}
-	result = runTool(t, tool, `{"items":[{"content":"third","status":"completed"}]}`)
-	if result.IsError || strings.Contains(result.Content, "first") || !strings.Contains(result.Content, "1. [completed] third") {
-		t.Fatalf("replacement = %+v", result)
-	}
-	result = runTool(t, tool, `{"items":[]}`)
-	if result.IsError || !strings.Contains(result.Content, "task list replaced: 0 items") {
-		t.Fatalf("cleared list = %+v", result)
-	}
-	var group sync.WaitGroup
-	for range 8 {
-		group.Add(1)
-		go func() {
-			defer group.Done()
-			result, err := tool.Run(context.Background(), json.RawMessage(`{"items":[{"content":"task","status":"pending"}]}`))
-			if err != nil || result.IsError {
-				t.Errorf("concurrent todo = %+v, %v", result, err)
-			}
-		}()
-	}
-	group.Wait()
 }
 
 func TestReadOnlyToolsHonorCancellation(t *testing.T) {

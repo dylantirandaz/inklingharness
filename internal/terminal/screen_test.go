@@ -260,7 +260,9 @@ func TestWakePipeEndsABlockedWait(t *testing.T) {
 	if ready, woken, err := waitReadable(input.read, wake.read, 0); err != nil || ready || woken {
 		t.Fatalf("empty wait = %t %t %v", ready, woken, err)
 	}
+	signalled := make(chan struct{})
 	go func() {
+		defer close(signalled)
 		time.Sleep(20 * time.Millisecond)
 		wake.signal()
 		wake.signal()
@@ -270,6 +272,8 @@ func TestWakePipeEndsABlockedWait(t *testing.T) {
 	if err != nil || ready || !woken || time.Since(started) > 2*time.Second {
 		t.Fatalf("wake = %t %t %v after %v", ready, woken, err, time.Since(started))
 	}
+	// The wait can end after the first signal; drain must see both.
+	<-signalled
 	wake.drain()
 	if _, woken, err := waitReadable(input.read, wake.read, 0); err != nil || woken {
 		t.Fatalf("drain left a wake: %t %v", woken, err)

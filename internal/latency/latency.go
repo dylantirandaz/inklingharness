@@ -51,7 +51,7 @@ func validStage(s Stage) bool {
 func operation(s string) string {
 	switch s {
 	case "run", "chat", "eval", "prepare", "save", "load", "attachments", "session", "messages", "attempt", "stream", "callback", "wait", "execute", "approve", "compact", "network", "other",
-		"read_file", "write_file", "edit_file", "bash", "glob", "grep", "todo_write", "task", "turn_done", "tool_results", "compact_status", "check":
+		"read_file", "write_file", "edit_file", "bash", "glob", "grep", "task", "turn_done", "tool_results", "compact_status", "check":
 		return s
 	default:
 		return "other"

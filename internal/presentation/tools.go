@@ -26,7 +26,6 @@ type toolInput struct {
 	CaseSensitive  *bool           `json:"case_sensitive"`
 	Command        *string         `json:"command"`
 	TimeoutSeconds *int            `json:"timeout_seconds"`
-	Items          *[]todoItem     `json:"items"`
 	Prompt         *string         `json:"prompt"`
 	Action         *string         `json:"action"`
 	ID             *int            `json:"id"`
@@ -38,11 +37,6 @@ type toolInput struct {
 	Fact           *string         `json:"fact"`
 	Question       *string         `json:"question"`
 	Options        *[]string       `json:"options"`
-}
-
-type todoItem struct {
-	Content *string `json:"content"`
-	Status  string  `json:"status"`
 }
 
 // DescribeTool formats only declared tools. Details never abbreviates a command,
@@ -64,7 +58,7 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		return ToolView{}, errors.New("tool input must be a JSON object")
 	}
 	switch name {
-	case "read_file", "write_file", "edit_file", "glob", "grep", "bash", "bash_job", "todo_write", "task", "mcp_list", "mcp_call", "web_fetch", "remember", "ask_user":
+	case "read_file", "write_file", "edit_file", "glob", "grep", "bash", "bash_job", "task", "mcp_list", "mcp_call", "web_fetch", "remember", "ask_user":
 	default:
 		return describeOtherTool(name, input, details)
 	}
@@ -164,40 +158,6 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		view.Title = "Run " + brief(*args.Command)
 		if details {
 			view.Details = fmt.Sprintf("Bash · timeout %ds\n%s", timeout, Safe(*args.Command))
-		}
-	case "todo_write":
-		if args.Items == nil {
-			return ToolView{}, errors.New("items is required and must be an array")
-		}
-		view.Title = fmt.Sprintf("Update tasks · %d items", len(*args.Items))
-		var body strings.Builder
-		if details {
-			body.WriteString("Replace task list")
-		}
-		active := 0
-		for index, item := range *args.Items {
-			if err := requiredText(item.Content, "item content", false); err != nil {
-				return ToolView{}, err
-			}
-			switch item.Status {
-			case "pending", "completed":
-			case "in_progress":
-				active++
-			default:
-				return ToolView{}, errors.New("item status must be pending, in_progress, or completed")
-			}
-			if details {
-				fmt.Fprintf(&body, "\n%d. [%s] %s", index+1, item.Status, Safe(*item.Content))
-			}
-		}
-		if active > 1 {
-			return ToolView{}, errors.New("at most one task may be in_progress")
-		}
-		if details {
-			if len(*args.Items) == 0 {
-				body.WriteString("\nClear all tasks")
-			}
-			view.Details = body.String()
 		}
 	case "task":
 		if err := requiredText(args.Prompt, "prompt", false); err != nil {

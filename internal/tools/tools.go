@@ -74,7 +74,7 @@ func Standard(root, outputDirectory string, jobs *Jobs) (*Set, error) {
 		return nil, fmt.Errorf("tools: jobs keep output in %q, not in output directory %q", jobs.outputDirectory, outputDirectory)
 	}
 	return NewSet(readFileTool(root), writeFileTool(root), editFileTool(root), bashTool(root, jobs), bashJobTool(jobs),
-		globTool(root), grepTool(root), todoWriteTool())
+		globTool(root), grepTool(root))
 }
 
 func resolvePath(root, path string) string {

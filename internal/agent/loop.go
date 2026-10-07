@@ -96,6 +96,13 @@ type Prompt struct {
 	Images []anthropic.ImageBlock
 }
 
+// maxCutReplies is how many replies cut at max_tokens one prompt may retry.
+// A cut reply usually comes from reasoning that ran too long; a model that
+// keeps running long must stop, so the retries are few.
+const maxCutReplies = 2
+
+const cutReplyNote = "Your last reply hit the output limit before it was complete, so it was discarded. Reason less, and take one small step at a time."
+
 // Run adds a user prompt to history and runs until the model stops or fails.
 // It does not change the history slice; the outcome holds the new history.
 // Completed tool effects are not repeated on resume.
@@ -125,6 +132,7 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 		return outcome, err
 	}
 	definitions := RequestTools(config, toolSet)
+	cutReplies := 0
 	for turn := 1; turn <= config.MaxTurns; turn++ {
 		if ShouldCompact(config, outcome.Messages, outcome.LastInputTokens) {
 			compacted, err := Compact(ctx, client, config, toolSet, outcome.Messages, observer)
@@ -153,6 +161,19 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 		observer.TurnDone(turn, response.Usage, response.StopReason, elapsed)
 		display.End(nil)
 		calls := toolCalls(response.Message)
+		if response.StopReason == anthropic.StopMaxTokens && cutReplies < maxCutReplies {
+			// A reply cut at the limit cannot run its tool calls, and its long
+			// reasoning is lost anyway. The note goes after the last user
+			// message, so the cached prefix stays valid.
+			cutReplies++
+			observer.Status("reply hit the output limit; asking for smaller steps")
+			noted, err := appendMessage(outcome.Messages, anthropic.Message{Role: anthropic.RoleUser, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: cutReplyNote}}})
+			if err != nil {
+				return outcome, fmt.Errorf("turn %d: %w", turn, err)
+			}
+			outcome.Messages = noted
+			continue
+		}
 		if len(calls) > 0 && response.StopReason != anthropic.StopToolUse {
 			return outcome, fmt.Errorf("turn %d: tool calls with stop reason %q were not executed", turn, response.StopReason)
 		}
@@ -461,9 +482,9 @@ func runTool(ctx context.Context, client *anthropic.Client, config Config, toolS
 		return finish(tools.Result{Content: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}, anthropic.Usage{}, nil)
 	}
 	// These change only the agent's own state, so they need no approval:
-	// todo_write the task list, bash_job the jobs that an approved bash call
-	// started, remember the project memory file, and ask_user asks the user.
-	if !tool.ReadOnly && !slices.Contains([]string{"todo_write", "bash_job", "remember", "ask_user"}, call.Name) {
+	// bash_job the jobs that an approved bash call started, remember the
+	// project memory file, and ask_user asks the user.
+	if !tool.ReadOnly && !slices.Contains([]string{"bash_job", "remember", "ask_user"}, call.Name) {
 		allowed := false
 		var err error
 		approval := latency.Begin(ctx, latency.Approval, call.Name)

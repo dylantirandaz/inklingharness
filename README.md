@@ -258,12 +258,11 @@ that must be isolated from your files or network.
 | --- | --- |
 | `read_file` | `path`, optional 1-based `offset` and positive `limit`. Defaults: 1 and 2000. Returns numbered lines and an end or truncation notice. |
 | `write_file` | Required `path` and `content`. Creates or replaces a file. Explicit empty content is valid; omitted or null content is rejected. |
-| `edit_file` | Required `path`, `old_string`, and `new_string`. Changes exactly one match; missing or duplicate matches fail without a write. |
+| `edit_file` | Required `path`, `old_string`, and `new_string`. Changes exactly one match and reports the new line range. A missing match fails without a write and shows the closest current lines, numbered, so the model can retry without reading the file again; a duplicate match fails without a write. |
 | `glob` | Required `pattern`; optional `path` and `limit`. Defaults: `.` and 1000. `**` matches zero or more path segments. |
 | `grep` | Required Go regular expression `pattern`; optional `path`, `include` glob, `limit`, and `case_sensitive`. Defaults: `.`, 100 results, case-sensitive. Returns `path:line:text`. |
 | `bash` | Required `command`; optional `timeout_seconds` or `background`. Default timeout: 120 seconds; maximum: 600 seconds. Reports output and exit status. Output above 32 KiB returns its first and last 16 KiB and the path of a file with the full output. With `background: true` the command starts as job N and the call returns at once. |
 | `bash_job` | Required `action`: `list`, `output`, or `kill`; `id` for output and kill. Output returns what the job wrote since the last read, at most 32 KiB; the full output is in a file. Kill stops the whole process group. At most 8 jobs run; all jobs stop when the session ends. Needs no approval: it only reads or stops jobs that an approved `bash` call started. |
-| `todo_write` | Required `items` list with `content` and `status`: `pending`, `in_progress`, or `completed`. At most one item can be in progress. Replaces the task list; `[]` clears it. |
 | `task` | Required `prompt`. Runs read-only research with the same model in a separate conversation. Returns findings to the parent. |
 | `mcp_list`, `mcp_call` | Only when MCP servers are set. `mcp_list` starts a server on first use and lists its tools with their input schemas; `mcp_call` calls one. |
 | `web_fetch` | Required `url`; optional `offset` and `max_chars`. Gets an http or https page and returns its text: HTML becomes plain text with headings, lists, code, and absolute links. At most 5 redirects, 30 seconds, and 5 MiB; long pages come in parts. Needs approval; the rule `web_fetch(*.go.dev)` matches the host. |
@@ -303,8 +302,6 @@ model response; partial streamed tool arguments are never executed.
 Research tasks cannot write files, run commands, or start more research
 tasks. They can use the read and search tools and take at most 20 model turns.
 The parent waits for their results. `-tasks=false` removes the task tool.
-The task list is local to the current tool set; its reported results remain
-in conversation history, but its in-memory state resets on resume.
 
 When a background job ends, the next tool results or the next prompt tell the
 model, once: the job, its exit code, and its last output lines.
@@ -489,9 +486,12 @@ At startup, the harness reads `AGENTS.md` and `CLAUDE.md` from the Git root
 through the working directory, in ancestor order. Outside Git, it reads
 only the working directory. Each instruction file must be a regular file
 of at most 64 KiB. It also captures the Git branch, short status, and five
-recent commit subjects. Git output is bounded and marked if truncated.
-This is a startup snapshot, not a watcher. Guidance in other subdirectories
-is not loaded automatically.
+recent commit subjects. Git output is bounded and marked if truncated. In a
+project of at most 200 files, the snapshot also lists them (from `git
+ls-files`, or a walk outside Git; hidden paths and `node_modules` are left
+out), so the model does not spend a turn on `ls`. This is a startup
+snapshot, not a watcher. Guidance in other subdirectories is not loaded
+automatically.
 
 The built-in system prompt gives coding and approval rules. `-system FILE`
 replaces that prompt; project context is still added. Use the same system,
@@ -556,7 +556,9 @@ these weights on its GPU. No local inference path has been validated.
 - `-effort low|medium|high|xhigh|max` sets `output_config.effort`.
 - `-thinking JSON` sets the provider's raw thinking field.
 - `-extra JSON` adds top-level fields. Managed field collisions are rejected.
-- `-max-tokens` defaults to 16,384, including reasoning tokens.
+- `-max-tokens` defaults to 16,384, including reasoning tokens. A reply cut
+  at this limit cannot run its tool calls; it is dropped and the model is
+  asked for a smaller step, at most twice for one prompt.
 - `-max-turns` defaults to 50 for one user request.
 
 The client makes at most five attempts for HTTP 408, 429, 500, 502, 503, 504,
@@ -993,6 +995,31 @@ showed both drops. The v0.5.0 failures were replies cut at `max_tokens`; the
 v0.6.0 failure was one wrong result. The `think` process stays near 20 MiB;
 a resumed 198k-token session peaks at 18 MiB. `scripts/limits`: 7.42 MiB,
 27.7 ms startup, no measurable idle CPU.
+
+v0.7.0 removes wasted turns found in a recorded eval round of v0.6.0, where
+17 of 20 tasks spent their first turn on `ls` or `glob`, 129 of 133 tool
+turns made one call, and one task failed 8 edits on text that an earlier edit
+had changed:
+
+- The project snapshot lists the files of a small project.
+- The prompt asks for all reads in one response and an edit with its test,
+  and for short reasoning.
+- `edit_file` reports the new line range, and on a miss shows the closest
+  current lines.
+- A reply cut at `max_tokens` is retried with a note instead of failing the
+  task. In a real run with `-max-tokens 80` the cut edit came back smaller
+  and the test passed.
+- `todo_write`, which no task called, left the tool list.
+
+| Build | Passed (of 60) | Turns | Input tokens | Output tokens | Wall time |
+| --- | --- | --- | --- | --- | --- |
+| v0.6.0 | 58 | 160 | 427k | 29.1k | 262 s |
+| v0.7.0 | 60 | 136 | 314k | 22.0k | 215 s |
+
+Turns fell 15%, input tokens 26% (lower in every round), output tokens 24%
+(lower in 2 of 3 rounds), and wall time 18%. The v0.6.0 failures were a
+reply cut at `max_tokens` and a task that ran out of turns. `scripts/limits`:
+7.42 MiB, 23.9 ms startup, no measurable idle CPU.
 
 ## Layout
 
