@@ -67,27 +67,41 @@ A piped prompt is also accepted by `run`.
 
 ## Chat controls
 
-Terminal chat uses the "Signal" look: Inkling never paints the terminal
-background, and one luminous gradient, ion to nebula, marks the brand, the
-composer beam, and the assistant sigil. Finished output stays in ordinary
-terminal scrollback; only a few live rows at the bottom change.
+Terminal chat uses the "Ink" look, taken from thinkingmachines.ai: ink on
+paper, warm grays, the flat green, blue, and red shapes of the Inkling mark,
+small tinted chips, and the square grid of the Inkling model cards. Finished
+output stays in ordinary terminal scrollback; only a few live rows at the
+bottom change.
 
-- `◈ I N K L I N G` opens the chat with the model, effort, and folder.
-- `❯` marks your prompts, and `◈` starts each reply.
-- Tool rows show `◆` when done and `✗` when failed; previews follow `⎿`.
-- While the model works, a spinner and a moving shimmer show the activity,
-  with elapsed seconds. The empty composer is hidden.
-- The footer shows the model, effort, and a gauge of the context estimate
-  against the compaction threshold, for example `▰▰▱▱▱▱ 61k of 200k`. The
-  gauge turns amber at 80% and red at the threshold.
-- An approval request has a magenta bar and the keys `y`, `a`, and `n`.
+- The chat opens with the Inkling mark, drawn in half blocks, beside the
+  letterspaced `T H I N K I N G   M A C H I N E S` wordmark, the model name
+  with its effort on a chip, and the folder.
+- Your prompts sit on a faint tinted band that starts with `›`. Each reply
+  starts with a `●` in the model color: plum for Inkling-Small, blue for
+  Inkling, and green for other models.
+- Tool rows show a green `●` when done and a red `✕` when failed, the verb in
+  bold, and the target. Previews follow a hairline `│`.
+- While the model works, a row of squares pulses in the model color beside
+  the status and the elapsed seconds. The empty composer is hidden.
+- The footer shows the model, effort, and the context estimate as ten
+  squares against the compaction threshold, for example `▪▪▪▪▪▪▪▪▪▪ 61k / 200k`.
+  Used squares turn amber at 80% and red at the threshold.
+- An approval request is a card with an amber bar, the command on a chip,
+  and the keys `y`, `a`, and `n` on chips.
+
+At start, chat asks the terminal for its background color (OSC 11, then
+DA1). On a light background the mark's blot and the text are ink; on a dark
+one they are paper. Every terminal answers DA1, so the question adds no wait
+when the terminal answers; one that answers neither costs at most 200 ms and
+is taken as dark. A reply that arrives later is dropped, never typed.
 
 Color depth follows the terminal: 24-bit color when `COLORTERM` is
 `truecolor` or `24bit`, the 256-color palette when `TERM` has `256color`, and
-16 colors otherwise. The shimmer needs 24-bit color; other depths keep the
-text in one color.
+16 colors otherwise. The mark and the tinted chips need 256 colors; with 16
+colors, keys and code take the accent instead. `NO_COLOR` keeps every glyph:
+used squares stay `▪`, empty ones become `·`, and keys show as `[y]`.
 
-The window title shows the state: `◇` ready, `◈` working, or `◆` approval,
+The window title shows the state: `○` ready, `●` working, or `◉` approval,
 and the folder name. Tab bars, such as the one in cmux, show it. When an
 approval is needed, or when a turn that took at least 5 seconds ends, chat
 sends a desktop notification (OSC 9) that names the command or the first
@@ -99,15 +113,14 @@ Replies use Markdown styles. Partial lines stay literal until they are
 complete. Each frame leaves in one write. A frame that changes more than one
 row, or adds scrollback text, is wrapped in synchronized output (DEC mode
 2026), so supporting terminals never show a half-drawn frame; a one-row
-update, such as a spinner frame or a typed key, has no markers. An idle
+update, such as a pulse frame or a typed key, has no markers. An idle
 prompt does not wake the process; the screen sleeps until a key, a resize, or
 an animation frame is due.
 
-Measured on an Apple M3 in a real PTY, against the previous UI (5 to 15
-alternating pairs, medians): idle CPU over 10 s 56 -> 0.3 ms, CPU for 5 s
-of busy animation 32 -> 24 ms, startup to first echo 36.7 -> 35.2 ms, peak
-RSS 15.6 -> 15.4 MiB. Writing 120 styled lines takes 10.1 -> 11.5 ms
-because the gradient styles add bytes (113 -> 144 KB).
+Startup to the first composer frame, measured on an Apple M3 in a real PTY
+(7 alternating runs, medians): v0.1.0 25.5 ms; this build 25.1 ms when the
+terminal answers OSC 11 and DA1, 25.2 ms when it answers only DA1, and
+231 ms when it answers neither (3 runs).
 
 Tool activity is compact. Successful reads and searches do not dump their
 contents into the conversation. `/tools` shows the full stored output from

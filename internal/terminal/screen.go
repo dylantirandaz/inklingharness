@@ -28,8 +28,6 @@ const (
 	syncEnd   = "\x1b[?2026l"
 )
 
-var spinnerFrames = [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
 type Choice int
 
 const (
@@ -159,9 +157,10 @@ func (w wakePipe) close() {
 	}
 }
 
-// New takes over the terminal. theme decides every color; its zero value
-// draws without color.
-func New(ctx context.Context, input, output *os.File, onInterrupt func(), theme presentation.Theme) (*Screen, error) {
+// New takes over the terminal. It asks the terminal for its background, so
+// the theme of depth and accent fits a light or a dark terminal; NoColor
+// skips the question and draws without color.
+func New(ctx context.Context, input, output *os.File, onInterrupt func(), depth presentation.ColorDepth, accent presentation.Accent) (*Screen, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -199,12 +198,31 @@ func New(ctx context.Context, input, output *os.File, onInterrupt func(), theme 
 		restoreErr := setState(input, &state)
 		return nil, errors.Join(err, restoreErr)
 	}
+	shade, typed := presentation.DarkBackground, []byte(nil)
+	if depth != presentation.NoColor {
+		shade, typed, err = queryShade(input, output, wake.read)
+		if err != nil {
+			wake.close()
+			restoreErr := setState(input, &state)
+			return nil, errors.Join(err, restoreErr)
+		}
+	}
 	s := &Screen{
 		input: input, output: output, wake: wake, state: state, onInterrupt: onInterrupt,
 		ctx: ctx, stop: make(chan struct{}), done: make(chan struct{}),
 		resizes: make(chan os.Signal, 1), rows: rows, cols: cols, layoutDirty: true,
-		theme: theme, activityRow: -1, footerRow: -1,
+		theme: presentation.NewTheme(depth, shade, accent), activityRow: -1, footerRow: -1,
 	}
+	// Keys typed while the terminal answered the background query get the
+	// same handling as keys read later.
+	s.mu.Lock()
+	interrupt, interruptedResult := false, s.result
+	for _, k := range s.parser.feed(typed, time.Now()) {
+		if s.keyLocked(k) {
+			interrupt = true
+		}
+	}
+	s.mu.Unlock()
 	// Bracketed paste on, cursor hidden, window title saved for Close, and a
 	// steady bar cursor for the composer.
 	if err := s.outputLocked("\x1b[?2004h\x1b[?25l\x1b[22;0t\x1b[6 q"); err == nil {
@@ -219,8 +237,14 @@ func New(ctx context.Context, input, output *os.File, onInterrupt func(), theme 
 	signal.Notify(s.resizes, syscall.SIGWINCH)
 	go s.watch()
 	go s.readLoop()
+	if interrupt {
+		go s.interrupted(interruptedResult)
+	}
 	return s, nil
 }
+
+// Theme is the theme that New chose for this terminal. It does not change.
+func (s *Screen) Theme() presentation.Theme { return s.theme }
 
 // watch applies resizes and wakes the read loop when the context ends, so
 // the read loop itself can block without a timeout.
@@ -384,16 +408,16 @@ func (s *Screen) layoutLocked() {
 		start = max(0, editRow-maxBody+1)
 		bodyRows = bodyRows[start:min(start+maxBody, len(bodyRows))]
 	case modeChoice:
-		// Drop decoration and then shorten labels before hiding an option.
+		// Shorten labels, then drop their styles, before hiding an option.
+		key := s.theme.Key
 		for _, labels := range [...]string{
-			"┃ y allow once   a allow session   n deny",
-			"┃ y once  a session  n deny",
-			"y once  a session  n deny",
+			key("y") + " allow once   " + key("a") + " allow session   " + key("n") + " deny",
+			key("y") + " once  " + key("a") + " session  " + key("n") + " deny",
 			"y / a / n",
 			"y a n",
 			"yan",
 		} {
-			bodyRows = styledRows(labels, width, false)
+			bodyRows = styledRows(labels, width, s.theme.Colored())
 			if len(bodyRows) <= s.rows {
 				break
 			}
@@ -422,16 +446,13 @@ func (s *Screen) layoutLocked() {
 	}
 	bodyStart := len(s.frame)
 	for i, row := range bodyRows {
-		switch {
-		case s.mode == modeChoice:
-			row = s.theme.Plasma(row)
-		case len(s.text) == 0:
-			row = s.theme.Haze(row)
+		if s.mode == modePrompt && len(s.text) == 0 {
+			row = s.theme.Graphite(s.theme.Italic(row))
 		}
 		if marker {
 			prefix := "  "
 			if start+i == 0 {
-				prefix = s.theme.Ion("❯ ")
+				prefix = s.theme.Bold(s.theme.Accent("›")) + " "
 			}
 			row = prefix + row
 		}
@@ -453,46 +474,46 @@ func (s *Screen) layoutLocked() {
 	s.layoutDirty = false
 }
 
-func (s *Screen) spinnerLocked() string {
-	return s.theme.Ion(spinnerFrames[s.activityFrame%len(spinnerFrames)])
+// pulseLocked is the working indicator of the current animation frame.
+func (s *Screen) pulseLocked(cells int) string {
+	return s.theme.Pulse(s.activityFrame, cells)
 }
 
 // activityLocked is the animated row while the model or a tool works: the
-// spinner, the status with a moving shimmer, and the elapsed seconds.
+// pulse of squares, the status, and the elapsed seconds.
 func (s *Screen) activityLocked() string {
 	width := max(s.cols-1, 2)
-	row := s.spinnerLocked() + " " + s.theme.Shimmer(s.status, s.activityFrame)
+	row := s.pulseLocked(8) + "  " + s.theme.Ink(s.status)
 	if !s.activitySince.IsZero() {
-		row += s.theme.Haze("  " + strconv.Itoa(int(time.Since(s.activitySince).Seconds())) + "s")
+		row += s.theme.Graphite(" · " + strconv.Itoa(int(time.Since(s.activitySince).Seconds())) + "s")
 	}
 	return styledRows(row, width, s.theme.Colored())[0]
 }
 
-// footerLocked is the ship status row: a state mark, the caller's footer, and
+// footerLocked is the status row: background work, the caller's footer, and
 // the key hints of the current mode when they fit.
 func (s *Screen) footerLocked() string {
 	width := max(s.cols-1, 2)
 	var lead, hint string
 	switch s.mode {
 	case modePrompt:
-		lead = s.theme.Ion("◇") + " "
 		if s.background != "" {
-			lead = s.spinnerLocked() + " " + s.theme.Shimmer(s.background, s.activityFrame) + s.theme.Haze(" · ")
+			lead = s.pulseLocked(4) + " " + s.theme.Graphite(s.theme.Italic(s.background)) + s.theme.Hairline(" · ")
 		}
-		hint = "Enter send · Ctrl-J newline"
+		hint = "enter send · ctrl-j newline"
 	case modeChoice:
-		lead = s.theme.Plasma("◆") + " "
-		hint = "Enter / Esc deny"
+		lead = s.theme.Amber("●") + " "
+		hint = "enter / esc deny"
 	case modeBusy:
-		hint = "Ctrl-C cancel"
+		hint = "ctrl-c cancel"
 	}
 	line := lead + s.footer
 	visible := cellWidth(withoutStyles(line))
 	if s.footer != "" {
-		hint = " · " + hint
+		hint = "   " + hint
 	}
 	if visible+cellWidth(hint) <= width {
-		line += s.theme.Haze(hint)
+		line += s.theme.Graphite(hint)
 	}
 	return styledRows(line, width, s.theme.Colored())[0]
 }

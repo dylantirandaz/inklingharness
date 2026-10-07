@@ -138,7 +138,7 @@ func (c *consoleObserver) Thinking(delta string) {
 		c.thinking.WriteString(part)
 		if !complete {
 			if c.screen != nil {
-				c.screen.SetPreview("  " + c.theme.Haze(presentation.Safe(c.thinking.String())))
+				c.screen.SetPreview("  " + c.theme.Graphite(c.theme.Italic(presentation.Safe(c.thinking.String()))))
 			}
 			break
 		}
@@ -154,7 +154,7 @@ func (c *consoleObserver) flushThinking() {
 	if c.screen != nil {
 		c.screen.SetPreview("")
 	}
-	fmt.Fprintln(c.stderr, "  "+c.theme.Haze(presentation.Safe(c.thinking.String())))
+	fmt.Fprintln(c.stderr, "  "+c.theme.Graphite(c.theme.Italic(presentation.Safe(c.thinking.String()))))
 	c.thinking.Reset()
 }
 
@@ -223,10 +223,9 @@ func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed t
 		} else {
 			preview = presentation.Safe(result.Content)
 		}
-		lead := "    " + c.theme.Haze("⎿ ")
+		lead := "    " + c.theme.Hairline("│") + " "
 		for line := range strings.SplitSeq(preview, "\n") {
 			fmt.Fprintln(c.stderr, lead+line)
-			lead = "      "
 		}
 	}
 	if c.verbose {
@@ -291,19 +290,19 @@ type shipSignals struct {
 
 func (s shipSignals) ready() {
 	if s.screen != nil {
-		s.screen.SetTitle("◇ inkling · " + s.place)
+		s.screen.SetTitle("○ inkling · " + s.place)
 	}
 }
 
 func (s shipSignals) working() {
 	if s.screen != nil {
-		s.screen.SetTitle("◈ inkling · working · " + s.place)
+		s.screen.SetTitle("● inkling · working · " + s.place)
 	}
 }
 
 func (s shipSignals) approval(title string) {
 	if s.screen != nil {
-		s.screen.SetTitle("◆ inkling · approval · " + s.place)
+		s.screen.SetTitle("◉ inkling · approval · " + s.place)
 		s.screen.Notify("Inkling needs approval · " + title)
 	}
 }

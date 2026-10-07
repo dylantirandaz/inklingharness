@@ -37,7 +37,7 @@ func (m *Markdown) render(text string, commit bool) string {
 			if commit {
 				m.fence, m.fenceLength = 0, 0
 			}
-			return m.theme.Haze(text)
+			return m.theme.Graphite(text)
 		}
 		return text
 	}
@@ -48,19 +48,19 @@ func (m *Markdown) render(text string, commit bool) string {
 		if commit {
 			m.fence, m.fenceLength = marker, length
 		}
-		return m.theme.Haze(text)
+		return m.theme.Graphite(text)
 	}
 	if indent <= 3 && strings.HasPrefix(trimmed, "#") {
 		count := markerRun(trimmed, 0, '#')
 		if count <= 6 && count < len(trimmed) && trimmed[count] == ' ' {
-			return m.theme.Bold(m.theme.Ion(inline(strings.TrimLeft(trimmed[count:], " "), m.theme, 0)))
+			return m.theme.Bold(m.theme.Ink(inline(strings.TrimLeft(trimmed[count:], " "), m.theme, 0)))
 		}
 	}
 	if strings.HasPrefix(trimmed, "> ") {
-		return text[:indent] + m.theme.Haze("┃ ") + inline(trimmed[2:], m.theme, 0)
+		return text[:indent] + m.theme.Hairline("│ ") + m.theme.Italic(inline(trimmed[2:], m.theme, 0))
 	}
 	if len(trimmed) >= 2 && (trimmed[0] == '-' || trimmed[0] == '*' || trimmed[0] == '+') && trimmed[1] == ' ' {
-		return text[:indent] + m.theme.Ion("▸ ") + inline(trimmed[2:], m.theme, 0)
+		return text[:indent] + m.theme.Accent("▪ ") + inline(trimmed[2:], m.theme, 0)
 	}
 	return inline(text, m.theme, 0)
 }
@@ -145,7 +145,7 @@ func inline(text string, theme Theme, depth int) string {
 			end := codeEnd(text, index+run, run)
 			if end >= 0 {
 				// Keep delimiters even without color so code remains distinct.
-				out.WriteString(theme.Nebula(text[index : end+run]))
+				out.WriteString(theme.Code(text[index : end+run]))
 				index = end + run
 				continue
 			}
@@ -188,7 +188,7 @@ func inline(text string, theme Theme, depth int) string {
 				if balance == 0 {
 					out.WriteString(inline(text[index+1:labelEnd], theme, depth+1))
 					out.WriteString(" (")
-					out.WriteString(theme.Ion(text[targetStart:end]))
+					out.WriteString(theme.Graphite(theme.Underline(text[targetStart:end])))
 					out.WriteByte(')')
 					index = end + 1
 					continue

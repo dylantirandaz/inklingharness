@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+	"unicode/utf8"
 )
 
 func TestSafeControls(t *testing.T) {
@@ -45,8 +46,15 @@ func TestSafeSplitEscapesNeverReassemble(t *testing.T) {
 	}
 }
 
-// themes covers each color depth; the zero Theme is NoColor.
-var themes = []Theme{{}, NewTheme(ANSI16), NewTheme(ANSI256), NewTheme(TrueColor)}
+// themes covers each color depth, both shades, and each accent; the zero
+// Theme is NoColor.
+var themes = []Theme{
+	{},
+	NewTheme(ANSI16, DarkBackground, AccentPlum),
+	NewTheme(ANSI256, LightBackground, AccentBlue),
+	NewTheme(TrueColor, DarkBackground, AccentGreen),
+	NewTheme(TrueColor, LightBackground, AccentPlum),
+}
 
 func TestMarkdownFenceStateAndPreview(t *testing.T) {
 	m := NewMarkdown(Theme{})
@@ -81,7 +89,7 @@ func TestMarkdownFenceStateAndPreview(t *testing.T) {
 func TestMarkdownInlineAndIncomplete(t *testing.T) {
 	tests := []struct{ input, want string }{
 		{"# Heading", "Heading"},
-		{"- item", "▸ item"},
+		{"- item", "▪ item"},
 		{"**bold** and *emphasis*", "bold and emphasis"},
 		{"snake_case_identifier", "snake_case_identifier"},
 		{"`a*b _c_ [x](y)`", "`a*b _c_ [x](y)`"},
@@ -115,7 +123,7 @@ func TestFullApprovalContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	color := NewTheme(TrueColor)
+	color := NewTheme(TrueColor, DarkBackground, AccentPlum)
 	view, err := DescribeTool("write_file", writeInput, color)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +147,7 @@ func TestFullApprovalContent(t *testing.T) {
 			t.Fatalf("edit approval omitted %q", fragment)
 		}
 	}
-	if !strings.Contains(view.Details, color.sgr[roleEmber]) || !strings.Contains(view.Details, color.sgr[roleVerdant]) {
+	if !strings.Contains(view.Details, color.sgr[roleRed]) || !strings.Contains(view.Details, color.sgr[roleGreen]) {
 		t.Fatal("replacement diff lacks old/new colors")
 	}
 	view, err = DescribeTool("bash", json.RawMessage(`{"command":"printf start\nprintf end\n# final command","timeout_seconds":42}`), Theme{})
@@ -317,29 +325,126 @@ func TestColorDepthDetection(t *testing.T) {
 // Decoration must never change the visible text or its width, or the screen
 // diff and cursor math would drift.
 func TestThemeDecorationKeepsVisibleText(t *testing.T) {
-	text := "Compacting context ◈ 界"
 	for _, theme := range themes {
-		for phase := range 40 {
-			if got := Safe(theme.Shimmer(text, phase)); got != text {
-				t.Fatalf("shimmer depth %d phase %d changed text: %q", theme.depth, phase, got)
-			}
-		}
-		if got := Safe(theme.Gradient(text)); got != text {
-			t.Fatalf("gradient changed text: %q", got)
-		}
 		for _, width := range []int{1, 7, 80, 233} {
-			if got := Safe(theme.Rule(width)); got != strings.Repeat("━", width) {
+			if got := Safe(theme.Rule(width)); got != strings.Repeat("─", width) {
 				t.Fatalf("rule width %d = %q", width, got)
 			}
 		}
-		for used, want := range map[int]string{0: "▱▱▱▱", 50: "▰▰▱▱", 100: "▰▰▰▰", 250: "▰▰▰▰"} {
-			if got := Safe(theme.Gauge(used, 100, 4)); got != want {
-				t.Fatalf("gauge %d = %q, want %q", used, got, want)
+		for frame := range 40 {
+			if got := Safe(theme.Pulse(frame, 8)); utf8.RuneCountInString(got) != 8 {
+				t.Fatalf("pulse depth %d frame %d = %q, want 8 cells", theme.depth, frame, got)
+			}
+		}
+		for _, text := range []string{"Approval", " y ", "界"} {
+			for _, style := range []func(string) string{theme.Chip, theme.Code, theme.Italic, theme.Accent} {
+				if got := Safe(style(text)); got != text {
+					t.Fatalf("style changed %q to %q", text, got)
+				}
+			}
+		}
+		if !theme.Colored() {
+			continue
+		}
+		for used := range 300 {
+			if got := Safe(theme.Gauge(used, 100, 4)); got != "▪▪▪▪" {
+				t.Fatalf("gauge %d = %q", used, got)
 			}
 		}
 	}
-	if NewTheme(TrueColor).Rule(400) == NewTheme(TrueColor).Rule(399) || strings.Count(NewTheme(TrueColor).Rule(400), "\x1b[38;2;") > ruleSegments {
-		t.Fatal("a wide rule must stay within the segment budget")
+}
+
+// Without color, the squares must still show the state: used or active
+// squares are filled, the rest are dots.
+func TestSquaresShowStateWithoutColor(t *testing.T) {
+	for used, want := range map[int]string{0: "····", 1: "▪···", 50: "▪▪··", 100: "▪▪▪▪", 250: "▪▪▪▪"} {
+		if got := (Theme{}).Gauge(used, 100, 4); got != want {
+			t.Fatalf("gauge %d = %q, want %q", used, got, want)
+		}
+	}
+	heads := map[int]bool{}
+	for frame := range 11 {
+		heads[strings.Index((Theme{}).Pulse(frame, 8), "▪")] = true
+	}
+	if len(heads) < 8 {
+		t.Fatalf("pulse does not travel across the row: first squares at %v", heads)
+	}
+	if got := (Theme{}).Key("y"); got != "[y]" {
+		t.Fatalf("key without color = %q", got)
+	}
+}
+
+func TestShadeAndAccentSelection(t *testing.T) {
+	for _, test := range []struct {
+		background rgb
+		want       Shade
+	}{
+		{rgb{0, 0, 0}, DarkBackground},
+		{rgb{255, 255, 255}, LightBackground},
+		{rgb{40, 44, 52}, DarkBackground},
+		{rgb{253, 246, 227}, LightBackground},
+		{rgb{110, 110, 110}, DarkBackground},
+		{rgb{128, 128, 128}, LightBackground},
+	} {
+		color := test.background
+		if got := ShadeOf(color.r, color.g, color.b); got != test.want {
+			t.Errorf("ShadeOf(%v) = %d, want %d", color, got, test.want)
+		}
+	}
+	for model, want := range map[string]Accent{
+		"thinkingmachines/inkling-small": AccentPlum,
+		"thinkingmachines/inkling":       AccentBlue,
+		"thinkingmachines/inkling:free":  AccentBlue,
+		"Inkling-Small":                  AccentPlum,
+		"openai/gpt-6-astra":             AccentGreen,
+	} {
+		if got := AccentFor(model); got != want {
+			t.Errorf("AccentFor(%q) = %d, want %d", model, got, want)
+		}
+	}
+	if got := ModelName("thinkingmachines/inkling-small"); got != "Inkling-Small" {
+		t.Errorf("model name = %q", got)
+	}
+	if got := ModelName("openai/gpt-6-astra"); got != "gpt-6-astra" {
+		t.Errorf("model name = %q", got)
+	}
+}
+
+// The mark is six rows of MarkWidth cells, and only exists with 256 or more
+// colors.
+func TestMarkGeometry(t *testing.T) {
+	for _, theme := range themes {
+		mark := theme.Mark()
+		if theme.depth < ANSI256 {
+			if mark != nil {
+				t.Fatalf("depth %d drew a mark", theme.depth)
+			}
+			continue
+		}
+		if len(mark) != 6 {
+			t.Fatalf("mark has %d rows", len(mark))
+		}
+		for _, row := range mark {
+			if got := utf8.RuneCountInString(Safe(row)); got != MarkWidth {
+				t.Fatalf("mark row has %d cells: %q", got, Safe(row))
+			}
+		}
+	}
+}
+
+// A tinted prompt band must keep its tint up to the erase that extends it, so
+// no reset may come before the erase on any row.
+func TestUserTurnBandKeepsTint(t *testing.T) {
+	theme := NewTheme(TrueColor, LightBackground, AccentBlue)
+	got := UserTurn("first\nsecond\x1b[2J", theme)
+	if Safe(got) != "› first\n  second" {
+		t.Fatalf("visible prompt = %q", Safe(got))
+	}
+	for _, row := range strings.Split(got, "\n") {
+		erase := strings.Index(row, "\x1b[K")
+		if !strings.HasPrefix(row, theme.chip) || erase < 0 || strings.Contains(row[:erase], reset) {
+			t.Fatalf("band row loses its tint: %q", row)
+		}
 	}
 }
 

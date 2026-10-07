@@ -89,7 +89,7 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		}
 		view.Title = "Write " + brief(*args.Path)
 		if details {
-			view.Details = "Write or replace " + singleLine(*args.Path) + "\n" + diffLines(*args.Content, "+ ", theme.Verdant, theme)
+			view.Details = "Write or replace " + singleLine(*args.Path) + "\n" + diffLines(*args.Content, "+ ", theme.Green, theme)
 		}
 	case "edit_file":
 		if err := requiredText(args.Path, "path", false); err != nil {
@@ -104,7 +104,7 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		view.Title = "Edit " + brief(*args.Path)
 		if details {
 			view.Details = "Replace one exact occurrence in " + singleLine(*args.Path) + "\n" +
-				diffLines(*args.OldString, "- ", theme.Ember, theme) + "\n" + diffLines(*args.NewString, "+ ", theme.Verdant, theme)
+				diffLines(*args.OldString, "- ", theme.Red, theme) + "\n" + diffLines(*args.NewString, "+ ", theme.Green, theme)
 		}
 	case "list_dir", "glob", "grep":
 		path := "."
@@ -211,29 +211,32 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 	return view, nil
 }
 
-// Approval includes the complete safe command or change, never a preview. A
-// plasma bar marks every row: this block needs the user. Details pass through
+// Approval includes the complete safe command or change, never a preview. An
+// amber bar marks every row: this block needs the user. Details pass through
 // Safe again, which also removes their styles; diff prefixes then select the
 // color, so they remain readable without color.
 func Approval(view ToolView, theme Theme) string {
-	bar := theme.Plasma("┃ ")
+	bar := ApprovalBar(theme)
 	var out strings.Builder
-	out.WriteString(bar + theme.Bold(theme.Plasma("◆ Approval needed")))
-	out.WriteString("\n" + bar + theme.Haze("  Full filesystem access · not sandboxed"))
-	out.WriteString("\n" + bar)
-	out.WriteString("\n" + bar + "  " + theme.Bold(singleLine(view.Title)))
+	out.WriteString(bar + theme.Amber("●") + " " + theme.Bold(theme.Ink("Approval needed")) + "  " + theme.Chip(" "+singleLine(view.Title)+" "))
 	for line := range strings.SplitSeq(Safe(view.Details), "\n") {
 		out.WriteString("\n" + bar + "  ")
 		switch {
 		case strings.HasPrefix(line, "+ "):
-			out.WriteString(theme.Verdant(line))
+			out.WriteString(theme.Green(line))
 		case strings.HasPrefix(line, "- "):
-			out.WriteString(theme.Ember(line))
+			out.WriteString(theme.Red(line))
 		default:
 			out.WriteString(line)
 		}
 	}
+	out.WriteString("\n" + bar + "  " + theme.Graphite(theme.Italic("full filesystem access · not sandboxed")))
 	return out.String()
+}
+
+// ApprovalBar starts each row of an approval card and of its outcome.
+func ApprovalBar(theme Theme) string {
+	return theme.Amber("▌") + " "
 }
 
 func requiredText(value *string, name string, emptyOK bool) error {
@@ -270,7 +273,7 @@ func diffLines(text, prefix string, style func(string) string, theme Theme) stri
 	}
 	if !strings.HasSuffix(text, "\n") {
 		out.WriteString("\n")
-		out.WriteString(theme.Haze("\\ No newline at end of content"))
+		out.WriteString(theme.Graphite("\\ No newline at end of content"))
 	}
 	return out.String()
 }

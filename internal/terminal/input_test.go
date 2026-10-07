@@ -32,6 +32,23 @@ func TestParserSplitUTF8AndPaste(t *testing.T) {
 	}
 }
 
+// A reply to the background query that arrives after the wait, split at any
+// byte, must not become keys; the text typed after it must.
+func TestParserDropsLateTerminalReplies(t *testing.T) {
+	data := "\x1b]11;rgb:1e1e/1c1c/1a1a\x1b\\\x1b[?62;22c\x1b]11;rgb:ff/ff/ff\ax"
+	for split := range len(data) {
+		var p parser
+		keys := append(p.feed([]byte(data[:split]), time.Now()), p.feed([]byte(data[split:]), time.Now())...)
+		if len(keys) != 1 || keys[0].kind != keyText || keys[0].text != "x" {
+			t.Fatalf("split %d: keys = %#v", split, keys)
+		}
+	}
+	var p parser
+	if keys := p.feed([]byte("\x1b]"+strings.Repeat("a", maxReplyBytes)+"x"), time.Now()); len(keys) != 0 || len(p.pending) != 0 {
+		t.Fatalf("an unterminated reply was kept or typed: %#v, %d pending", keys, len(p.pending))
+	}
+}
+
 func TestParserEscapeAndArrow(t *testing.T) {
 	now := time.Now()
 	var p parser

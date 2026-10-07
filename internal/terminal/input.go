@@ -107,6 +107,21 @@ func (p *parser) feed(data []byte, now time.Time) []key {
 				}
 				continue
 			}
+			if p.pending[1] == ']' {
+				// An OSC string is a terminal reply, such as a late answer to
+				// the background query; it is never typed input.
+				end, length := terminatorOf(p.pending[2:])
+				if end < 0 {
+					if len(p.pending) < maxReplyBytes {
+						break
+					}
+					end, length = len(p.pending)-2, 0
+				}
+				p.pending = p.pending[2+end+length:]
+				p.escapeAt = time.Time{}
+				p.stalePending = false
+				continue
+			}
 			p.pending = p.pending[1:]
 			p.escapeAt = time.Time{}
 			p.stalePending = false

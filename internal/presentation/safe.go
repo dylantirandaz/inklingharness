@@ -105,52 +105,106 @@ func brief(text string) string {
 	return text
 }
 
-// Banner shows the model, effort, and folder. width is the terminal width for
-// the rule; 0 omits the rule. Session details belong in /status.
+// wordmark is the site's letterspaced "THINKING MACHINES".
+const wordmark = "T H I N K I N G   M A C H I N E S"
+
+// Banner opens a chat: the Inkling mark beside the wordmark, the model name
+// with its effort on a chip, and the folder. width is the terminal width; a
+// narrow terminal, or one without 256 colors, gets the text alone. Session
+// details belong in /status.
 func Banner(model, effort, directory string, width int, theme Theme) string {
-	var out strings.Builder
-	out.WriteString(theme.Gradient("◈ I N K L I N G"))
-	out.WriteString(theme.Haze("   " + singleLine(model) + " · effort " + singleLine(effort)))
-	if width > 0 {
-		out.WriteByte('\n')
-		out.WriteString(theme.Rule(min(width-1, 64)))
+	text := []string{
+		theme.Graphite(wordmark),
+		theme.Bold(theme.Ink(ModelName(model))) + "  " + theme.Chip(" "+strings.ToUpper(singleLine(effort))+" "),
+		theme.Graphite(singleLine(directory)),
 	}
-	out.WriteByte('\n')
-	out.WriteString(theme.Haze("  " + singleLine(directory)))
+	mark := theme.Mark()
+	if mark == nil || width < MarkWidth+3+len(wordmark)+1 {
+		return strings.Join(text, "\n")
+	}
+	// Center the wordmark, a gap, the model, and the folder on the six rows.
+	beside := append([]string{"", text[0], ""}, text[1:]...)
+	var out strings.Builder
+	for index, row := range mark {
+		if index > 0 {
+			out.WriteByte('\n')
+		}
+		out.WriteString(row)
+		if index < len(beside) && beside[index] != "" {
+			out.WriteString("   " + beside[index])
+		}
+	}
 	return out.String()
+}
+
+// ModelName is the display name of a model: the part after the provider,
+// with the words of an Inkling name capitalized as on the model cards.
+func ModelName(model string) string {
+	name := singleLine(model)
+	if _, slug, found := strings.Cut(name, "/"); found {
+		name = slug
+	}
+	if !strings.HasPrefix(strings.ToLower(name), "inkling") {
+		return name
+	}
+	words := strings.Split(name, "-")
+	for index, word := range words {
+		if word != "" {
+			words[index] = strings.ToUpper(word[:1]) + word[1:]
+		}
+	}
+	return strings.Join(words, "-")
 }
 
 // Section labels a block that is not a live turn, such as an earlier reply.
 func Section(label string, theme Theme) string {
-	return theme.Gradient("◈") + " " + theme.Haze(singleLine(label))
+	return theme.Hairline("───") + " " + theme.Graphite(theme.Italic(singleLine(label)))
 }
 
-// AssistantLead starts the first line of a reply; later lines use two spaces.
+// AssistantLead starts the first line of a reply: an ink drop in the model
+// color. Later lines use two spaces.
 func AssistantLead(theme Theme) string {
-	return theme.Gradient("◈") + " "
+	return theme.Accent("●") + " "
 }
 
-// UserTurn echoes a submitted prompt: the ion glyph, then the text with
-// continuation lines aligned under it.
+// UserTurn echoes a submitted prompt as a tinted band, like a site chip, so
+// the user's words stand apart from the reply in scrollback. Erase-to-end
+// extends the tint to the right edge without padding that a resize would
+// wrap. Without a tint the accent marker carries the distinction.
 func UserTurn(prompt string, theme Theme) string {
+	lines := strings.Split(Safe(prompt), "\n")
 	var out strings.Builder
-	for index, line := range strings.Split(Safe(prompt), "\n") {
-		if index == 0 {
-			out.WriteString(theme.Ion("❯ "))
-		} else {
-			out.WriteString("\n  ")
+	for index, line := range lines {
+		if index > 0 {
+			out.WriteByte('\n')
 		}
-		out.WriteString(line)
+		marker := "  "
+		if index == 0 {
+			marker = "› "
+		}
+		if theme.chip == "" {
+			out.WriteString(theme.Accent(marker) + line)
+			continue
+		}
+		out.WriteString(theme.chip + theme.sgr[roleAccent] + marker + theme.sgr[roleInk] + line + "\x1b[K" + reset)
 	}
 	return out.String()
 }
 
-// ToolCompletion keeps the outcome visible without expanding the tool details.
+// ToolCompletion keeps the outcome visible without expanding the tool
+// details: a green dot or a red cross, the verb in bold, then its target.
+// The glyphs differ so the outcome does not depend on color.
 func ToolCompletion(title string, failed bool, theme Theme) string {
+	dot := theme.Green("●")
 	if failed {
-		return theme.Ember("✗ ") + theme.Ember(singleLine(title))
+		dot = theme.Red("✕")
 	}
-	return theme.Verdant("◆ ") + singleLine(title)
+	verb, target, _ := strings.Cut(singleLine(title), " ")
+	line := dot + " " + theme.Bold(verb)
+	if target != "" {
+		line += " " + target
+	}
+	return line
 }
 
 // ResultPreview limits the total number of displayed lines, including the
@@ -162,9 +216,9 @@ func ResultPreview(content string, isError bool, maxLines int, theme Theme) stri
 	}
 	text := strings.TrimSuffix(Safe(content), "\n")
 	lines := strings.Split(text, "\n")
-	style := theme.Haze
+	style := theme.Graphite
 	if isError {
-		style = theme.Ember
+		style = theme.Red
 	}
 	if len(lines) <= maxLines {
 		return styleLines(text, style)
@@ -191,25 +245,22 @@ func styleLines(text string, style func(string) string) string {
 	return strings.Join(lines, "\n")
 }
 
-// Footer is the one-line ship status under the composer: model, effort, and a
-// context gauge against the compaction threshold. compactTokens 0 means that
-// automatic compaction is off; the gauge then gives only the estimate.
+// Footer is the one-line status under the composer: model, effort, and a
+// context gauge against the compaction threshold, drawn as the squares of a
+// model card. compactTokens 0 means that automatic compaction is off; the
+// footer then gives only the estimate.
 func Footer(model, effort string, contextTokens, compactTokens int, theme Theme) string {
-	name := model
-	if _, slug, found := strings.Cut(model, "/"); found {
-		name = slug
-	}
-	separator := theme.Haze(" · ")
+	separator := theme.Hairline(" · ")
 	var out strings.Builder
-	out.WriteString(theme.Haze(singleLine(name)))
+	out.WriteString(theme.Graphite(ModelName(model)))
 	out.WriteString(separator)
-	out.WriteString(theme.Haze(singleLine(effort)))
+	out.WriteString(theme.Graphite(singleLine(effort)))
 	out.WriteString(separator)
 	if compactTokens > 0 {
-		out.WriteString(theme.Gauge(contextTokens, compactTokens, 6))
-		out.WriteString(theme.Haze(" " + shortTokens(contextTokens) + " of " + shortTokens(compactTokens)))
+		out.WriteString(theme.Gauge(contextTokens, compactTokens, 10))
+		out.WriteString(theme.Graphite(" " + shortTokens(contextTokens) + " / " + shortTokens(compactTokens)))
 	} else {
-		out.WriteString(theme.Haze("context ~" + shortTokens(contextTokens)))
+		out.WriteString(theme.Graphite("context ~" + shortTokens(contextTokens)))
 	}
 	return out.String()
 }

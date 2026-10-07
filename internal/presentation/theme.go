@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"unicode/utf8"
 )
 
 // ColorDepth is the color capability of the output terminal.
@@ -33,54 +32,153 @@ func DetectColorDepth(getenv func(string) string) ColorDepth {
 	return ANSI16
 }
 
+// Shade is the brightness of the terminal background. A light background
+// gets ink on paper, as on thinkingmachines.ai; a dark one gets paper on ink.
+type Shade uint8
+
+const (
+	DarkBackground Shade = iota
+	LightBackground
+)
+
+// ShadeOf classifies a background color by its relative luminance, with the
+// boundary at perceptual middle gray.
+func ShadeOf(r, g, b uint8) Shade {
+	if 0.2126*linear(r)+0.7152*linear(g)+0.0722*linear(b) > 0.18 {
+		return LightBackground
+	}
+	return DarkBackground
+}
+
+func linear(channel uint8) float64 {
+	value := float64(channel) / 255
+	if value <= 0.04045 {
+		return value / 12.92
+	}
+	return math.Pow((value+0.055)/1.055, 2.4)
+}
+
+// Accent is the color of a model family, as on the Inkling model cards.
+type Accent uint8
+
+const (
+	AccentGreen Accent = iota
+	AccentBlue
+	AccentPlum
+)
+
+// AccentFor gives Inkling-Small plum, Inkling blue, and other models green.
+func AccentFor(model string) Accent {
+	slug := strings.ToLower(model)
+	if _, after, found := strings.Cut(slug, "/"); found {
+		slug = after
+	}
+	switch {
+	case strings.HasPrefix(slug, "inkling-small"):
+		return AccentPlum
+	case strings.HasPrefix(slug, "inkling"):
+		return AccentBlue
+	default:
+		return AccentGreen
+	}
+}
+
 type rgb struct{ r, g, b uint8 }
 
-// The Signal palette: the terminal background is the void, light is the
-// accent. Each role has a 24-bit color and an ANSI 16 fallback.
+// shaded holds one color for each background shade.
+type shaded struct{ dark, light rgb }
+
+func (s shaded) on(shade Shade) rgb {
+	switch shade {
+	case DarkBackground:
+		return s.dark
+	case LightBackground:
+		return s.light
+	}
+	panic(fmt.Sprintf("presentation: unknown shade %d", shade))
+}
+
 type role uint8
 
 const (
-	roleIon role = iota
-	roleNebula
-	roleHaze
-	roleVerdant
-	roleEmber
-	rolePlasma
+	roleInk role = iota
+	roleGraphite
+	roleHairline
+	roleGreen
+	roleBlue
+	roleRed
 	roleAmber
-	roleFlare
+	roleAccent
+	roleAccentSoft
 	roleCount
 )
 
-var palette = [roleCount]struct {
-	color  rgb
+type swatch struct {
+	color  shaded
 	ansi16 string
-}{
-	roleIon:     {rgb{94, 242, 232}, "36"},
-	roleNebula:  {rgb{167, 139, 250}, "35"},
-	roleHaze:    {rgb{122, 132, 168}, "90"},
-	roleVerdant: {rgb{92, 255, 176}, "32"},
-	roleEmber:   {rgb{255, 92, 122}, "31"},
-	rolePlasma:  {rgb{255, 106, 213}, "95"},
-	roleAmber:   {rgb{255, 198, 109}, "33"},
-	roleFlare:   {rgb{232, 255, 254}, "96"},
 }
 
-// Theme holds the escape sequence of each role for one color depth. The zero
-// value is NoColor: every method then returns its text unchanged, so callers
-// never branch on color themselves.
+// The brand colors come from the Inkling mark; the grays from the site text.
+var (
+	green = shaded{dark: rgb{45, 190, 144}, light: rgb{14, 153, 114}}
+	blue  = shaded{dark: rgb{91, 151, 242}, light: rgb{1, 85, 191}}
+	plum  = shaded{dark: rgb{208, 122, 174}, light: rgb{143, 63, 113}}
+
+	palette = [roleAccent]swatch{
+		roleInk:      {shaded{dark: rgb{239, 233, 225}, light: rgb{22, 19, 17}}, "39"},
+		roleGraphite: {shaded{dark: rgb{154, 146, 138}, light: rgb{103, 103, 103}}, "90"},
+		roleHairline: {shaded{dark: rgb{64, 58, 54}, light: rgb{218, 213, 207}}, "90"},
+		roleGreen:    {green, "32"},
+		roleBlue:     {blue, "34"},
+		roleRed:      {shaded{dark: rgb{242, 97, 76}, light: rgb{214, 58, 39}}, "31"},
+		roleAmber:    {shaded{dark: rgb{247, 162, 36}, light: rgb{184, 116, 16}}, "33"},
+	}
+
+	// Each accent has an active color and a soft one, like the active and
+	// total parameter squares of a model card.
+	accents = [...]struct {
+		active, soft shaded
+		ansi16       string
+	}{
+		AccentGreen: {green, shaded{dark: rgb{36, 84, 68}, light: rgb{160, 214, 196}}, "32"},
+		AccentBlue:  {blue, shaded{dark: rgb{44, 72, 112}, light: rgb{133, 173, 224}}, "34"},
+		AccentPlum:  {plum, shaded{dark: rgb{96, 58, 82}, light: rgb{201, 163, 187}}, "35"},
+	}
+
+	// chipColor is the faint tint behind chips and the user's prompts.
+	chipColor = shaded{dark: rgb{38, 34, 31}, light: rgb{241, 238, 234}}
+	// The shapes of the mark keep their brand colors on both shades; only the
+	// blot follows the ink.
+	markGreen, markBlue, markRed = rgb{14, 153, 114}, rgb{1, 85, 191}, rgb{239, 64, 44}
+)
+
+// Theme holds the escape sequences of each role for one color depth, shade,
+// and accent. The zero value is NoColor: every method then returns its text
+// unchanged, so callers never branch on color themselves.
 type Theme struct {
-	depth ColorDepth
-	sgr   [roleCount]string
+	depth  ColorDepth
+	shade  Shade
+	accent Accent
+	sgr    [roleCount]string
+	// chip is the background sequence of chips; empty below 256 colors,
+	// where a tint cannot be expressed.
+	chip string
 }
 
-// NewTheme computes every role sequence once.
-func NewTheme(depth ColorDepth) Theme {
-	theme := Theme{depth: depth}
+// NewTheme computes every sequence once.
+func NewTheme(depth ColorDepth, shade Shade, accent Accent) Theme {
+	theme := Theme{depth: depth, shade: shade, accent: accent}
 	if depth == NoColor {
 		return theme
 	}
 	for index, entry := range palette {
-		theme.sgr[index] = theme.foreground(entry.color, entry.ansi16)
+		theme.sgr[index] = theme.foreground(entry.color.on(shade), entry.ansi16)
+	}
+	model := accents[accent]
+	theme.sgr[roleAccent] = theme.foreground(model.active.on(shade), model.ansi16)
+	theme.sgr[roleAccentSoft] = theme.foreground(model.soft.on(shade), "90")
+	if depth >= ANSI256 {
+		theme.chip = theme.background(chipColor.on(shade))
 	}
 	return theme
 }
@@ -102,6 +200,19 @@ func (t Theme) foreground(color rgb, ansi16 string) string {
 	panic(fmt.Sprintf("presentation: unknown color depth %d", t.depth))
 }
 
+// background has no ANSI 16 form; callers check the depth first.
+func (t Theme) background(color rgb) string {
+	switch t.depth {
+	case TrueColor:
+		return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", color.r, color.g, color.b)
+	case ANSI256:
+		return fmt.Sprintf("\x1b[48;5;%dm", nearest256(color))
+	case ANSI16, NoColor:
+		return ""
+	}
+	panic(fmt.Sprintf("presentation: unknown color depth %d", t.depth))
+}
+
 func (t Theme) paint(r role, text string) string {
 	if t.depth == NoColor || text == "" {
 		return text
@@ -109,161 +220,208 @@ func (t Theme) paint(r role, text string) string {
 	return t.sgr[r] + text + reset
 }
 
-func (t Theme) Ion(text string) string     { return t.paint(roleIon, text) }
-func (t Theme) Nebula(text string) string  { return t.paint(roleNebula, text) }
-func (t Theme) Haze(text string) string    { return t.paint(roleHaze, text) }
-func (t Theme) Verdant(text string) string { return t.paint(roleVerdant, text) }
-func (t Theme) Ember(text string) string   { return t.paint(roleEmber, text) }
-func (t Theme) Plasma(text string) string  { return t.paint(rolePlasma, text) }
-func (t Theme) Amber(text string) string   { return t.paint(roleAmber, text) }
-
-// Bold keeps the current color.
-func (t Theme) Bold(text string) string {
+func (t Theme) attribute(code, text string) string {
 	if t.depth == NoColor || text == "" {
 		return text
 	}
-	return bold + text + reset
+	return code + text + reset
 }
 
-// Gradient colors text from ion to nebula, one step per rune. ANSI 16 has no
-// intermediate colors and uses ion for the whole text.
-func (t Theme) Gradient(text string) string {
-	switch t.depth {
-	case NoColor:
-		return text
-	case ANSI16:
-		return t.Ion(text)
-	case ANSI256, TrueColor:
+func (t Theme) Ink(text string) string      { return t.paint(roleInk, text) }
+func (t Theme) Graphite(text string) string { return t.paint(roleGraphite, text) }
+func (t Theme) Hairline(text string) string { return t.paint(roleHairline, text) }
+func (t Theme) Green(text string) string    { return t.paint(roleGreen, text) }
+func (t Theme) Blue(text string) string     { return t.paint(roleBlue, text) }
+func (t Theme) Red(text string) string      { return t.paint(roleRed, text) }
+func (t Theme) Amber(text string) string    { return t.paint(roleAmber, text) }
+
+// Accent is the model color: plum for Inkling-Small, blue for Inkling.
+func (t Theme) Accent(text string) string { return t.paint(roleAccent, text) }
+
+// Bold, Italic, and Underline keep the current color.
+func (t Theme) Bold(text string) string      { return t.attribute(bold, text) }
+func (t Theme) Italic(text string) string    { return t.attribute("\x1b[3m", text) }
+func (t Theme) Underline(text string) string { return t.attribute("\x1b[4m", text) }
+
+// Chip sets text on the faint tint of a site badge. Without a tint it stays
+// ink, so a chip never depends on its background to be read.
+func (t Theme) Chip(text string) string {
+	if t.chip == "" {
+		return t.Ink(text)
 	}
-	count := utf8.RuneCountInString(text)
-	ion, nebula := palette[roleIon].color, palette[roleNebula].color
-	var out strings.Builder
-	out.Grow(len(text) + count*20)
-	last, index := "", 0
-	for _, r := range text {
-		code := t.foreground(blend(ion, nebula, fraction(index, count)), "")
-		if code != last {
-			out.WriteString(code)
-			last = code
-		}
-		out.WriteRune(r)
-		index++
-	}
-	out.WriteString(reset)
-	return out.String()
+	return t.chip + t.sgr[roleInk] + text + reset
 }
 
-// ruleSegments bounds the color changes in a rule, so a wide terminal does
-// not multiply the bytes of each composer redraw.
-const ruleSegments = 24
+// Code marks inline code: a chip when a tint exists, else the accent.
+func (t Theme) Code(text string) string {
+	if t.chip == "" {
+		return t.Accent(text)
+	}
+	return t.Chip(text)
+}
 
-// Rule is a hairline of width cells: ion to nebula over the first three
-// quarters, then a fade into haze, like a beam that leaves the hull.
+// Key labels a key to press: a chip when a tint exists, bold accent with
+// only ANSI 16 colors, and brackets without color.
+func (t Theme) Key(key string) string {
+	switch {
+	case t.depth == NoColor:
+		return "[" + key + "]"
+	case t.chip == "":
+		return t.Bold(t.Accent(key))
+	default:
+		return t.Chip(" " + key + " ")
+	}
+}
+
+// Rule is a hairline of width cells.
 func (t Theme) Rule(width int) string {
 	if width <= 0 {
 		return ""
 	}
-	line := strings.Repeat("━", width)
-	switch t.depth {
-	case NoColor:
-		return line
-	case ANSI16:
-		return t.Ion(line)
-	case ANSI256, TrueColor:
-	}
-	ion, nebula, haze := palette[roleIon].color, palette[roleNebula].color, palette[roleHaze].color
-	segment := max(1, (width+ruleSegments-1)/ruleSegments)
+	return t.Hairline(strings.Repeat("─", width))
+}
+
+// squares writes one cell per entry of styles. Neighbors of the same style
+// share one sequence, so an animated row stays a few dozen bytes.
+func (t Theme) squares(styles []role, glyphs func(role) string) string {
 	var out strings.Builder
-	out.Grow(width*3 + ruleSegments*20)
-	last := ""
-	for start := 0; start < width; start += segment {
-		position := fraction(start, width)
-		color := blend(ion, nebula, position/0.75)
-		if position > 0.75 {
-			color = blend(nebula, haze, (position-0.75)/0.25)
+	for start := 0; start < len(styles); {
+		end := start
+		for end < len(styles) && styles[end] == styles[start] {
+			end++
 		}
-		if code := t.foreground(color, ""); code != last {
-			out.WriteString(code)
-			last = code
-		}
-		out.WriteString(strings.Repeat("━", min(segment, width-start)))
+		out.WriteString(t.paint(styles[start], strings.Repeat(glyphs(styles[start]), end-start)))
+		start = end
 	}
-	out.WriteString(reset)
 	return out.String()
 }
 
-// Shimmer draws text in haze with a bright band at phase that moves one rune
-// per frame and wraps. Without 24-bit color the text stays ion, because a few
-// palette steps would flicker rather than glide.
-func (t Theme) Shimmer(text string, phase int) string {
-	switch t.depth {
-	case NoColor:
-		return text
-	case ANSI16, ANSI256:
-		return t.Ion(text)
-	case TrueColor:
+// squareGlyph is the glyph of one cell. Without color an empty cell is a dot,
+// so the state stays visible in plain text.
+func (t Theme) squareGlyph(r role) string {
+	if t.depth == NoColor && r == roleHairline {
+		return "·"
 	}
-	const band = 3
-	count := utf8.RuneCountInString(text)
-	period := count + 2*band
-	center := phase%period - band
-	base, ion, flare := palette[roleHaze].color, palette[roleIon].color, palette[roleFlare].color
-	var out strings.Builder
-	out.Grow(len(text) + 12*20)
-	last, index := "", 0
-	for _, r := range text {
-		distance := index - center
-		if distance < 0 {
-			distance = -distance
-		}
-		color := base
-		switch {
+	return "▪"
+}
+
+// Pulse is the working indicator: a row of squares, like the parameter grid
+// of an Inkling model card, where one active square with a soft trail moves
+// across and wraps.
+func (t Theme) Pulse(frame, cells int) string {
+	if cells <= 0 {
+		return ""
+	}
+	const trail = 2
+	head := frame % (cells + trail + 1)
+	styles := make([]role, cells)
+	for index := range styles {
+		switch distance := head - index; {
 		case distance == 0:
-			color = flare
-		case distance < band:
-			color = blend(ion, base, float64(distance)/band)
+			styles[index] = roleAccent
+		case distance > 0 && distance <= trail:
+			styles[index] = roleAccentSoft
+		default:
+			styles[index] = roleHairline
 		}
-		if code := t.foreground(color, ""); code != last {
-			out.WriteString(code)
-			last = code
-		}
-		out.WriteRune(r)
-		index++
 	}
-	out.WriteString(reset)
-	return out.String()
+	return t.squares(styles, t.squareGlyph)
 }
 
-// Gauge shows used of limit as cells of ▰ and ▱. The fill turns amber near
-// the limit and ember above it.
+// Gauge shows used of limit as a row of squares. Used squares take the
+// accent, turn amber near the limit, and red above it.
 func (t Theme) Gauge(used, limit, cells int) string {
 	if limit <= 0 || cells <= 0 {
 		return ""
 	}
-	filled := int(math.Round(float64(min(used, limit)) * float64(cells) / float64(limit)))
-	fill := t.Ion
+	filled := int(math.Round(float64(min(max(used, 0), limit)) * float64(cells) / float64(limit)))
+	if used > 0 && filled == 0 {
+		filled = 1
+	}
+	fill := roleAccent
 	switch share := float64(used) / float64(limit); {
 	case share >= 1:
-		fill = t.Ember
+		fill = roleRed
 	case share >= 0.8:
-		fill = t.Amber
+		fill = roleAmber
 	}
-	return fill(strings.Repeat("▰", filled)) + t.Haze(strings.Repeat("▱", cells-filled))
+	styles := make([]role, cells)
+	for index := range styles {
+		styles[index] = roleHairline
+		if index < filled {
+			styles[index] = fill
+		}
+	}
+	return t.squares(styles, t.squareGlyph)
 }
 
-func fraction(index, count int) float64 {
-	if count <= 1 {
-		return 0
-	}
-	return float64(index) / float64(count-1)
+// inklingMark is the Inkling mark at 16 by 12 pixels, sampled from the logo
+// on thinkingmachines.ai/inkling: the ink blot (K) with its green shape (G)
+// and its hole, the blue dot (B), and the red pill (R).
+var inklingMark = [...]string{
+	"..........KKKKK.",
+	"...KKK..GGGGGKKK",
+	"...KKK.GGGGGGKK.",
+	"..KKKKKGGGGGGKKK",
+	"..KKKKKKGGGGKKKK",
+	"...KKKKKGGGKKKKK",
+	"...KKKKKKKKK.KK.",
+	"....KKKKKKKKKR..",
+	".BB..KKKKKKRRRR.",
+	"BBBB..KK..RRRRR.",
+	"BBBB......RRR...",
+	".BB.......RRR...",
 }
 
-func blend(from, to rgb, share float64) rgb {
-	share = min(max(share, 0), 1)
-	mix := func(a, b uint8) uint8 {
-		return uint8(math.Round(float64(a) + (float64(b)-float64(a))*share))
+// MarkWidth is the number of cells of each Mark row.
+const MarkWidth = 16
+
+// Mark draws the Inkling mark in six rows with half blocks: each cell holds
+// two pixels, the top one as foreground and the bottom one as background.
+// The blot takes the ink color, so it inverts with the shade. Below 256
+// colors the mark cannot be drawn and Mark returns nil.
+func (t Theme) Mark() []string {
+	if t.depth < ANSI256 {
+		return nil
 	}
-	return rgb{mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b)}
+	pixel := func(code byte) (rgb, bool) {
+		switch code {
+		case 'K':
+			return palette[roleInk].color.on(t.shade), true
+		case 'G':
+			return markGreen, true
+		case 'B':
+			return markBlue, true
+		case 'R':
+			return markRed, true
+		case '.':
+			return rgb{}, false
+		}
+		panic(fmt.Sprintf("presentation: unknown mark pixel %q", code))
+	}
+	rows := make([]string, 0, len(inklingMark)/2)
+	for y := 0; y < len(inklingMark); y += 2 {
+		var out strings.Builder
+		for x := range MarkWidth {
+			top, topSet := pixel(inklingMark[y][x])
+			bottom, bottomSet := pixel(inklingMark[y+1][x])
+			switch {
+			case !topSet && !bottomSet:
+				out.WriteString(reset + " ")
+			case topSet && !bottomSet:
+				out.WriteString(reset + t.foreground(top, "") + "▀")
+			case !topSet && bottomSet:
+				out.WriteString(reset + t.foreground(bottom, "") + "▄")
+			case top == bottom:
+				out.WriteString(reset + t.foreground(top, "") + "█")
+			default:
+				out.WriteString(t.foreground(top, "") + t.background(bottom) + "▀")
+			}
+		}
+		out.WriteString(reset)
+		rows = append(rows, out.String())
+	}
+	return rows
 }
 
 // nearest256 maps a color to the closest entry of the xterm 6x6x6 cube or the

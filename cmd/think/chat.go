@@ -122,18 +122,18 @@ func (approval *approvals) check(ctx context.Context, call anthropic.ToolUseBloc
 		}
 		approval.screen.SetStatus(presentation.Safe(view.Title))
 		outcome := func(text string, style func(string) string) {
-			fmt.Fprintln(approval.output, "  "+approval.theme.Haze("⎿ ")+style(text))
+			fmt.Fprintln(approval.output, presentation.ApprovalBar(approval.theme)+style(text))
 		}
 		switch choice {
 		case terminal.AllowOnce:
-			outcome("allowed once", approval.theme.Verdant)
+			outcome("allowed once", approval.theme.Green)
 			return true, nil
 		case terminal.AllowSession:
 			approval.allowAll = true
-			outcome("allowed for this session", approval.theme.Verdant)
+			outcome("allowed for this session", approval.theme.Green)
 			return true, nil
 		case terminal.Deny:
-			outcome("denied", approval.theme.Ember)
+			outcome("denied", approval.theme.Red)
 			return false, nil
 		default:
 			return false, fmt.Errorf("unknown approval choice %v", choice)
@@ -298,12 +298,13 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	displayOutput, progressOutput := stdout, stderr
 	var theme presentation.Theme
 	if outputFile, ok := stdout.(*os.File); ok && interactive && !o.plain && os.Getenv("TERM") != "dumb" && terminal.IsTerminal(outputFile) {
-		theme = presentation.NewTheme(presentation.DetectColorDepth(os.Getenv))
-		screen, err = terminal.New(ctx, stdin, outputFile, func() { control.interrupt(exit) }, theme)
+		screen, err = terminal.New(ctx, stdin, outputFile, func() { control.interrupt(exit) },
+			presentation.DetectColorDepth(os.Getenv), presentation.AccentFor(o.model))
 		if err != nil {
 			fmt.Fprintf(stderr, "inkling: terminal: %v\n", err)
 			return 1
 		}
+		theme = screen.Theme()
 		originalStderr := stderr
 		defer func() {
 			if err := screen.Close(); err != nil {
