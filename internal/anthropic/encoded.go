@@ -67,36 +67,35 @@ type measuredBlock int
 
 func (b *measuredBlock) UnmarshalJSON(raw []byte) error {
 	var fields struct {
-		Type      string         `json:"type"`
-		Text      measuredString `json:"text"`
-		Thinking  measuredString `json:"thinking"`
-		Signature measuredString `json:"signature"`
-		Data      measuredString `json:"data"`
-		ID        measuredString `json:"id"`
-		Name      measuredString `json:"name"`
-		Input     measuredRaw    `json:"input"`
-		ToolUseID measuredString `json:"tool_use_id"`
-		Content   measuredString `json:"content"`
-		IsError   bool           `json:"is_error"`
+		Type      string              `json:"type"`
+		Text      measuredString      `json:"text"`
+		Thinking  measuredString      `json:"thinking"`
+		Signature measuredString      `json:"signature"`
+		Data      measuredString      `json:"data"`
+		ID        measuredString      `json:"id"`
+		Name      measuredString      `json:"name"`
+		Input     measuredRaw         `json:"input"`
+		ToolUseID measuredString      `json:"tool_use_id"`
+		Content   measuredString      `json:"content"`
+		IsError   bool                `json:"is_error"`
+		Source    measuredImageSource `json:"source"`
 	}
 	err := json.Unmarshal(raw, &fields)
-	switch fields.Type {
-	case "text", "thinking", "redacted_thinking", "tool_use", "tool_result":
-		if err != nil {
-			return fmt.Errorf("%s block: %w", fields.Type, err)
-		}
-		// blockDecoder decodes these fields as strings for every known kind.
-		for _, field := range [...]measuredString{fields.Text, fields.Thinking, fields.Signature, fields.Data, fields.ID, fields.Name, fields.ToolUseID} {
-			if field.notString {
-				return fmt.Errorf("%s block: a string field has another JSON type", fields.Type)
-			}
-		}
-	default:
+	if !knownBlock(fields.Type, fields.Source.isBase64) {
 		if len(raw) == 0 || raw[0] != '{' {
 			return errors.New("content block is not a JSON object")
 		}
 		*b = measuredBlock(len(raw))
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%s block: %w", fields.Type, err)
+	}
+	// blockDecoder decodes these fields as strings for every known kind.
+	for _, field := range [...]measuredString{fields.Text, fields.Thinking, fields.Signature, fields.Data, fields.ID, fields.Name, fields.ToolUseID} {
+		if field.notString {
+			return fmt.Errorf("%s block: a string field has another JSON type", fields.Type)
+		}
 	}
 	switch fields.Type {
 	case "text":
@@ -112,6 +111,73 @@ func (b *measuredBlock) UnmarshalJSON(raw []byte) error {
 			return errors.New("tool_result block: content is not a string")
 		}
 		*b = measuredBlock(fields.ToolUseID.length + fields.Content.length)
+	case "image":
+		if fields.Source.err != nil {
+			return fmt.Errorf("image block: %w", fields.Source.err)
+		}
+		*b = imageEstimateBytes
+	}
+	return nil
+}
+
+// measuredImageSource checks a "source" field with the rules of imageSource,
+// but it does not copy the image data.
+type measuredImageSource struct {
+	isBase64 bool
+	err      error
+}
+
+func (s *measuredImageSource) UnmarshalJSON(raw []byte) error {
+	*s = measuredImageSource{}
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil
+	}
+	var fields struct {
+		Type      string            `json:"type"`
+		MediaType string            `json:"media_type"`
+		Data      measuredImageData `json:"data"`
+	}
+	// An absent or null "data" leaves a Go string empty, so start from the
+	// result for empty data.
+	fields.Data.err = checkImageData("")
+	err := json.Unmarshal(raw, &fields)
+	if err == nil && fields.Data.notString {
+		err = errors.New("image data is not a string")
+	}
+	if err == nil {
+		err = checkImageMediaType(fields.MediaType)
+	}
+	if err == nil {
+		err = fields.Data.err
+	}
+	*s = measuredImageSource{isBase64: fields.Type == "base64", err: err}
+	return nil
+}
+
+// measuredImageData checks the base64 data in place. A Go string field keeps
+// the last of repeated keys, but a type mismatch in any of them is an error,
+// so notString stays set and err follows the last string.
+type measuredImageData struct {
+	notString bool
+	err       error
+}
+
+func (d *measuredImageData) UnmarshalJSON(raw []byte) error {
+	switch {
+	case string(raw) == "null":
+		// null leaves a Go string field unchanged.
+	case len(raw) > 0 && raw[0] == '"':
+		if bytes.IndexByte(raw, '\\') < 0 {
+			d.err = checkImageData(raw[1 : len(raw)-1])
+			return nil
+		}
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return err
+		}
+		d.err = checkImageData(text)
+	default:
+		d.notString = true
 	}
 	return nil
 }

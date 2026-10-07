@@ -164,6 +164,10 @@ text stays hidden unless `-show-thinking` is set.
 | `/effort [LEVEL]` | Show or change reasoning effort. `default` restores the model default. |
 | `/compact` | Summarize older messages with the selected model. |
 | `/clear` | Start a new session. Keep the old session on disk. |
+| `/plan TASK` | Investigate with read-only tools and reply with a numbered plan. Changes are refused. |
+| `/undo` | Restore the files and the conversation from before the last prompt. |
+| `/rewind [N]` | List the prompts of this run, or restore the state from before prompt N. |
+| `/NAME [ARGS]` | Run your command from `.inkling/commands/NAME.md`; see [Extensions](#extensions). |
 | `/quit` | Exit. Completed conversation state is already saved. |
 
 Enter sends the input. Ctrl-J adds a line. Bracketed paste keeps multiline
@@ -182,8 +186,8 @@ The terminal state is restored on exit.
 
 The default instructions tell the model to answer greetings and general
 discussion without tools. Repository tasks still use tools as needed.
-There is no editor integration, plugin system, or MCP client. This harness
-does not have feature parity with Claude Code, pi, or oh-my-pi.
+Settings, permission rules, hooks, MCP servers, custom tools, commands, and
+skills are files; see [Extensions](#extensions). There is no plugin runtime.
 
 ## File context
 
@@ -201,11 +205,15 @@ for a path with spaces, or `@@` for a literal `@`. Email addresses, inline
 code, and fenced code stay literal. Markers must be separate words; file
 patterns are not expanded.
 
-Files must be regular UTF-8 text files without NUL bytes. The total file
+Text files must be regular UTF-8 text files without NUL bytes. The total text
 content limit is 256 KiB. Missing, invalid, or oversized files stop the
 request before a model call; content is not cut to fit. Repeated paths are
 read once. Relative paths use the working directory, and absolute paths are
 allowed. Contents are read again for each submitted request.
+
+A `.png`, `.jpg`, `.jpeg`, `.gif`, or `.webp` file goes to the model as an
+image, not as text. Its bytes must match its extension. Limits: 5 MiB for
+each image and 8 images for each request.
 
 The model receives the request and file snapshots in a marked data envelope.
 The snapshots count as file reads, but the model can still request more
@@ -228,9 +236,11 @@ In plain mode, press Enter after `y`, `a`, or `n`; Escape is a terminal-composer
 control.
 
 `-yes` allows changes and commands without a prompt. Without a terminal,
-mutating calls are denied unless `-yes` is set. `eval` requires `-yes` because
-both model tools and task checks can run commands. Session-wide approval is
-not saved. `/clear` also resets it, unless chat was started with `-yes`.
+mutating calls are denied unless `-yes` is set or a permission rule allows
+them. `eval` requires `-yes` because both model tools and task checks can run
+commands. Session-wide approval is not saved. `/clear` also resets it, unless
+chat was started with `-yes`. Permission rules in the settings can allow or
+deny calls without a question; see [Extensions](#extensions).
 
 **These tools are not a sandbox.** They use your filesystem permissions.
 Absolute paths are allowed. Read-only calls need no approval and can read
@@ -247,9 +257,13 @@ that must be isolated from your files or network.
 | `list_dir` | Optional `path` and `limit`. Defaults: `.` and 500. Lists sorted names; directories end with `/`. |
 | `glob` | Required `pattern`; optional `path` and `limit`. Defaults: `.` and 1000. `**` matches zero or more path segments. |
 | `grep` | Required Go regular expression `pattern`; optional `path`, `include` glob, `limit`, and `case_sensitive`. Defaults: `.`, 100 results, case-sensitive. Returns `path:line:text`. |
-| `bash` | Required `command`; optional `timeout_seconds`. Default: 120 seconds; maximum: 600 seconds. Reports output and exit status. Output above 32 KiB returns its first and last 16 KiB and the path of a file with the full output. |
+| `bash` | Required `command`; optional `timeout_seconds` or `background`. Default timeout: 120 seconds; maximum: 600 seconds. Reports output and exit status. Output above 32 KiB returns its first and last 16 KiB and the path of a file with the full output. With `background: true` the command starts as job N and the call returns at once. |
+| `bash_job` | Required `action`: `list`, `output`, or `kill`; `id` for output and kill. Output returns what the job wrote since the last read, at most 32 KiB; the full output is in a file. Kill stops the whole process group. At most 8 jobs run; all jobs stop when the session ends. Needs no approval: it only reads or stops jobs that an approved `bash` call started. |
 | `todo_write` | Required `items` list with `content` and `status`: `pending`, `in_progress`, or `completed`. At most one item can be in progress. Replaces the task list; `[]` clears it. |
 | `task` | Required `prompt`. Runs read-only research with the same model in a separate conversation. Returns findings to the parent. |
+| `mcp_list`, `mcp_call` | Only when MCP servers are set. `mcp_list` starts a server on first use and lists its tools with their input schemas; `mcp_call` calls one. |
+
+Custom tools from `.inkling/tools/` follow the standard tools, in name order.
 
 Read and search output is capped at 256 KiB. Bash output up to 32 KiB returns
 whole. Larger output returns the first 16 KiB, a marker line, and the last
@@ -281,6 +295,108 @@ tasks. They can use the read and search tools and take at most 20 model turns.
 The parent waits for their results. `-tasks=false` removes the task tool.
 The task list is local to the current tool set; its reported results remain
 in conversation history, but its in-memory state resets on resume.
+
+## Extensions
+
+Everything below is a file. With none of these files, nothing loads, nothing
+starts, and the requests are the same as without the feature. Project files in
+`.inkling/` take precedence over user files in `$XDG_CONFIG_HOME/inkling/` or
+`~/.config/inkling/`. A bad file stops start-up with an error that names it.
+
+**Settings**, `settings.json`. Unknown fields are an error:
+
+```json
+{
+  "permissions": {
+    "allow": ["bash(go test *)", "edit_file(src/**)", "mcp_call(github/*)"],
+    "deny": ["bash(rm *)", "write_file(**/.env)"]
+  },
+  "hooks": {
+    "before_tool": [{"command": "./scripts/check-tool.sh", "tools": ["bash"]}],
+    "after_tool": [{"command": "./scripts/log-tool.sh"}],
+    "prompt": [{"command": "git log -1 --format='Last commit: %s'"}]
+  },
+  "mcp_servers": {
+    "github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+               "env": {"GITHUB_TOKEN": "..."}, "description": "GitHub issues and pull requests"}
+  }
+}
+```
+
+- **Permission rules** are `tool` or `tool(pattern)`. For `bash` the pattern
+  matches the command, with `*` for any text. An allow rule never matches a
+  command with `;`, `&`, `|`, backticks, `$(`, `>`, `<`, or a new line unless
+  the pattern has the same syntax at the same place, so `bash(go test *)`
+  does not allow `go test ./... && rm -rf /`. A deny rule checks the whole
+  command and each part between those operators. For `write_file` and
+  `edit_file` the pattern is a path glob (`*`, `?`, `**`) relative to the
+  folder; an allowed path must also stay in the folder after symbolic links
+  resolve. For `mcp_call` it is `server/tool`. Deny wins over allow; without a
+  match, chat asks. Rules are a guard, not a sandbox.
+- **Hooks** run with `bash -c` in the folder and get the event as JSON on
+  stdin. A `before_tool` hook that exits 2 refuses the call, and its stderr
+  goes to the model; any other non-zero exit stops the turn, so a broken hook
+  is never silent. `after_tool` hooks see the result. The stdout of `prompt`
+  hooks goes after your prompt as context. Each hook has 30 seconds.
+- **MCP servers** speak the Model Context Protocol over stdio. The model sees
+  only the server names and descriptions, plus two fixed tools, `mcp_list` and
+  `mcp_call`. A server starts when the model first lists or calls it, and
+  stops at exit. The tool list of a request never changes, so the prompt
+  cache stays valid.
+
+**Custom tools**, `tools/NAME.json`: `{"name", "description",
+"input_schema", "command", "read_only", "timeout_seconds"}`. The command runs
+with `bash -c` in the folder, gets the tool input as JSON on stdin, and its
+output is the result; a non-zero exit is an error result. Tools that are not
+read-only need approval like Bash.
+
+**Commands**, `commands/NAME.md`: a prompt template that `/NAME args` sends,
+with `$ARGUMENTS` replaced. Optional front matter: `description:` and
+`read-only: true`, which runs the command like `/plan`. A command cannot use
+the name of a chat command.
+
+**Skills**, `skills/NAME/SKILL.md` with front matter `name:` and
+`description:`. Only the name, the description, and the path go in the
+system prompt; the model reads the file with `read_file` when a task needs
+it, so a long skill costs nothing until it is used.
+
+## Undo and rewind
+
+Before each prompt, chat records the conversation and, inside a git
+repository, a snapshot of the working tree. `/undo` restores both from before
+the last prompt; `/rewind` lists the prompts and `/rewind N` restores the
+state from before prompt N. The snapshot is a git tree object written with a
+temporary index: your index, `HEAD`, branches, and stash do not change, and
+ignored files are not saved or touched. It runs while the first request
+streams; only the first tool that can change a file waits for it.
+
+A restore puts back the whole working tree, including your own edits made
+after that prompt. Outside git, only the conversation goes back. Checkpoints
+live in the chat process and are not saved with the session. Snapshot
+objects are unreachable, so `git gc` can remove them after its grace period.
+
+## Scripting and editors
+
+`think run -json` writes one JSON object for each event on stdout:
+`text`, `thinking`, `tool_call`, `tool_result`, `turn`, `status`, and last
+`done` or `error`. `think run -plan` investigates with read-only tools and
+prints a plan. Without a terminal, a change needs `-yes` or an allow rule.
+
+`think rpc` serves one conversation over stdin and stdout, one JSON object
+per line, for editors:
+
+```text
+→ {"id":1,"method":"prompt","params":{"text":"Fix the failing test"}}
+← {"method":"event","params":{"type":"tool_call","name":"edit_file",...}}
+← {"id":"approve-1","method":"approve","params":{"tool":"edit_file","input":{...}}}
+→ {"id":"approve-1","result":{"allow":true}}
+← {"id":1,"result":{"final_text":"...","turns":4,"usage":{...}}}
+→ {"id":2,"method":"cancel"}      → {"id":3,"method":"shutdown"}
+```
+
+One prompt runs at a time; a second one gets an error. History stays in the
+process for later prompts and is not saved. At end of input the running
+prompt is cancelled.
 
 ## Sessions and context
 
@@ -749,18 +865,54 @@ A native M4 chat used the attached Sum source and correctly reported its
 skipped first element. The same-batch failure regression uses real local
 files; the provider used separate turns in the interactive sample.
 
+The extension release was checked against the real model
+(`thinkingmachines/inkling-small`, high effort, one provider):
+
+- One `run -json` task without `-yes` used every extension type: an allow
+  rule ran `go test` and an MCP call without a question, a deny rule refused
+  `rm -rf build`, a custom tool counted words, the real
+  `@modelcontextprotocol/server-everything` server started on first use and
+  answered `echo`, the model read a skill file, and a prompt hook added
+  context. Before-tool and after-tool hooks ran for each tool that ran. The
+  MCP server process ended with the run.
+- `rpc` answered two prompts with one approval round trip and kept history.
+- `run -plan` replied with a plan; both change attempts were refused and the
+  file stayed byte-identical.
+- An attached PNG reached the model, which named both of its colors.
+- A background `python3 -m http.server` job served a request, was killed by
+  `bash_job`, and nothing listened on its port after the run.
+- In the real chat TUI, `/undo` restored the edited file byte for byte, a
+  read-only user command refused a change, and `/rewind` listed the prompts.
+
+The 20-task eval, one run each, with the same settings:
+
+| Build | Passed | Turns | Turn latency p95 | Uncached input | Output tokens |
+| --- | --- | --- | --- | --- | --- |
+| v0.3.0 | 19/20 | 159 | 5.06 s | 60,380 | 56,022 |
+| extensions | 20/20 | 173 | 3.71 s | 52,260 | 23,101 |
+
+The v0.3.0 failure was one runaway reply that hit `max_tokens`. One run of
+each build cannot separate a gain from model variance; it shows no
+regression from the longer tool list. `scripts/limits` on the release build:
+7.15 MiB, 25.7 ms startup (median of 7), no measurable idle CPU.
+
 ## Layout
 
-- `cmd/think`: the `think` command: login, interactive chat, sessions, one-shot runs, and evaluation.
-- `internal/anthropic`: streaming Messages client, encoded history messages, and bounded retries.
-- `internal/agent`: conversation loop, approval hook, compaction, and research tasks.
+- `cmd/think`: the `think` command: login, interactive chat, sessions, one-shot runs, JSON events, RPC, evaluation, and extension wiring.
+- `internal/anthropic`: streaming Messages client, encoded history messages, images, and bounded retries.
+- `internal/agent`: conversation loop, tool gate, approval hook, compaction, and research tasks.
 - `internal/terminal`: terminal input, live display, resize, and state restoration.
 - `internal/presentation`: safe text, Markdown styles, tool views, and approval details.
-- `internal/tools`: local coding tools.
+- `internal/tools`: local coding tools and background jobs.
+- `internal/extend`: settings, hooks, custom tools, commands, and skills from files.
+- `internal/permission`: permission rules for tool calls.
+- `internal/mcp`: MCP client over stdio.
+- `internal/rewind`: working-tree snapshots for undo.
 - `internal/session`: private append-only conversation storage.
-- `internal/project`: project instruction and Git snapshots.
-- `internal/attachment`: explicit file context preparation.
+- `internal/project`: project instruction and Git status.
+- `internal/attachment`: explicit file and image context preparation.
 - `internal/latency`: opt-in stage records, HTTP trace hooks, and reports.
 - `internal/openrouter`, `internal/credentials`: key check and local key storage.
 - `internal/record`, `internal/eval`: recording and task evaluation.
-- `prompts`, `evals`: optional prompts and evaluation fixtures.
+- `prompts`, `evals`: optional prompts and evaluation fixtures (20 tasks).
+- `scripts/release.sh`, `scripts/limits`: release builds and the startup, idle-CPU, and binary-size limits that a release must pass.

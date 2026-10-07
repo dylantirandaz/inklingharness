@@ -29,6 +29,20 @@ type Config struct {
 	EnableTasks   bool
 	Approve       func(context.Context, anthropic.ToolUseBlock) (bool, error)
 	Checkpoint    func(Outcome) error
+	// Gate runs before every tool call, read-only ones too, and before
+	// Approve. A refusal goes to the model as a failed result with its
+	// reason; an error stops the run. A nil Gate refuses nothing. Gate must
+	// be safe for concurrent calls, because read-only batches run in
+	// parallel.
+	Gate func(context.Context, anthropic.ToolUseBlock) (*Refusal, error)
+	// AfterTool sees the result of every tool that ran. An error stops the
+	// run, so a broken hook is never silent. A nil AfterTool does nothing.
+	AfterTool func(context.Context, anthropic.ToolUseBlock, tools.Result) error
+}
+
+// Refusal is why a Gate stops one tool call.
+type Refusal struct {
+	Reason string
 }
 
 // Observer methods run on the caller's goroutine, including parallel tool results.
@@ -69,14 +83,24 @@ type Outcome struct {
 	LastInputTokens int
 }
 
+// Prompt is one user request: its text and the images attached to it.
+type Prompt struct {
+	Text   string
+	Images []anthropic.ImageBlock
+}
+
 // Run adds a user prompt to history and runs until the model stops or fails.
 // It does not change history. Completed tool effects are not repeated on resume.
-func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, history []anthropic.EncodedMessage, prompt string, observer Observer) (*Outcome, error) {
+func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, history []anthropic.EncodedMessage, prompt Prompt, observer Observer) (*Outcome, error) {
 	outcome := &Outcome{Messages: slices.Clone(history)}
-	if config.MaxTurns <= 0 || config.MaxTokens <= 0 || config.CompactTokens < 0 || strings.TrimSpace(prompt) == "" {
+	if config.MaxTurns <= 0 || config.MaxTokens <= 0 || config.CompactTokens < 0 || strings.TrimSpace(prompt.Text) == "" {
 		return outcome, errors.New("agent: positive turn/token limits, a nonnegative compaction limit, and a prompt are required")
 	}
-	withPrompt, err := appendMessage(outcome.Messages, anthropic.Message{Role: anthropic.RoleUser, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: prompt}}})
+	content := []anthropic.ContentBlock{anthropic.TextBlock{Text: prompt.Text}}
+	for _, image := range prompt.Images {
+		content = append(content, image)
+	}
+	withPrompt, err := appendMessage(outcome.Messages, anthropic.Message{Role: anthropic.RoleUser, Content: content})
 	if err != nil {
 		return outcome, fmt.Errorf("agent: add prompt: %w", err)
 	}
@@ -355,15 +379,29 @@ func runTool(ctx context.Context, client *anthropic.Client, config Config, toolS
 	if err := ctx.Err(); err != nil {
 		return finish(tools.Result{}, anthropic.Usage{}, err)
 	}
+	if config.Gate != nil {
+		refusal, err := config.Gate(ctx, call)
+		if err != nil {
+			return finish(tools.Result{}, anthropic.Usage{}, err)
+		}
+		if refusal != nil {
+			return finish(tools.Result{Content: "Refused: " + refusal.Reason, IsError: true}, anthropic.Usage{}, nil)
+		}
+	}
 	if config.EnableTasks && call.Name == "task" {
 		result, usage, err := runTask(ctx, client, config, toolSet, call.Input)
+		if err == nil {
+			err = afterTool(ctx, config, call, result)
+		}
 		return finish(result, usage, err)
 	}
 	tool, found := toolSet.Lookup(call.Name)
 	if !found {
 		return finish(tools.Result{Content: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}, anthropic.Usage{}, nil)
 	}
-	if !tool.ReadOnly && call.Name != "todo_write" {
+	// todo_write changes only the task list, and bash_job only reads or stops
+	// jobs that an approved bash call started, so neither asks again.
+	if !tool.ReadOnly && call.Name != "todo_write" && call.Name != "bash_job" {
 		allowed := false
 		var err error
 		approval := latency.Begin(ctx, latency.Approval, call.Name)
@@ -388,5 +426,18 @@ func runTool(ctx context.Context, client *anthropic.Client, config Config, toolS
 		return finish(tools.Result{}, anthropic.Usage{}, err)
 	}
 	result, err := tool.Run(ctx, call.Input)
+	if err == nil {
+		err = afterTool(ctx, config, call, result)
+	}
 	return finish(result, anthropic.Usage{}, err)
+}
+
+func afterTool(ctx context.Context, config Config, call anthropic.ToolUseBlock, result tools.Result) error {
+	if config.AfterTool == nil {
+		return nil
+	}
+	if err := config.AfterTool(ctx, call, result); err != nil {
+		return fmt.Errorf("after-tool hook for %s: %w", call.Name, err)
+	}
+	return nil
 }

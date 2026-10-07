@@ -22,6 +22,7 @@ import (
 	"github.com/dylantirandaz/inklingharness/internal/project"
 	"github.com/dylantirandaz/inklingharness/internal/session"
 	"github.com/dylantirandaz/inklingharness/internal/terminal"
+	"github.com/dylantirandaz/inklingharness/internal/tools"
 )
 
 const chatHelp = `Commands:
@@ -34,6 +35,9 @@ const chatHelp = `Commands:
   /effort [LEVEL]   show or change effort; default restores the model default
   /compact          summarize older messages; keep the last message or tool pair
   /clear            start a new session; keep the old session on disk
+  /plan TASK        investigate with read-only tools and reply with a plan
+  /undo             restore the files and conversation from before the last prompt
+  /rewind [N]       list prompts, or restore the state from before prompt N
   /quit             save and exit
 Enter sends. Ctrl-J adds a line. Up/Down recalls input. Ctrl-U clears it.
 Pasted text stays in the input area until you press Enter.
@@ -287,11 +291,25 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		return 2
 	}
 	prewarm(ctx, client)
-	toolSet, err := sessionTools(store, projectContext.WorkDir, current.ID)
+	ext, err := loadExtensions(projectContext.WorkDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "inkling: %v\n", err)
 		return 1
 	}
+	toolSet, jobs, err := sessionTools(store, projectContext.WorkDir, current.ID, ext)
+	if err != nil {
+		fmt.Fprintf(stderr, "inkling: %v\n", errors.Join(err, ext.close()))
+		return 1
+	}
+	// Later, stderr writes to the terminal screen, and the screen closes
+	// before this deferred call. Thus the call keeps the stderr of this point.
+	jobErrors := stderr
+	defer func() {
+		if err := errors.Join(jobs.Close(), ext.close()); err != nil {
+			fmt.Fprintf(jobErrors, "inkling: stop background jobs and MCP servers: %v\n", err)
+			exitCode = 1
+		}
+	}()
 	interactive := terminal.IsTerminal(stdin)
 	var input *lineInput
 	var screen *terminal.Screen
@@ -418,12 +436,15 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	// compacts it after the first key, while the user types; a user who reads
 	// the last reply and leaves spends no tokens. Plain mode cannot see keys,
 	// so its first turn applies the normal trigger.
-	startConfig, err := chatConfig(o, projectContext)
+	startConfig, err := chatConfig(o, projectContext, ext)
 	if err != nil {
 		fmt.Fprintf(stderr, "inkling: %v\n", err)
 		return 2
 	}
 	compactOnTyping := screen != nil && agent.ShouldCompact(startConfig, current.Messages, 0)
+	// checkpoints hold the state before each prompt of this process, oldest
+	// first, for /undo and /rewind. They are not saved with the session.
+	var checkpoints []checkpoint
 	for {
 		var line string
 		var err error
@@ -480,7 +501,8 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		if commandText == "" {
 			continue
 		}
-		if strings.HasPrefix(commandText, "/") && !strings.Contains(commandText, "\n") {
+		custom, customArgument, isCustom := ext.customCommand(commandText)
+		if !isCustom && strings.HasPrefix(commandText, "/") && !strings.Contains(commandText, "\n") {
 			command, argument, _ := strings.Cut(commandText, " ")
 			argument = strings.TrimSpace(argument)
 			saveChanges := false
@@ -495,7 +517,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				}
 				return 0
 			case "/help":
-				fmt.Fprint(stderr, chatHelp)
+				fmt.Fprint(stderr, chatHelp+ext.commandHelp())
 			case "/status":
 				if err := awaitBackground(); err != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", err)
@@ -574,14 +596,41 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				}
 				current, err = session.New(projectContext.WorkDir, o.model, o.effort)
 				if err == nil {
-					toolSet, err = sessionTools(store, projectContext.WorkDir, current.ID)
+					// The old session ends here, so its background jobs end too.
+					err = jobs.Close()
+				}
+				var nextJobs *tools.Jobs
+				if err == nil {
+					toolSet, nextJobs, err = sessionTools(store, projectContext.WorkDir, current.ID, ext)
 				}
 				if err != nil {
 					fmt.Fprintf(stderr, "inkling: new session: %v\n", err)
 					return 1
 				}
+				jobs = nextJobs
+				checkpoints = nil
 				approval.allowAll = o.approveAll
 				fmt.Fprintf(stderr, "New session %s; the old session is still saved.\n", current.ID)
+				saveChanges = true
+			case "/undo", "/rewind":
+				if err := stopBackground(); err != nil {
+					fmt.Fprintf(stderr, "inkling: %v\n", err)
+					return 1
+				}
+				target, ok := rewindTarget(command, argument, checkpoints, stderr)
+				if !ok {
+					continue
+				}
+				restored := checkpoints[target]
+				changed, restoreErr := restoreFiles(ctx, projectContext.WorkDir, restored)
+				if restoreErr != nil {
+					fmt.Fprintf(stderr, "inkling: %v\n", restoreErr)
+					continue
+				}
+				current.Messages = restored.messages
+				current.UpdatedAt = time.Now().UTC()
+				checkpoints = checkpoints[:target]
+				printRewind(stderr, restored, changed)
 				saveChanges = true
 			case "/compact":
 				if background != nil {
@@ -593,7 +642,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 					}
 					break
 				}
-				config, configErr := chatConfig(o, projectContext)
+				config, configErr := chatConfig(o, projectContext, ext)
 				if configErr != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", configErr)
 					continue
@@ -634,13 +683,24 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			}
 			continue
 		}
-		config, err := chatConfig(o, projectContext)
+		config, err := chatConfig(o, projectContext, ext)
 		if err != nil {
 			fmt.Fprintf(stderr, "inkling: %v\n", err)
 			continue
 		}
-		config.Approve = approval.check
-		printUser(displayOutput, line, theme)
+		shown := line
+		var policy turnPolicy
+		if isCustom {
+			line = custom.Expand(customArgument)
+			policy.readOnly = custom.ReadOnly
+		}
+		// The snapshot runs while the first request streams; the first tool
+		// that can change files waits for it, so it holds the state before
+		// any change.
+		pending := startSnapshot(ctx, projectContext.WorkDir)
+		policy.beforeChange = pending.settled
+		ext.configure(&config, toolSet, policy, approval.check)
+		printUser(displayOutput, shown, theme)
 		signals.working()
 		turnCtx, finish := control.begin(ctx)
 		turnCtx, timing := timedContext(turnCtx, o)
@@ -651,6 +711,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			fmt.Fprintf(stderr, "inkling: %v\n", finishTiming(timing, o.timings, err))
 			return 1
 		}
+		before := current.Messages
 		priorUsage := current.Usage
 		config.Checkpoint = func(outcome agent.Outcome) error {
 			current.Messages = outcome.Messages
@@ -662,6 +723,9 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		started := time.Now()
 		preparation := latency.Begin(turnCtx, latency.Preparation, "attachments")
 		prepared, prepareError := attachment.Prepare(turnCtx, projectContext.WorkDir, line, o.files)
+		if prepareError == nil {
+			prepared.Prompt, prepareError = ext.prompt(turnCtx, prepared.Prompt)
+		}
 		preparation.End(prepareError)
 		if prepareError != nil {
 			finish()
@@ -679,9 +743,14 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		}
 		o.files = nil
 		printAttachedFiles(progressOutput, prepared.Files)
-		outcome, runErr := agent.Run(turnCtx, client, config, toolSet, current.Messages, prepared.Prompt, observer)
+		outcome, runErr := agent.Run(turnCtx, client, config, toolSet, current.Messages, agent.Prompt{Text: prepared.Prompt, Images: prepared.Images}, observer)
 		finish()
 		observer.Finish()
+		snapshot, snapshotErr := pending.wait(context.Background())
+		if snapshotErr != nil {
+			fmt.Fprintf(stderr, "inkling: undo is off for this prompt: %v\n", snapshotErr)
+		}
+		checkpoints = append(checkpoints, checkpoint{prompt: shown, messages: before, snapshot: snapshot})
 		var saveError error
 		if runErr != nil {
 			saving := latency.Begin(turnCtx, latency.Checkpoint, "save")
@@ -712,12 +781,15 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	}
 }
 
-func chatConfig(options *options, projectContext project.Context) (agent.Config, error) {
+func chatConfig(options *options, projectContext project.Context, ext *extensions) (agent.Config, error) {
 	config, err := options.agentConfig()
 	if err != nil {
 		return agent.Config{}, err
 	}
 	config.System += "\n\n" + projectContext.SystemPrompt()
+	if text := ext.systemPrompt(); text != "" {
+		config.System += "\n\n" + text
+	}
 	return config, nil
 }
 

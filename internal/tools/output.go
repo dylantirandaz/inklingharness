@@ -37,7 +37,10 @@ const (
 // stderr share this writer, so the collector needs no lock.
 type outputCollector struct {
 	directory string
-	head      []byte
+	// writing reports the files that running jobs still write, so that
+	// pruning keeps them.
+	writing func(path string) bool
+	head    []byte
 	// tail is a ring buffer. The write position follows from total, so the
 	// ring needs no separate index.
 	tail  []byte
@@ -54,8 +57,8 @@ type outputFile struct {
 	written int64
 }
 
-func newOutputCollector(directory string) *outputCollector {
-	return &outputCollector{directory: directory}
+func newOutputCollector(directory string, writing func(path string) bool) *outputCollector {
+	return &outputCollector{directory: directory, writing: writing}
 }
 
 func (c *outputCollector) Write(chunk []byte) (int, error) {
@@ -170,7 +173,9 @@ func (c *outputCollector) finish() string {
 		if err := errors.Join(c.saved.buffer.Flush(), c.saved.file.Close()); err != nil {
 			c.dropFile(err)
 		} else {
-			pruneErr = pruneOutputDirectory(c.directory, c.saved.file.Name(), maxOutputDirectoryBytes)
+			current := c.saved.file.Name()
+			keep := func(path string) bool { return path == current || c.writing(path) }
+			pruneErr = pruneOutputDirectory(c.directory, keep, maxOutputDirectoryBytes)
 		}
 	}
 	first, second := c.orderedTail()
@@ -242,9 +247,10 @@ func trimIncompleteRuneStart(b []byte) []byte {
 }
 
 // pruneOutputDirectory deletes the oldest saved outputs until directory holds
-// at most limit bytes. It never deletes keep, the file that the current result
-// names. A file that another process already removed is not an error.
-func pruneOutputDirectory(directory, keep string, limit int64) error {
+// at most limit bytes. It never deletes a file for which keep is true: the
+// file that the current result names and the files that running jobs write.
+// A file that another process already removed is not an error.
+func pruneOutputDirectory(directory string, keep func(path string) bool, limit int64) error {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return err
@@ -268,7 +274,7 @@ func pruneOutputDirectory(directory, keep string, limit int64) error {
 			return err
 		}
 		total += info.Size()
-		if path := filepath.Join(directory, entry.Name()); path != keep {
+		if path := filepath.Join(directory, entry.Name()); !keep(path) {
 			older = append(older, savedOutput{path: path, size: info.Size(), modified: info.ModTime()})
 		}
 	}

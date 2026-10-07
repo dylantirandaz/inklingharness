@@ -23,7 +23,7 @@ func lookup(t *testing.T, root, name string) Tool {
 
 func lookupWithOutputs(t *testing.T, root, outputDirectory, name string) Tool {
 	t.Helper()
-	set, err := Standard(root, outputDirectory)
+	set, err := Standard(root, outputDirectory, newTestJobs(t, outputDirectory))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +32,18 @@ func lookupWithOutputs(t *testing.T, root, outputDirectory, name string) Tool {
 		t.Fatalf("tool %q missing", name)
 	}
 	return tool
+}
+
+// newTestJobs stops the jobs of a test when the test ends.
+func newTestJobs(t *testing.T, outputDirectory string) *Jobs {
+	t.Helper()
+	jobs := NewJobs(outputDirectory)
+	t.Cleanup(func() {
+		if err := jobs.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return jobs
 }
 
 func TestEditFileRequiresExactlyOneOccurrence(t *testing.T) {
@@ -323,14 +335,14 @@ func TestOutputDirectoryKeepsNewestFileAndRemovesOldestFirst(t *testing.T) {
 		_, err := os.Stat(filepath.Join(directory, name))
 		return err == nil
 	}
-	keep := filepath.Join(directory, "c.txt")
-	if err := pruneOutputDirectory(directory, keep, 100); err != nil {
+	keepNewest := func(path string) bool { return path == filepath.Join(directory, "c.txt") }
+	if err := pruneOutputDirectory(directory, keepNewest, 100); err != nil {
 		t.Fatal(err)
 	}
 	if exists("a.txt") || !exists("b.txt") || !exists("c.txt") || !exists("notes.log") {
 		t.Fatal("pruning to 100 bytes must remove only the oldest output file")
 	}
-	if err := pruneOutputDirectory(directory, keep, 10); err != nil {
+	if err := pruneOutputDirectory(directory, keepNewest, 10); err != nil {
 		t.Fatal(err)
 	}
 	if exists("b.txt") || !exists("c.txt") || !exists("notes.log") {

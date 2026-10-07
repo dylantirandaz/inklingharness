@@ -34,11 +34,11 @@ func TestDeniedWriteDoesNotChangeFile(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	toolSet, err := tools.Standard(root, t.TempDir())
+	toolSet, err := standardTools(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := Run(context.Background(), anthropic.NewClient("key", server.URL, nil), Config{Model: "m", MaxTokens: 100, MaxTurns: 2}, toolSet, nil, "replace the file", SilentObserver{})
+	outcome, err := Run(context.Background(), anthropic.NewClient("key", server.URL, nil), Config{Model: "m", MaxTokens: 100, MaxTurns: 2}, toolSet, nil, Prompt{Text: "replace the file"}, SilentObserver{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestCancellationKeepsEffectsAndPairsUnrunCalls(t *testing.T) {
 			toolUseBlock(2, "third", "write_file", `{"path":"third","content":"no"}`), messageEnd("tool_use", 7))
 	}))
 	defer server.Close()
-	toolSet, err := tools.Standard(root, t.TempDir())
+	toolSet, err := standardTools(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestCancellationKeepsEffectsAndPairsUnrunCalls(t *testing.T) {
 		}
 		return true, nil
 	}}
-	outcome, err := Run(ctx, anthropic.NewClient("key", server.URL, nil), config, toolSet, nil, "write three files", SilentObserver{})
+	outcome, err := Run(ctx, anthropic.NewClient("key", server.URL, nil), config, toolSet, nil, Prompt{Text: "write three files"}, SilentObserver{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
 	}
@@ -105,7 +105,7 @@ func TestExpectedEditFailureStopsDependentBatch(t *testing.T) {
 	if err := os.WriteFile(path, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	toolSet, err := tools.Standard(root, t.TempDir())
+	toolSet, err := standardTools(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestFailedRequestKeepsHistoryWithoutMutatingCaller(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := Run(context.Background(), anthropic.NewClient("key", server.URL, nil), Config{Model: "m", MaxTokens: 100, MaxTurns: 2}, toolSet, history, "second request", SilentObserver{})
+	outcome, err := Run(context.Background(), anthropic.NewClient("key", server.URL, nil), Config{Model: "m", MaxTokens: 100, MaxTurns: 2}, toolSet, history, Prompt{Text: "second request"}, SilentObserver{})
 	var apiError *anthropic.APIError
 	if !errors.As(err, &apiError) || apiError.StatusCode != 403 {
 		t.Fatalf("error = %v", err)
@@ -225,7 +225,7 @@ func TestCompactionRequestKeepsNormalTools(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	toolSet, err := tools.Standard(t.TempDir(), t.TempDir())
+	toolSet, err := standardTools(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestCompactionRequestKeepsNormalTools(t *testing.T) {
 		anthropic.Message{Role: anthropic.RoleAssistant, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: strings.Repeat("more work ", 100)}}},
 	)
 	config := Config{Model: "m", MaxTokens: 100, MaxTurns: 2, CompactTokens: 1, EnableTasks: true}
-	outcome, err := Run(context.Background(), anthropic.NewClient("key", server.URL, nil), config, toolSet, history, "next request", SilentObserver{})
+	outcome, err := Run(context.Background(), anthropic.NewClient("key", server.URL, nil), config, toolSet, history, Prompt{Text: "next request"}, SilentObserver{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestResearchTaskCannotWriteOrSpawnTasks(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	toolSet, err := tools.Standard(root, t.TempDir())
+	toolSet, err := standardTools(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,13 +19,11 @@ import (
 
 	"github.com/dylantirandaz/inklingharness/internal/agent"
 	"github.com/dylantirandaz/inklingharness/internal/anthropic"
-	"github.com/dylantirandaz/inklingharness/internal/attachment"
 	"github.com/dylantirandaz/inklingharness/internal/credentials"
 	"github.com/dylantirandaz/inklingharness/internal/eval"
 	"github.com/dylantirandaz/inklingharness/internal/latency"
 	"github.com/dylantirandaz/inklingharness/internal/openrouter"
 	"github.com/dylantirandaz/inklingharness/internal/presentation"
-	"github.com/dylantirandaz/inklingharness/internal/project"
 	"github.com/dylantirandaz/inklingharness/internal/record"
 	"github.com/dylantirandaz/inklingharness/internal/session"
 	"github.com/dylantirandaz/inklingharness/internal/terminal"
@@ -38,7 +36,8 @@ const usageText = `usage:
   think sessions                   list saved sessions in this directory
   think sessions export ID         write a session in the format of older releases
   think login [flags]              check and store an OpenRouter API key
-  think run [flags] <prompt...>    run one task in the current directory
+  think run [flags] <prompt...>    run one task in the current directory; -json for events, -plan to only plan
+  think rpc [flags]                serve one conversation to an editor over stdin and stdout (JSON lines)
   think eval -yes [flags] <file>   run a JSONL task set with tool approval
   think timings <file>             summarize stage timing JSONL records
 
@@ -74,6 +73,8 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return loginCommand(ctx, args[1:], stdin, stderr)
 	case "run":
 		return runCommand(ctx, args[1:], stdin, stdout, stderr)
+	case "rpc":
+		return rpcCommand(ctx, args[1:], stdin, stdout, stderr)
 	case "eval":
 		return evalCommand(ctx, args[1:], stdout, stderr)
 	case "timings":
@@ -230,13 +231,23 @@ func prewarm(ctx context.Context, client *anthropic.Client) {
 }
 
 // sessionTools keeps large command outputs in the output directory of the
-// session, under the state directory.
-func sessionTools(store *session.Store, workDir, sessionID string) (*tools.Set, error) {
+// session, under the state directory. The caller must close the jobs when
+// the session ends, so that no background command outlives the session.
+func sessionTools(store *session.Store, workDir, sessionID string, ext *extensions) (*tools.Set, *tools.Jobs, error) {
 	outputDirectory, err := store.OutputDirectory(sessionID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return tools.Standard(workDir, outputDirectory)
+	jobs := tools.NewJobs(outputDirectory)
+	standard, err := tools.Standard(workDir, outputDirectory, jobs)
+	if err != nil {
+		return nil, nil, errors.Join(err, jobs.Close())
+	}
+	toolSet, err := ext.toolSet(standard)
+	if err != nil {
+		return nil, nil, errors.Join(err, jobs.Close())
+	}
+	return toolSet, jobs, nil
 }
 
 func loginCommand(ctx context.Context, args []string, stdin *os.File, stderr io.Writer) int {
@@ -348,7 +359,9 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 	flags := flag.NewFlagSet("think run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	o := bindOptions(flags)
-	flags.Var(&o.files, "file", "attach a text file to this request; repeat for more files")
+	flags.Var(&o.files, "file", "attach a text or image file to this request; repeat for more files")
+	jsonEvents := flags.Bool("json", false, "write events as JSON lines on stdout instead of text")
+	readOnly := flags.Bool("plan", false, "investigate with read-only tools and reply with a plan; change nothing")
 	if err := flags.Parse(args); err != nil {
 		return flagExit(err)
 	}
@@ -366,6 +379,9 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 		fmt.Fprintln(stderr, "think: provide a prompt, or use think chat")
 		return 2
 	}
+	if *readOnly {
+		prompt = planCommand().Expand(prompt)
+	}
 	activeProfiles, err := startProfiles(o)
 	if err != nil {
 		fmt.Fprintf(stderr, "inkling: %v\n", err)
@@ -377,57 +393,26 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 			exitCode = 1
 		}
 	}()
-	config, err := o.agentConfig()
-	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return 2
+	work, code := openWorkspace(ctx, o, stderr)
+	if work == nil {
+		return code
 	}
-	root, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return 1
-	}
-	projectContext, err := project.Inspect(ctx, root)
-	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return 1
-	}
-	config.System += "\n\n" + projectContext.SystemPrompt()
-	client, err := o.client()
-	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return 2
-	}
-	prewarmContext, stopPrewarm := context.WithCancel(ctx)
-	defer stopPrewarm()
-	prewarm(prewarmContext, client)
-	store, err := session.DefaultStore()
-	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return 1
-	}
-	removeStaleOutputs(store, stderr)
-	// run never saves this session. Its ID only names the directory that keeps
-	// large command outputs after the command ends.
-	outputs, err := session.New(projectContext.WorkDir, o.model, o.effort)
-	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return 1
-	}
-	toolSet, err := sessionTools(store, projectContext.WorkDir, outputs.ID)
-	if err != nil {
-		fmt.Fprintf(stderr, "inkling: %v\n", err)
-		return 1
-	}
+	defer func() {
+		if err := work.close(); err != nil {
+			fmt.Fprintf(stderr, "inkling: %v\n", err)
+			exitCode = 1
+		}
+	}()
 	var input *lineInput
-	if interactive {
+	if interactive && !*jsonEvents {
 		input = newLineInput(ctx, stdin)
 	}
 	approval := &approvals{input: input, output: stderr, allowAll: o.approveAll}
-	config.Approve = approval.check
+	config := work.config
+	work.ext.configure(&config, work.toolSet, turnPolicy{readOnly: *readOnly}, approval.check)
 	ctx, timing := timedContext(ctx, o)
 	preparation := latency.Begin(ctx, latency.Preparation, "attachments")
-	prepared, err := attachment.Prepare(ctx, projectContext.WorkDir, prompt, o.files)
+	prepared, request, err := work.prompt(ctx, prompt, o.files)
 	preparation.End(err)
 	if err != nil {
 		fmt.Fprintf(stderr, "inkling: %v\n", finishTiming(timing, o.timings, err))
@@ -435,10 +420,28 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 	}
 	printAttachedFiles(stderr, prepared.Files)
 	printPrivacyNotice(stderr, o.model)
+	if *jsonEvents {
+		events := newJSONObserver(stdout)
+		outcome, runErr := agent.Run(ctx, work.client, config, work.toolSet, nil, request, events)
+		runErr = finishTiming(timing, o.timings, runErr)
+		if runErr != nil {
+			events.writeError(runErr)
+		} else {
+			events.writeDone(outcome)
+		}
+		if err := events.err(); err != nil {
+			fmt.Fprintf(stderr, "inkling: write events: %v\n", err)
+			return 1
+		}
+		if runErr != nil {
+			return 1
+		}
+		return 0
+	}
 	observer := newConsoleObserver(stdout, stderr, nil, false, presentation.Theme{}, o.showThinking, o.verbose)
 	started := time.Now()
 	observer.Begin()
-	outcome, err := agent.Run(ctx, client, config, toolSet, nil, prepared.Prompt, observer)
+	outcome, err := agent.Run(ctx, work.client, config, work.toolSet, nil, request, observer)
 	observer.Finish()
 	err = finishTiming(timing, o.timings, err)
 	if o.verbose {

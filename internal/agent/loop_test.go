@@ -114,12 +114,12 @@ func TestRunRoundTripsToolCalls(t *testing.T) {
 	}))
 	defer server.Close()
 
-	toolSet, err := tools.Standard(root, t.TempDir())
+	toolSet, err := standardTools(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	client := anthropic.NewClient("key", server.URL, nil)
-	outcome, err := Run(context.Background(), client, Config{Model: "m", MaxTokens: 50, MaxTurns: 5}, toolSet, nil, "read both", recordingObserver{t: t})
+	outcome, err := Run(context.Background(), client, Config{Model: "m", MaxTokens: 50, MaxTurns: 5}, toolSet, nil, Prompt{Text: "read both"}, recordingObserver{t: t})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestRunResendsHistoryBytesUnchanged(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	toolSet, err := tools.Standard(root, t.TempDir())
+	toolSet, err := standardTools(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestRunResendsHistoryBytesUnchanged(t *testing.T) {
 		anthropic.Message{Role: anthropic.RoleUser, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: "earlier <request> & \u2028"}}},
 		anthropic.Message{Role: anthropic.RoleAssistant, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: "earlier answer"}}},
 	)
-	_, err = Run(context.Background(), anthropic.NewClient("key", server.URL, nil), Config{Model: "m", MaxTokens: 50, MaxTurns: 5}, toolSet, history, "read <both>", SilentObserver{})
+	_, err = Run(context.Background(), anthropic.NewClient("key", server.URL, nil), Config{Model: "m", MaxTokens: 50, MaxTurns: 5}, toolSet, history, Prompt{Text: "read <both>"}, SilentObserver{})
 	if err != nil {
 		t.Fatal(err)
 	}

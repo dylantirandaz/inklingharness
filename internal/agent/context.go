@@ -143,7 +143,7 @@ func runTask(ctx context.Context, client *anthropic.Client, config Config, toolS
 	childConfig.Checkpoint = nil
 	childConfig.MaxTurns = min(config.MaxTurns, 20)
 	childConfig.System += "\nYou are a read-only research agent. Inspect the requested files and return specific findings with paths and line numbers. Do not claim to change files or run commands."
-	outcome, err := Run(ctx, client, childConfig, childTools, nil, arguments.Prompt, SilentObserver{})
+	outcome, err := Run(ctx, client, childConfig, childTools, nil, Prompt{Text: arguments.Prompt}, SilentObserver{})
 	if err != nil {
 		return tools.Result{}, outcome.Usage, fmt.Errorf("research task: %w", err)
 	}

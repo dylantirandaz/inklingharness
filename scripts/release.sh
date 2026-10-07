@@ -22,5 +22,9 @@ for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do
 done
 (cd "$dist" && shasum -a 256 think_*.tar.gz >checksums.txt)
 
+# Measure the binary of this host in a real terminal. A crossed startup,
+# idle CPU, or size limit stops the release before anything is published.
+go run ./scripts/limits "$dist/$(go env GOOS)-$(go env GOARCH)/think"
+
 gh release create "$version" --title "$version" --notes "Install: curl -fsSL https://raw.githubusercontent.com/dylantirandaz/inklingharness/main/install.sh | sh" \
 	"$dist"/think_*.tar.gz "$dist/checksums.txt"

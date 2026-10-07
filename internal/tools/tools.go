@@ -62,14 +62,18 @@ func (s *Set) Lookup(name string) (Tool, bool) {
 // Standard returns the coding tool set rooted at the given directory.
 // Relative paths resolve against root. There is no sandbox: the tools run with
 // the permissions of the user, on the user's machine, by design. The bash tool
-// saves large outputs in outputDirectory. The directory must be absolute,
-// because results give the saved path to the model, and a path in a result
-// must not depend on the working directory.
-func Standard(root, outputDirectory string) (*Set, error) {
+// saves large outputs in outputDirectory and starts background commands as
+// jobs in jobs, which must keep their output in the same directory. The
+// directory must be absolute, because results give the saved path to the
+// model, and a path in a result must not depend on the working directory.
+func Standard(root, outputDirectory string, jobs *Jobs) (*Set, error) {
 	if !filepath.IsAbs(outputDirectory) {
 		return nil, fmt.Errorf("tools: output directory %q is not absolute", outputDirectory)
 	}
-	return NewSet(readFileTool(root), writeFileTool(root), editFileTool(root), bashTool(root, outputDirectory),
+	if jobs.outputDirectory != outputDirectory {
+		return nil, fmt.Errorf("tools: jobs keep output in %q, not in output directory %q", jobs.outputDirectory, outputDirectory)
+	}
+	return NewSet(readFileTool(root), writeFileTool(root), editFileTool(root), bashTool(root, jobs), bashJobTool(jobs),
 		listDirTool(root), globTool(root), grepTool(root), todoWriteTool())
 }
 

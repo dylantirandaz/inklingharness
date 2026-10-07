@@ -23,7 +23,7 @@ type Message struct {
 
 // ContentBlock is one block inside a message. The set of implementations is
 // closed to this package: TextBlock, ThinkingBlock, RedactedThinkingBlock,
-// ToolUseBlock, ToolResultBlock, and OpaqueBlock.
+// ToolUseBlock, ToolResultBlock, ImageBlock, and OpaqueBlock.
 type ContentBlock interface {
 	contentBlock()
 }
@@ -60,6 +60,20 @@ type ToolResultBlock struct {
 	IsError   bool
 }
 
+// ImageBlock is one image from the user, sent inline. MediaType is one of
+// image/png, image/jpeg, image/gif, or image/webp. Data is the standard padded
+// base64 encoding of the image bytes. An image with another source kind, such
+// as a URL, stays an OpaqueBlock.
+type ImageBlock struct {
+	MediaType string
+	Data      string
+}
+
+// imageEstimateBytes is the estimate size of one image. The API scales a large
+// image down, so one image costs at most about 1,600 tokens. The base64 length
+// would overstate the cost many times and start compaction too early.
+const imageEstimateBytes = 1600 * 3
+
 // OpaqueBlock holds a block kind that this client does not know. The raw JSON
 // goes back to the server unchanged, so a new server block kind does not break
 // the conversation.
@@ -72,6 +86,7 @@ func (ThinkingBlock) contentBlock()         {}
 func (RedactedThinkingBlock) contentBlock() {}
 func (ToolUseBlock) contentBlock()          {}
 func (ToolResultBlock) contentBlock()       {}
+func (ImageBlock) contentBlock()            {}
 func (OpaqueBlock) contentBlock()           {}
 
 // MarshalJSON encodes the message in compact Messages API wire format.
@@ -149,6 +164,21 @@ func (e *messageEncoder) block(block ContentBlock) error {
 			Content   string `json:"content"`
 			IsError   bool   `json:"is_error,omitempty"`
 		}{Type: "tool_result", ToolUseID: typed.ToolUseID, Content: typed.Content, IsError: typed.IsError})
+	case ImageBlock:
+		// Reject a bad image here, because the decoder rejects it later and a
+		// stored session with it could not load.
+		if err := checkImage(typed.MediaType, typed.Data); err != nil {
+			return fmt.Errorf("anthropic: image block: %w", err)
+		}
+		type source struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+		}
+		return e.value(struct {
+			Type   string `json:"type"`
+			Source source `json:"source"`
+		}{Type: "image", Source: source{Type: "base64", MediaType: typed.MediaType, Data: typed.Data}})
 	case OpaqueBlock:
 		return e.value(typed.Raw)
 	}
@@ -171,6 +201,8 @@ func estimateBytes(m Message) (int, error) {
 			size += len(typed.ID) + len(typed.Name) + len(typed.Input)
 		case ToolResultBlock:
 			size += len(typed.ToolUseID) + len(typed.Content)
+		case ImageBlock:
+			size += imageEstimateBytes
 		case OpaqueBlock:
 			size += len(typed.Raw)
 		default:
@@ -223,19 +255,18 @@ func (d *blockDecoder) UnmarshalJSON(raw []byte) error {
 		ToolUseID string            `json:"tool_use_id"`
 		Content   resultContentText `json:"content"`
 		IsError   bool              `json:"is_error"`
+		Source    imageSource       `json:"source"`
 	}
 	err := json.Unmarshal(raw, &fields)
-	switch fields.Type {
-	case "text", "thinking", "redacted_thinking", "tool_use", "tool_result":
-		if err != nil {
-			return fmt.Errorf("%s block: %w", fields.Type, err)
-		}
-	default:
+	if !knownBlock(fields.Type, fields.Source.isBase64) {
 		if len(raw) == 0 || raw[0] != '{' {
 			return errors.New("content block is not a JSON object")
 		}
 		d.block = OpaqueBlock{Raw: bytes.Clone(raw)}
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%s block: %w", fields.Type, err)
 	}
 	switch fields.Type {
 	case "text":
@@ -251,6 +282,100 @@ func (d *blockDecoder) UnmarshalJSON(raw []byte) error {
 			return errors.New("tool_result block: content is not a string")
 		}
 		d.block = ToolResultBlock{ToolUseID: fields.ToolUseID, Content: fields.Content.text, IsError: fields.IsError}
+	case "image":
+		if fields.Source.err != nil {
+			return fmt.Errorf("image block: %w", fields.Source.err)
+		}
+		d.block = ImageBlock{MediaType: fields.Source.mediaType, Data: fields.Source.data}
+	}
+	return nil
+}
+
+// knownBlock reports whether a block decodes to a typed block. An image is
+// typed only with a base64 source; an image with another source, such as a
+// URL, stays opaque so that it goes back to the server unchanged.
+func knownBlock(blockType string, base64Source bool) bool {
+	switch blockType {
+	case "text", "thinking", "redacted_thinking", "tool_use", "tool_result":
+		return true
+	case "image":
+		return base64Source
+	default:
+		return false
+	}
+}
+
+// imageSource decodes the "source" field of a block. It never fails, because
+// unknown block kinds can use a "source" field of any shape. err holds the
+// reason a base64 source is not valid.
+type imageSource struct {
+	isBase64  bool
+	mediaType string
+	data      string
+	err       error
+}
+
+func (s *imageSource) UnmarshalJSON(raw []byte) error {
+	*s = imageSource{}
+	if len(raw) == 0 || raw[0] != '{' {
+		return nil
+	}
+	var fields struct {
+		Type      string `json:"type"`
+		MediaType string `json:"media_type"`
+		Data      string `json:"data"`
+	}
+	err := json.Unmarshal(raw, &fields)
+	if err == nil {
+		err = checkImage(fields.MediaType, fields.Data)
+	}
+	*s = imageSource{isBase64: fields.Type == "base64", mediaType: fields.MediaType, data: fields.Data, err: err}
+	return nil
+}
+
+func checkImage(mediaType, data string) error {
+	if err := checkImageMediaType(mediaType); err != nil {
+		return err
+	}
+	return checkImageData(data)
+}
+
+func checkImageMediaType(mediaType string) error {
+	switch mediaType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return nil
+	default:
+		return fmt.Errorf("unsupported image media type %q", mediaType)
+	}
+}
+
+// checkImageData accepts only standard padded base64 without line breaks.
+// The library decoder skips line breaks; the check here does not, so that the
+// typed decoder and the measuring decoder agree without a decode buffer.
+func checkImageData[Text string | []byte](data Text) error {
+	if len(data) == 0 {
+		return errors.New("image data is empty")
+	}
+	if len(data)%4 != 0 {
+		return errors.New("image data is not padded base64")
+	}
+	padding := 0
+	for index := range len(data) {
+		character := data[index]
+		switch {
+		case 'A' <= character && character <= 'Z', 'a' <= character && character <= 'z',
+			'0' <= character && character <= '9', character == '+', character == '/':
+			if padding > 0 {
+				return errors.New("image data has base64 padding before the end")
+			}
+		case character == '=':
+			if index < len(data)-2 {
+				return errors.New("image data has base64 padding before the end")
+			}
+			padding++
+		default:
+			return errors.New("image data is not base64")
+		}
 	}
 	return nil
 }

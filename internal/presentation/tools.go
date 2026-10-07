@@ -15,19 +15,24 @@ type ToolView struct {
 }
 
 type toolInput struct {
-	Path           *string     `json:"path"`
-	Offset         *int        `json:"offset"`
-	Limit          *int        `json:"limit"`
-	Content        *string     `json:"content"`
-	OldString      *string     `json:"old_string"`
-	NewString      *string     `json:"new_string"`
-	Pattern        *string     `json:"pattern"`
-	Include        *string     `json:"include"`
-	CaseSensitive  *bool       `json:"case_sensitive"`
-	Command        *string     `json:"command"`
-	TimeoutSeconds *int        `json:"timeout_seconds"`
-	Items          *[]todoItem `json:"items"`
-	Prompt         *string     `json:"prompt"`
+	Path           *string         `json:"path"`
+	Offset         *int            `json:"offset"`
+	Limit          *int            `json:"limit"`
+	Content        *string         `json:"content"`
+	OldString      *string         `json:"old_string"`
+	NewString      *string         `json:"new_string"`
+	Pattern        *string         `json:"pattern"`
+	Include        *string         `json:"include"`
+	CaseSensitive  *bool           `json:"case_sensitive"`
+	Command        *string         `json:"command"`
+	TimeoutSeconds *int            `json:"timeout_seconds"`
+	Items          *[]todoItem     `json:"items"`
+	Prompt         *string         `json:"prompt"`
+	Action         *string         `json:"action"`
+	ID             *int            `json:"id"`
+	Server         *string         `json:"server"`
+	Tool           *string         `json:"tool"`
+	Arguments      json.RawMessage `json:"arguments"`
 }
 
 type todoItem struct {
@@ -49,14 +54,14 @@ func ToolTitle(name string, input json.RawMessage) (string, error) {
 }
 
 func describeTool(name string, input json.RawMessage, theme Theme, details bool) (ToolView, error) {
-	switch name {
-	case "read_file", "write_file", "edit_file", "list_dir", "glob", "grep", "bash", "todo_write", "task":
-	default:
-		return ToolView{}, fmt.Errorf("unknown tool %q", singleLine(name))
-	}
 	input = bytes.TrimSpace(input)
 	if len(input) == 0 || input[0] != '{' {
 		return ToolView{}, errors.New("tool input must be a JSON object")
+	}
+	switch name {
+	case "read_file", "write_file", "edit_file", "list_dir", "glob", "grep", "bash", "bash_job", "todo_write", "task", "mcp_list", "mcp_call":
+	default:
+		return describeOtherTool(name, input, details)
 	}
 	var args toolInput
 	if err := json.Unmarshal(input, &args); err != nil {
@@ -207,8 +212,75 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		if details {
 			view.Details = "Task prompt\n" + Safe(*args.Prompt)
 		}
+	case "bash_job":
+		if args.Action == nil {
+			return ToolView{}, errors.New("action is required")
+		}
+		switch *args.Action {
+		case "list":
+			view.Title = "Job list"
+		case "output", "kill":
+			if args.ID == nil {
+				return ToolView{}, fmt.Errorf("action %s needs an id", *args.Action)
+			}
+			view.Title = fmt.Sprintf("Job %s %d", *args.Action, *args.ID)
+		default:
+			return ToolView{}, fmt.Errorf("unknown job action %q", singleLine(*args.Action))
+		}
+		if details {
+			view.Details = view.Title + " (a background job that an approved bash call started)"
+		}
+	case "mcp_list":
+		if err := requiredText(args.Server, "server", false); err != nil {
+			return ToolView{}, err
+		}
+		view.Title = "MCP tools of " + brief(*args.Server)
+		if details {
+			view.Details = "List the tools of MCP server " + singleLine(*args.Server) + "; this starts the server once."
+		}
+	case "mcp_call":
+		if err := requiredText(args.Server, "server", false); err != nil {
+			return ToolView{}, err
+		}
+		if err := requiredText(args.Tool, "tool", false); err != nil {
+			return ToolView{}, err
+		}
+		view.Title = "MCP " + brief(*args.Server+"/"+*args.Tool)
+		if details {
+			view.Details = "Call " + singleLine(*args.Tool) + " on MCP server " + singleLine(*args.Server) + "\nArguments\n" + indentedJSON(args.Arguments)
+		}
 	}
 	return view, nil
+}
+
+// describeOtherTool describes a tool that this package does not know, such
+// as a custom tool from the user's files: its name and its full input.
+func describeOtherTool(name string, input json.RawMessage, details bool) (ToolView, error) {
+	if !json.Valid(input) {
+		return ToolView{}, fmt.Errorf("invalid %s input", singleLine(name))
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, input); err != nil {
+		return ToolView{}, fmt.Errorf("invalid %s input: %w", singleLine(name), err)
+	}
+	view := ToolView{Title: brief(name + " " + compact.String())}
+	if details {
+		view.Details = "Tool " + singleLine(name) + "\nInput\n" + indentedJSON(input)
+	}
+	return view, nil
+}
+
+// indentedJSON shows JSON for a person; Safe removes terminal controls that
+// a string inside it could hold.
+func indentedJSON(value json.RawMessage) string {
+	if len(bytes.TrimSpace(value)) == 0 {
+		return "{}"
+	}
+	var out bytes.Buffer
+	if err := json.Indent(&out, value, "", "  "); err != nil {
+		return Safe(string(value))
+	}
+	return Safe(out.String())
 }
 
 // Approval includes the complete safe command or change, never a preview. An

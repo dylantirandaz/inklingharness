@@ -32,6 +32,7 @@ func everyBlockKind() []Message {
 		}},
 		{Role: RoleUser, Content: []ContentBlock{ToolResultBlock{ToolUseID: "toolu_1", Content: "missing", IsError: true}}},
 		{Role: RoleUser, Content: []ContentBlock{TextBlock{Text: "quotes: \"text\"; slash: \\; line:\n<>&\u2028\u2029"}}},
+		{Role: RoleUser, Content: []ContentBlock{ImageBlock{MediaType: "image/png", Data: "iVBORw0KGgo="}, TextBlock{Text: "what is this?"}}},
 		{Role: RoleAssistant, Content: []ContentBlock{}},
 	}
 }
@@ -78,6 +79,10 @@ func TestMessageJSONRejectsMalformedBlocks(t *testing.T) {
 	for _, block := range []ContentBlock{
 		OpaqueBlock{Raw: json.RawMessage(`{"type":`)},
 		ToolUseBlock{ID: "call", Name: "read_file", Input: json.RawMessage(`{"path":`)},
+		ImageBlock{MediaType: "image/bmp", Data: "AAAA"},
+		ImageBlock{MediaType: "image/png", Data: "AAA"},
+		ImageBlock{MediaType: "image/png", Data: ""},
+		ImageBlock{MediaType: "image/png", Data: "AA\nA"},
 		nil,
 	} {
 		message := Message{Role: RoleAssistant, Content: []ContentBlock{TextBlock{Text: "before invalid block"}, block}}
@@ -116,6 +121,10 @@ func TestEncodedMessageKeepsCompactWireAndEstimate(t *testing.T) {
 	if encoded := mustEncode(t, text)[0]; encoded.EstimateBytes() != 32+4+2+3 {
 		t.Fatalf("estimate bytes = %d", encoded.EstimateBytes())
 	}
+	image := Message{Role: RoleUser, Content: []ContentBlock{ImageBlock{MediaType: "image/webp", Data: strings.Repeat("A", 4000)}}}
+	if encoded := mustEncode(t, image)[0]; encoded.EstimateBytes() != 32+imageEstimateBytes {
+		t.Fatalf("image estimate bytes = %d", encoded.EstimateBytes())
+	}
 	if _, err := EncodeMessage(Message{Role: "system"}); err == nil {
 		t.Fatal("unknown role was encoded")
 	}
@@ -143,10 +152,37 @@ func TestMessageDecodingKeepsUnknownBlocksAndRejectsBadKnownBlocks(t *testing.T)
 		`{"role":"user","content":[{"type":"text","text":7}]}`,
 		`{"role":"user","content":[7]}`,
 		`{"role":"system","content":[]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/bmp","data":"AAAA"}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA*A"}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"A=AA"}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png"}}]}`,
 	} {
 		if _, err := ParseEncodedMessage([]byte(wire)); err == nil {
 			t.Errorf("invalid message accepted: %s", wire)
 		}
+		var typed Message
+		if err := typed.UnmarshalJSON([]byte(wire)); err == nil {
+			t.Errorf("typed decoder accepted invalid message: %s", wire)
+		}
+	}
+	// An image with a URL source is not a typed image. It must go back
+	// unchanged, with its key order and unknown fields.
+	url := `{"source":{"url":"https://example.com/a.png","type":"url","extra":[1]},"type":"image","cache_control":{"type":"ephemeral"}}`
+	parsed, err = ParseEncodedMessage([]byte(`{"role":"user","content":[` + url + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err = parsed.Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opaque, ok = decoded.Content[0].(OpaqueBlock)
+	if !ok || string(opaque.Raw) != url || parsed.EstimateBytes() != 32+len(url) {
+		t.Fatalf("url image = %#v, estimate %d", decoded.Content[0], parsed.EstimateBytes())
+	}
+	reencoded := mustEncode(t, decoded)[0]
+	if !bytes.Contains(reencoded.Wire(), []byte(url)) {
+		t.Fatalf("url image changed on encode: %s", reencoded.Wire())
 	}
 	null, err := ParseEncodedMessage([]byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":null}]}`))
 	if err != nil {
@@ -179,6 +215,22 @@ func TestParseMatchesTypedDecoding(t *testing.T) {
 		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":[{"type":"text"}]}]}`,
 		`{"role":"user","content":[7]}`,
 		`{"role":"system","content":[]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/gif","data":"R0lG\u0042\/w="}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/gif","data":"R0lGOD=="},"text":"x"}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"/9j/","data":"/9j/"}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]}`,
+		`{"role":"user","content":[{"type":"image","source":"text"},{"type":"image","source":null},{"type":"image"}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":7,"data":7}}]}`,
+		`{"role":"user","content":[{"type":"text","text":"x","source":{"type":"base64","data":"!"}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"},"text":7}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":7}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":7,"data":"AAAA"}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"!!!!","data":"AAAA"}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA","data":null}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":null}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA\nAA=="}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"\u00e9AAA"}}]}`,
+		`{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":7,"data":"AAAA"}}]}`,
 		`{"role":"user","content":[{"type":"text","text":"unterminated}]}`,
 	} {
 		var typed Message

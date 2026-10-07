@@ -161,7 +161,7 @@ func TestFullApprovalContent(t *testing.T) {
 
 func TestMalformedToolInputs(t *testing.T) {
 	tests := []struct{ name, input string }{
-		{"missing", `{}`}, {"read_file", `null`}, {"read_file", `[]`},
+		{"custom_tool", `null`}, {"custom_tool", `[]`}, {"custom_tool", `{"a":`}, {"read_file", `null`}, {"read_file", `[]`},
 		{"read_file", `{`}, {"read_file", `{}`}, {"read_file", `{"path":3}`},
 		{"read_file", `{"path":"x","offset":0}`}, {"write_file", `{"path":"x"}`},
 		{"write_file", `{"path":"x","content":null}`},
@@ -171,6 +171,8 @@ func TestMalformedToolInputs(t *testing.T) {
 		{"todo_write", `{"items":null}`}, {"todo_write", `{"items":[{"content":"x","status":"unknown"}]}`},
 		{"todo_write", `{"items":[{"content":"x","status":"in_progress"},{"content":"y","status":"in_progress"}]}`},
 		{"task", `{"prompt":false}`},
+		{"bash_job", `{}`}, {"bash_job", `{"action":"output"}`}, {"bash_job", `{"action":"restart","id":1}`},
+		{"mcp_list", `{}`}, {"mcp_call", `{"server":"s"}`}, {"mcp_call", `{"tool":"t"}`},
 	}
 	for _, test := range tests {
 		if _, err := DescribeTool(test.name, json.RawMessage(test.input), Theme{}); err == nil {
@@ -192,6 +194,10 @@ func TestToolViewsAndBannerSanitize(t *testing.T) {
 		{"bash", `{"command":"printf hi\u001b[2J"}`},
 		{"todo_write", `{"items":[{"content":"a\u001b[2J","status":"pending"}]}`},
 		{"task", `{"prompt":"work\u001b[2J"}`},
+		{"bash_job", `{"action":"kill","id":3}`},
+		{"mcp_list", `{"server":"git\u001b[2Jhub"}`},
+		{"mcp_call", `{"server":"s","tool":"t\u001b[2J","arguments":{"text":"a\u001b]52;c;x\u0007b"}}`},
+		{"word_count", `{"path":"a\u001b[2Jb","depth":3}`},
 	}
 	for _, test := range tests {
 		view, err := DescribeTool(test.name, json.RawMessage(test.input), Theme{})
@@ -208,6 +214,17 @@ func TestToolViewsAndBannerSanitize(t *testing.T) {
 		if strings.Contains(title, "\x1b") {
 			t.Fatalf("unsafe activity label for %s", test.name)
 		}
+	}
+	if title, err := ToolTitle("bash_job", json.RawMessage(`{"action":"output","id":3}`)); err != nil || title != "Job output 3" {
+		t.Fatalf("job title = %q, %v", title, err)
+	}
+	view, err := DescribeTool("mcp_call", json.RawMessage(`{"server":"github","tool":"create_issue","arguments":{"title":"Bug"}}`), Theme{})
+	if err != nil || view.Title != "MCP github/create_issue" || !strings.Contains(view.Details, `"title": "Bug"`) {
+		t.Fatalf("mcp view = %+v, %v", view, err)
+	}
+	view, err = DescribeTool("word_count", json.RawMessage(`{"path": "sum.go"}`), Theme{})
+	if err != nil || view.Title != `word_count {"path":"sum.go"}` || !strings.Contains(view.Details, `"path": "sum.go"`) {
+		t.Fatalf("custom view = %+v, %v", view, err)
 	}
 	banner := Banner("model\x1b[2J", "high", "folder\nspoof", 80, Theme{})
 	if strings.Contains(banner, "\x1b") {

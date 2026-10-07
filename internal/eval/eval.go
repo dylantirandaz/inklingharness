@@ -88,8 +88,8 @@ func LoadTasks(path string) ([]Task, error) {
 // sees only the files that the agent made and the model sees the same working
 // directory path as before output files existed. When keepWorkDir is true both
 // directories stay on disk and Result.WorkDir names the working directory.
-func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config, task Task, taskFileDir string, keepWorkDir bool) Result {
-	result := Result{Task: task.Name}
+func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config, task Task, taskFileDir string, keepWorkDir bool) (result Result) {
+	result = Result{Task: task.Name}
 	workDir, err := os.MkdirTemp("", "inkling-eval-"+task.Name+"-")
 	if err != nil {
 		result.Error = err.Error()
@@ -115,7 +115,18 @@ func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config,
 			return result
 		}
 	}
-	toolSet, err := tools.Standard(workDir, outputDirectory)
+	// This deferred call runs before the directories are removed, so no job
+	// writes in a removed directory.
+	jobs := tools.NewJobs(outputDirectory)
+	defer func() {
+		if err := jobs.Close(); err != nil {
+			if result.Error != "" {
+				result.Error += "; "
+			}
+			result.Error += "stop background jobs: " + err.Error()
+		}
+	}()
+	toolSet, err := tools.Standard(workDir, outputDirectory, jobs)
 	if err != nil {
 		result.Error = err.Error()
 		return result
@@ -137,7 +148,7 @@ func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config,
 		result.Wall = time.Since(started)
 		return result
 	}
-	outcome, err := agent.Run(ctx, client, config, toolSet, nil, prepared.Prompt, agent.SilentObserver{})
+	outcome, err := agent.Run(ctx, client, config, toolSet, nil, agent.Prompt{Text: prepared.Prompt, Images: prepared.Images}, agent.SilentObserver{})
 	result.Wall = time.Since(started)
 	result.Turns = outcome.Turns
 	result.Usage = outcome.Usage
