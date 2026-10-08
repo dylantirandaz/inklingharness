@@ -41,13 +41,16 @@ go install ./cmd/think
 
 ## Evaluate
 
-`evals/tasks.jsonl` has 20 basic tasks. `evals/harder.jsonl` adds six cases for cancellation, parsing, API changes, atomic updates, intervals, and report selection. Each task has a separate check; a final model reply alone is not a pass.
+Tasks for `think eval`: `evals/tasks.jsonl` and `evals/harder.jsonl`. Replies do not prove success.
+
+Terminal-Bench 2.0 compares five harnesses on 89 tasks in VMs. Install Harbor 0.21.0 and Modal 1.6.1, configure Modal authentication, and set `OPENROUTER_API_KEY`. From the repository root:
 
 ```sh
-think eval -yes -model thinkingmachines/inkling-small -effort high \
-  -max-turns 20 \
-  -extra '{"provider":{"order":["deepinfra/fp8"],"allow_fallbacks":false}}' \
-  evals/harder.jsonl
+mkdir -p out/terminal-bench &&
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o out/terminal-bench/think-linux-amd64 ./cmd/think &&
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o out/terminal-bench/harbor-wire-linux-amd64 ./evals/harbor-wire &&
+python -m evals.harbor_run evals/terminal-bench.json &&
+python -m evals.harbor_wire out/terminal-bench/jobs/terminal-bench-2.0-566b971-vm
 ```
 
-Local allocation checks improved. Total model cost and time still vary by task. Current results do not establish a lead over every other harness.
+Cost and time vary. Evidence does not establish a lead over every other harness.
