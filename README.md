@@ -53,4 +53,4 @@ python -m evals.harbor_run evals/terminal-bench.json &&
 python -m evals.harbor_wire out/terminal-bench/jobs/terminal-bench-2.0-566b971-vm
 ```
 
-The recorder checks route evidence, including final server-tool metadata. Unverified routes fail. No universal lead is established.
+The recorder checks final Messages and Responses routing metadata. Unverified routes fail. No universal lead is established.

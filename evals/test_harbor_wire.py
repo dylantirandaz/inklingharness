@@ -108,5 +108,59 @@ class MessagesRouteTests(unittest.TestCase):
                 audit_wire_providers(logs)
 
 
+def _write_responses_wire(logs: Path, routing: dict[str, object]) -> None:
+    wire = logs / "wire"
+    record = wire / "0001"
+    record.mkdir(parents=True)
+    request = {
+        "model": MODEL, "input": "Check the release date.", "max_output_tokens": 16384,
+        "reasoning": {"effort": "high"},
+        "provider": {"order": ["deepinfra/fp8"], "allow_fallbacks": False},
+    }
+    for name in ("incoming.json", "0001.request.json"):
+        (record / name).write_text(json.dumps(request))
+    (wire / "run.json").write_text(json.dumps({"requests": 1}))
+    (record / "metadata.json").write_text(json.dumps({
+        "path": "/api/v1/responses", "method": "POST", "status_code": 200,
+        "content_type": "text/event-stream", "content_encoding": "identity",
+    }))
+    response = {
+        "id": "recorded-response", "model": MODEL, "openrouter_metadata": routing,
+        "usage": {"input_tokens": 150, "input_tokens_details": {"cached_tokens": 40}, "output_tokens": 20},
+    }
+    event = {"type": "response.completed", "response": response}
+    (record / "0001.response.sse").write_text("data: " + json.dumps(event) + "\n\n")
+
+
+class ResponsesRouteTests(unittest.TestCase):
+    def test_terminal_route_does_not_need_a_later_generation_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            logs = Path(directory)
+            _write_responses_wire(logs, _routing("DeepInfra", "thinkingmachines/inkling-small-20260730"))
+            context = AgentContext()
+            populate_wire_context(logs, context)
+            self.assertEqual(context.n_input_tokens, 150)
+            self.assertEqual(context.n_cache_tokens, 40)
+            self.assertEqual(context.n_output_tokens, 20)
+            assert context.metadata is not None
+            self.assertEqual(context.metadata["provider_verified_records"], 1)
+            self.assertEqual(context.metadata["pending_provider_verification"], [])
+            self.assertIs(context.metadata["all_recorded_usage_complete"], True)
+            audit_wire_providers(logs)
+
+    def test_wrong_terminal_provider_does_not_enter_the_pending_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            logs = Path(directory)
+            _write_responses_wire(logs, _routing("DifferentProvider", "thinkingmachines/inkling-small-20260730"))
+            context = AgentContext()
+            with self.assertRaises(ValueError):
+                populate_wire_context(logs, context)
+            self.assertIsNone(context.n_input_tokens)
+            self.assertIsNone(context.n_cache_tokens)
+            self.assertIsNone(context.n_output_tokens)
+            assert context.metadata is not None
+            self.assertIs(context.metadata["all_recorded_usage_complete"], False)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -153,38 +153,38 @@ def _generation_metadata(identifier: str, directory: Path) -> dict[str, object]:
     return metadata
 
 
-def _messages_route_error(response: dict[str, object], routing: dict[str, object] | None) -> str | None:
+def _route_error(response: dict[str, object], routing: dict[str, object] | None) -> str | None:
     if routing is None:
         if response.get("model") != MODEL or response.get("provider") != "DeepInfra":
-            return "Missing or wrong returned Messages model or provider"
+            return "Missing or wrong returned model or provider"
         return None
     if routing.get("requested") != MODEL:
-        return "Wrong requested model in Messages routing metadata"
+        return "Wrong requested model in routing metadata"
     endpoints = routing.get("endpoints")
     if not isinstance(endpoints, dict):
-        return "Missing Messages routing endpoints"
+        return "Missing routing endpoints"
     available = endpoints.get("available")
     if not isinstance(available, list):
-        return "Missing Messages routing endpoints"
+        return "Missing routing endpoints"
     selected = False
     for endpoint in available:
         if not isinstance(endpoint, dict):
-            return "Invalid Messages routing endpoint"
+            return "Invalid routing endpoint"
         if endpoint.get("selected") is True:
             if endpoint.get("model") != _BACKEND_MODEL or endpoint.get("provider") != "DeepInfra":
-                return "Wrong selected Messages backend"
+                return "Wrong selected backend"
             selected = True
     if not selected:
-        return "No selected Messages backend"
+        return "No selected backend"
     attempts = routing.get("attempts")
     if attempts is not None:
         if not isinstance(attempts, list):
-            return "Invalid Messages routing attempts"
+            return "Invalid routing attempts"
         for attempt in attempts:
             if not isinstance(attempt, dict):
-                return "Invalid Messages routing attempt"
+                return "Invalid routing attempt"
             if attempt.get("model") != _BACKEND_MODEL or attempt.get("provider") != "DeepInfra":
-                return "Wrong attempted Messages backend"
+                return "Wrong attempted backend"
     return None
 
 
@@ -270,7 +270,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
             if response is None or not stopped:
                 failed += 1
                 continue
-            route_error = _messages_route_error(response, routing)
+            route_error = _route_error(response, routing)
             if route_error is not None:
                 raise ValueError(f"{route_error} in {directory}")
             verified += 1
@@ -290,7 +290,14 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
             identifier = response["id"]
             if not isinstance(identifier, str):
                 raise ValueError(f"Invalid response ID in {directory}")
-            pending.append({"record": directory.name, "id": identifier})
+            routing_value = response.get("openrouter_metadata")
+            if routing_value is None:
+                pending.append({"record": directory.name, "id": identifier})
+            else:
+                route_error = _route_error(response, _object(routing_value))
+                if route_error is not None:
+                    raise ValueError(f"{route_error} in {directory}")
+                verified += 1
             usage = _object(response.get("usage"))
             totals["input"] += _count(usage.get("input_tokens"))
             totals["output"] += _count(usage.get("output_tokens"))
