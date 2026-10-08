@@ -14,6 +14,7 @@ import (
 
 	"github.com/dylantirandaz/inklingharness/internal/anthropic"
 	"github.com/dylantirandaz/inklingharness/internal/latency"
+	"github.com/dylantirandaz/inklingharness/internal/session"
 	"github.com/dylantirandaz/inklingharness/internal/tools"
 )
 
@@ -28,8 +29,12 @@ type Config struct {
 	MaxTurns      int
 	CompactTokens int
 	EnableTasks   bool
-	Approve       func(context.Context, anthropic.ToolUseBlock) (bool, error)
-	Checkpoint    func(Outcome) error
+	// ContextStore keeps source images and exact archived messages outside
+	// active model context. CLI entry points always supply a private store.
+	ContextStore      *session.Store
+	contextCheckpoint func(context.Context, json.RawMessage) (tools.Result, error)
+	Approve           func(context.Context, anthropic.ToolUseBlock) (bool, error)
+	Checkpoint        func(Outcome) error
 	// Gate runs before every tool call, read-only ones too, and before
 	// Approve. A refusal goes to the model as a failed result with its
 	// reason; an error stops the run. A nil Gate refuses nothing. Gate must
@@ -90,10 +95,9 @@ type Outcome struct {
 	LastInputTokens int
 }
 
-// Prompt is one user request: its text and the images attached to it.
+// Prompt is one user request. Images appear as private references in Text.
 type Prompt struct {
-	Text   string
-	Images []anthropic.ImageBlock
+	Text string
 }
 
 // maxCutReplies is how many replies cut at max_tokens one prompt may retry.
@@ -111,7 +115,11 @@ const cutReplyNote = "Your last reply hit the output limit before it was complet
 // need the reasoning of earlier prompts, so the outcome history drops the
 // reasoning of every assistant message before the last one.
 func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, history []anthropic.EncodedMessage, prompt Prompt, observer Observer) (*Outcome, error) {
-	earlier, err := withoutOldReasoning(history)
+	withoutImages, err := externalizeImages(ctx, config.ContextStore, history)
+	if err != nil {
+		return &Outcome{Messages: slices.Clone(history)}, fmt.Errorf("agent: %w", err)
+	}
+	earlier, err := withoutOldReasoning(withoutImages)
 	if err != nil {
 		return &Outcome{Messages: slices.Clone(history)}, fmt.Errorf("agent: %w", err)
 	}
@@ -120,9 +128,6 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 		return outcome, errors.New("agent: positive turn/token limits, a nonnegative compaction limit, and a prompt are required")
 	}
 	content := []anthropic.ContentBlock{anthropic.TextBlock{Text: withNotices(prompt.Text, config)}}
-	for _, image := range prompt.Images {
-		content = append(content, image)
-	}
 	withPrompt, err := appendMessage(outcome.Messages, anthropic.Message{Role: anthropic.RoleUser, Content: content})
 	if err != nil {
 		return outcome, fmt.Errorf("agent: add prompt: %w", err)
@@ -133,6 +138,34 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 	}
 	definitions := RequestTools(config, toolSet)
 	cutReplies := 0
+	var checkpointPrefix []anthropic.EncodedMessage
+	config.contextCheckpoint = func(ctx context.Context, input json.RawMessage) (tools.Result, error) {
+		var arguments struct {
+			Summary  string `json:"summary"`
+			NextStep string `json:"next_step"`
+		}
+		if err := json.Unmarshal(input, &arguments); err != nil {
+			return tools.Result{Content: "invalid context checkpoint: " + err.Error(), IsError: true}, nil
+		}
+		summary := strings.TrimSpace(arguments.Summary)
+		nextStep := strings.TrimSpace(arguments.NextStep)
+		if summary == "" || len(summary) > maxContextSummaryBytes || nextStep == "" || len(nextStep) > 4<<10 {
+			return tools.Result{Content: "Provide nonempty summary notes of at most 16 KiB and a next_step of at most 4 KiB. Keep the remaining action and user constraints explicit.", IsError: true}, nil
+		}
+		archiveID, err := config.ContextStore.ArchiveContext(ctx, outcome.Messages)
+		if err != nil {
+			return tools.Result{}, fmt.Errorf("archive context: %w", err)
+		}
+		prefix, err := appendMessage(nil, contextNote(summary+"\n\nNext step and user constraints:\n"+nextStep, archiveID))
+		if err != nil {
+			return tools.Result{}, err
+		}
+		if EstimateTokens(prefix) >= EstimateTokens(outcome.Messages) {
+			return tools.Result{Content: "The notes do not reduce context. Keep working or provide shorter notes.", IsError: true}, nil
+		}
+		checkpointPrefix = prefix
+		return tools.Result{Content: "Context checkpoint saved. Earlier messages are archived as " + archiveID + ". Continue from the notes. Do not read the archive or inspect images just to verify this checkpoint. If the work is complete, reply to the user."}, nil
+	}
 	for turn := 1; turn <= config.MaxTurns; turn++ {
 		if ShouldCompact(config, outcome.Messages, outcome.LastInputTokens) {
 			compacted, err := Compact(ctx, client, config, toolSet, outcome.Messages, observer)
@@ -185,6 +218,7 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 			return outcome, fmt.Errorf("turn %d: %w", turn, err)
 		}
 		var runErr error
+		checkpointPrefix = nil
 		if response.StopReason == anthropic.StopToolUse {
 			results, childUsage, err := runTools(requestContext, client, config, toolSet, calls, observer)
 			outcome.Usage = outcome.Usage.Add(childUsage)
@@ -197,6 +231,13 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 			if err != nil {
 				return outcome, fmt.Errorf("turn %d: %w", turn, errors.Join(runErr, err))
 			}
+		}
+		if checkpointPrefix != nil && runErr == nil {
+			// A paused assistant reply can join the checkpoint call. Keep the
+			// complete final pair, not the difference in message counts.
+			completed = append(checkpointPrefix, completed[len(completed)-2:]...)
+			outcome.LastInputTokens = 0
+			observer.Status("context checkpoint saved; exact earlier messages remain available")
 		}
 		outcome.Messages = completed
 		if err := checkpoint(requestContext, config, outcome); err != nil {
@@ -281,6 +322,9 @@ func RequestTools(config Config, toolSet *tools.Set) []anthropic.ToolDefinition 
 	definitions := toolDefinitions(toolSet)
 	if config.EnableTasks {
 		definitions = append(definitions, taskDefinition())
+	}
+	if config.ContextStore != nil {
+		definitions = append(definitions, resourceDefinitions()...)
 	}
 	return definitions
 }
@@ -382,7 +426,13 @@ type execution struct {
 // Read batches use at most four workers. Display events stay in call order.
 func runTools(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, calls []anthropic.ToolUseBlock, observer Observer) ([]anthropic.ContentBlock, anthropic.Usage, error) {
 	executions := make([]execution, len(calls))
-	runOne := func(index int) { executions[index] = runTool(ctx, client, config, toolSet, calls[index]) }
+	runOne := func(index int) {
+		callConfig := config
+		if len(calls) != 1 {
+			callConfig.contextCheckpoint = nil
+		}
+		executions[index] = runTool(ctx, client, callConfig, toolSet, calls[index])
+	}
 	if allReadOnly(toolSet, calls, config.EnableTasks) {
 		var group sync.WaitGroup
 		work := make(chan int)
@@ -434,6 +484,9 @@ func allReadOnly(toolSet *tools.Set, calls []anthropic.ToolUseBlock, enableTasks
 		if enableTasks && call.Name == "task" {
 			continue
 		}
+		if call.Name == "inspect_images" || call.Name == "context_read" {
+			continue
+		}
 		tool, found := toolSet.Lookup(call.Name)
 		if !found || !tool.ReadOnly {
 			return false
@@ -476,6 +529,29 @@ func runTool(ctx context.Context, client *anthropic.Client, config Config, toolS
 			result, err = afterTool(ctx, config, call, result)
 		}
 		return finish(result, usage, err)
+	}
+	if config.ContextStore != nil {
+		var result tools.Result
+		var usage anthropic.Usage
+		var err error
+		switch call.Name {
+		case "inspect_images":
+			result, usage, err = inspectImages(ctx, client, config, call.Input)
+		case "context_read":
+			result = readContext(ctx, config.ContextStore, call.Input)
+		case "context_checkpoint":
+			if config.contextCheckpoint == nil {
+				result = tools.Result{Content: "Call context_checkpoint alone.", IsError: true}
+			} else {
+				result, err = config.contextCheckpoint(ctx, call.Input)
+			}
+		}
+		if call.Name == "inspect_images" || call.Name == "context_read" || call.Name == "context_checkpoint" {
+			if err == nil {
+				result, err = afterTool(ctx, config, call, result)
+			}
+			return finish(result, usage, err)
+		}
 	}
 	tool, found := toolSet.Lookup(call.Name)
 	if !found {

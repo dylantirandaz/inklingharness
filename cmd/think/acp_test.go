@@ -31,7 +31,7 @@ import (
 type fakeACPBackend struct {
 	mutex     sync.Mutex
 	cwds      []string
-	prompts   []agent.Prompt
+	prompts   []acpPrompt
 	decisions []bool
 }
 
@@ -47,7 +47,7 @@ func (b *fakeACPBackend) NewSession(_ context.Context, cwd string) (string, erro
 	return fmt.Sprintf("s%d", len(b.cwds)), nil
 }
 
-func (b *fakeACPBackend) Prompt(ctx context.Context, _ string, prompt agent.Prompt, observer agent.Observer, approve func(context.Context, anthropic.ToolUseBlock) (bool, error)) (*agent.Outcome, error) {
+func (b *fakeACPBackend) Prompt(ctx context.Context, _ string, prompt acpPrompt, observer agent.Observer, approve func(context.Context, anthropic.ToolUseBlock) (bool, error)) (*agent.Outcome, error) {
 	b.mutex.Lock()
 	b.prompts = append(b.prompts, prompt)
 	b.mutex.Unlock()
@@ -278,7 +278,7 @@ func TestACPPromptTurn(t *testing.T) {
 	if !reflect.DeepEqual(backend.cwds, []string{"/work"}) {
 		t.Errorf("session cwds = %q, want [/work]", backend.cwds)
 	}
-	want := agent.Prompt{
+	want := acpPrompt{
 		Text:   "hello @file:///work/a.go and @file:///work/b.go\n\n<context uri=\"file:///work/b.go\">\npackage b\n</context>",
 		Images: []anthropic.ImageBlock{{MediaType: "image/png", Data: "iVBORw0KGgo="}},
 	}

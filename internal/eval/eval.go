@@ -19,6 +19,7 @@ import (
 	"github.com/dylantirandaz/inklingharness/internal/attachment"
 	"github.com/dylantirandaz/inklingharness/internal/latency"
 	"github.com/dylantirandaz/inklingharness/internal/project"
+	"github.com/dylantirandaz/inklingharness/internal/session"
 	"github.com/dylantirandaz/inklingharness/internal/tools"
 )
 
@@ -120,6 +121,7 @@ func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config,
 			return result
 		}
 	}
+	config.ContextStore = session.NewStore(filepath.Join(outputDirectory, "context-store"))
 	// This deferred call runs before the directories are removed, so no job
 	// writes in a removed directory.
 	jobs := tools.NewJobs(outputDirectory)
@@ -146,14 +148,14 @@ func RunTask(ctx context.Context, client *anthropic.Client, config agent.Config,
 	config.Checkpoint = nil
 	started := time.Now()
 	preparation := latency.Begin(ctx, latency.Preparation, "attachments")
-	prepared, err := attachment.Prepare(ctx, workDir, task.Prompt, task.Files)
+	prepared, err := attachment.Prepare(ctx, workDir, task.Prompt, task.Files, config.ContextStore)
 	preparation.End(err)
 	if err != nil {
 		result.Error = err.Error()
 		result.Wall = time.Since(started)
 		return result
 	}
-	outcome, err := agent.Run(ctx, client, config, toolSet, nil, agent.Prompt{Text: prepared.Prompt, Images: prepared.Images}, agent.SilentObserver{})
+	outcome, err := agent.Run(ctx, client, config, toolSet, nil, agent.Prompt{Text: prepared.Prompt}, agent.SilentObserver{})
 	result.Wall = time.Since(started)
 	result.Turns = outcome.Turns
 	result.Usage = outcome.Usage

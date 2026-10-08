@@ -91,7 +91,7 @@ func (OpaqueBlock) contentBlock()           {}
 
 // MarshalJSON encodes the message in compact Messages API wire format.
 func (m Message) MarshalJSON() ([]byte, error) {
-	size, err := estimateBytes(m)
+	size, _, err := estimateBytes(m)
 	if err != nil {
 		return nil, err
 	}
@@ -185,10 +185,11 @@ func (e *messageEncoder) block(block ContentBlock) error {
 	return fmt.Errorf("anthropic: cannot encode content block of type %T", block)
 }
 
-// estimateBytes is the size basis of the context estimate: 32 bytes of
-// message overhead plus the content of every block.
-func estimateBytes(m Message) (int, error) {
+// estimateBytes measures the context size and reports inline images.
+// The size includes 32 bytes of overhead plus the content of every block.
+func estimateBytes(m Message) (int, bool, error) {
 	size := 32
+	hasImages := false
 	for _, block := range m.Content {
 		switch typed := block.(type) {
 		case TextBlock:
@@ -203,13 +204,14 @@ func estimateBytes(m Message) (int, error) {
 			size += len(typed.ToolUseID) + len(typed.Content)
 		case ImageBlock:
 			size += ImageEstimateBytes
+			hasImages = true
 		case OpaqueBlock:
 			size += len(typed.Raw)
 		default:
-			return 0, fmt.Errorf("anthropic: cannot measure content block of type %T", block)
+			return 0, false, fmt.Errorf("anthropic: cannot measure content block of type %T", block)
 		}
 	}
-	return size, nil
+	return size, hasImages, nil
 }
 
 // UnmarshalJSON decodes the wire format that MarshalJSON writes. Each block is

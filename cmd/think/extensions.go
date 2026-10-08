@@ -217,7 +217,7 @@ func (e *extensions) configure(config *agent.Config, toolSet *tools.Set, policy 
 // The research task is read-only by construction.
 func readOnlyCall(toolSet *tools.Set, call anthropic.ToolUseBlock) bool {
 	// ask_user changes nothing; plan mode may ask the user.
-	if call.Name == "task" || call.Name == "ask_user" {
+	if call.Name == "task" || call.Name == "ask_user" || call.Name == "inspect_images" || call.Name == "context_read" || call.Name == "context_checkpoint" {
 		return true
 	}
 	tool, found := toolSet.Lookup(call.Name)

@@ -199,7 +199,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	flags := flag.NewFlagSet("think chat", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	o := bindOptions(flags)
-	flags.Var(&o.files, "file", "attach a text file to the first request; repeat for more files")
+	flags.Var(&o.files, "file", "attach a text or image file to the first request; repeat for more files")
 	resume := flags.String("resume", "", "saved session ID, last for the newest in this directory, or pick to choose from a list")
 	if err := flags.Parse(args); err != nil {
 		return flagExit(err)
@@ -456,7 +456,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	// compacts it after the first key, while the user types; a user who reads
 	// the last reply and leaves spends no tokens. Plain mode cannot see keys,
 	// so its first turn applies the normal trigger.
-	startConfig, err := chatConfig(o, projectContext, ext)
+	startConfig, err := chatConfig(o, projectContext, ext, store)
 	if err != nil {
 		fmt.Fprintf(stderr, "inkling: %v\n", err)
 		return 2
@@ -670,7 +670,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 					}
 					break
 				}
-				config, configErr := chatConfig(o, projectContext, ext)
+				config, configErr := chatConfig(o, projectContext, ext, store)
 				if configErr != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", configErr)
 					continue
@@ -716,7 +716,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				}
 				continue
 			case "/context":
-				config, configErr := chatConfig(o, projectContext, ext)
+				config, configErr := chatConfig(o, projectContext, ext, store)
 				if configErr == nil {
 					configErr = writeContext(stderr, config, toolSet, current.Messages, o.compactTokens)
 				}
@@ -786,7 +786,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			}
 			continue
 		}
-		config, err := chatConfig(o, projectContext, ext)
+		config, err := chatConfig(o, projectContext, ext, store)
 		if err != nil {
 			fmt.Fprintf(stderr, "inkling: %v\n", err)
 			continue
@@ -829,7 +829,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		observer.Begin()
 		started := time.Now()
 		preparation := latency.Begin(turnCtx, latency.Preparation, "attachments")
-		prepared, prepareError := attachment.Prepare(turnCtx, projectContext.WorkDir, line, o.files)
+		prepared, prepareError := attachment.Prepare(turnCtx, projectContext.WorkDir, line, o.files, store)
 		if prepareError == nil {
 			prepared.Prompt, prepareError = ext.prompt(turnCtx, prepared.Prompt)
 		}
@@ -850,7 +850,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		}
 		o.files = nil
 		printAttachedFiles(progressOutput, prepared.Files)
-		outcome, runErr := agent.Run(turnCtx, client, config, toolSet, current.Messages, agent.Prompt{Text: prepared.Prompt, Images: prepared.Images}, observer)
+		outcome, runErr := agent.Run(turnCtx, client, config, toolSet, current.Messages, agent.Prompt{Text: prepared.Prompt}, observer)
 		finish()
 		observer.Finish()
 		snapshot, snapshotErr := pending.wait(context.Background())
@@ -905,11 +905,12 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	}
 }
 
-func chatConfig(options *options, projectContext project.Context, ext *extensions) (agent.Config, error) {
+func chatConfig(options *options, projectContext project.Context, ext *extensions, store *session.Store) (agent.Config, error) {
 	config, err := options.agentConfig()
 	if err != nil {
 		return agent.Config{}, err
 	}
+	config.ContextStore = store
 	config.System += "\n\n" + projectContext.SystemPrompt()
 	if text := ext.systemPrompt(); text != "" {
 		config.System += "\n\n" + text

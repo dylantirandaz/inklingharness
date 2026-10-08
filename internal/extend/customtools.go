@@ -28,6 +28,7 @@ const (
 var reservedToolNames = []string{
 	"read_file", "write_file", "edit_file", "bash", "bash_job", "glob", "grep",
 	"task", "mcp_list", "mcp_call", "web_fetch", "remember", "ask_user",
+	"inspect_images", "context_checkpoint", "context_read",
 }
 
 type toolManifest struct {

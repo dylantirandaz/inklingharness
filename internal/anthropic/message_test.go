@@ -243,12 +243,12 @@ func TestParseMatchesTypedDecoding(t *testing.T) {
 		if typedErr != nil {
 			continue
 		}
-		want, err := estimateBytes(typed)
+		want, hasImages, err := estimateBytes(typed)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if parsed.EstimateBytes() != want || parsed.Role() != typed.Role {
-			t.Errorf("estimate %d role %q, want %d %q for %s", parsed.EstimateBytes(), parsed.Role(), want, typed.Role, wire)
+		if parsed.EstimateBytes() != want || parsed.Role() != typed.Role || parsed.HasImages() != hasImages {
+			t.Errorf("metadata differs for %s: estimate %d/%d role %q/%q images %t/%t", wire, parsed.EstimateBytes(), want, parsed.Role(), typed.Role, parsed.HasImages(), hasImages)
 		}
 	}
 }

@@ -19,6 +19,7 @@ type EncodedMessage struct {
 	role          Role
 	wire          []byte
 	estimateBytes int
+	hasImages     bool
 }
 
 // EncodeMessage encodes a typed message once.
@@ -26,7 +27,7 @@ func EncodeMessage(message Message) (EncodedMessage, error) {
 	if message.Role != RoleUser && message.Role != RoleAssistant {
 		return EncodedMessage{}, fmt.Errorf("anthropic: unknown message role %q", message.Role)
 	}
-	size, err := estimateBytes(message)
+	size, hasImages, err := estimateBytes(message)
 	if err != nil {
 		return EncodedMessage{}, err
 	}
@@ -34,7 +35,7 @@ func EncodeMessage(message Message) (EncodedMessage, error) {
 	if err != nil {
 		return EncodedMessage{}, err
 	}
-	return EncodedMessage{role: message.Role, wire: wire, estimateBytes: size}, nil
+	return EncodedMessage{role: message.Role, wire: wire, estimateBytes: size, hasImages: hasImages}, nil
 }
 
 // ParseEncodedMessage validates stored wire JSON and computes its metadata in
@@ -55,17 +56,22 @@ func ParseEncodedMessage(wire []byte) (EncodedMessage, error) {
 		return EncodedMessage{}, fmt.Errorf("anthropic: unknown message role %q", measured.Role)
 	}
 	size := 32
+	hasImages := false
 	for _, block := range measured.Content {
-		size += int(block)
+		size += block.bytes
+		hasImages = hasImages || block.image
 	}
-	return EncodedMessage{role: measured.Role, wire: wire, estimateBytes: size}, nil
+	return EncodedMessage{role: measured.Role, wire: wire, estimateBytes: size, hasImages: hasImages}, nil
 }
 
-// measuredBlock is the estimate size of one block, computed with the rules of
-// blockDecoder and estimateBytes.
-type measuredBlock int
+// measuredBlock keeps size and image metadata without copying block contents.
+type measuredBlock struct {
+	bytes int
+	image bool
+}
 
 func (b *measuredBlock) UnmarshalJSON(raw []byte) error {
+	*b = measuredBlock{}
 	var fields struct {
 		Type      string              `json:"type"`
 		Text      measuredString      `json:"text"`
@@ -85,7 +91,7 @@ func (b *measuredBlock) UnmarshalJSON(raw []byte) error {
 		if len(raw) == 0 || raw[0] != '{' {
 			return errors.New("content block is not a JSON object")
 		}
-		*b = measuredBlock(len(raw))
+		b.bytes = len(raw)
 		return nil
 	}
 	if err != nil {
@@ -99,23 +105,24 @@ func (b *measuredBlock) UnmarshalJSON(raw []byte) error {
 	}
 	switch fields.Type {
 	case "text":
-		*b = measuredBlock(fields.Text.length)
+		b.bytes = fields.Text.length
 	case "thinking":
-		*b = measuredBlock(fields.Thinking.length + fields.Signature.length)
+		b.bytes = fields.Thinking.length + fields.Signature.length
 	case "redacted_thinking":
-		*b = measuredBlock(fields.Data.length)
+		b.bytes = fields.Data.length
 	case "tool_use":
-		*b = measuredBlock(fields.ID.length + fields.Name.length + int(fields.Input))
+		b.bytes = fields.ID.length + fields.Name.length + int(fields.Input)
 	case "tool_result":
 		if fields.Content.notString {
 			return errors.New("tool_result block: content is not a string")
 		}
-		*b = measuredBlock(fields.ToolUseID.length + fields.Content.length)
+		b.bytes = fields.ToolUseID.length + fields.Content.length
 	case "image":
 		if fields.Source.err != nil {
 			return fmt.Errorf("image block: %w", fields.Source.err)
 		}
-		*b = ImageEstimateBytes
+		b.bytes = ImageEstimateBytes
+		b.image = true
 	}
 	return nil
 }
@@ -277,6 +284,9 @@ func (m EncodedMessage) Wire() []byte { return m.wire }
 // EstimateBytes is 32 bytes of message overhead plus the content size of each
 // block. Context estimates divide the sum by three.
 func (m EncodedMessage) EstimateBytes() int { return m.estimateBytes }
+
+// HasImages reports whether the message contains inline image data.
+func (m EncodedMessage) HasImages() bool { return m.hasImages }
 
 // Decode returns a new typed copy for code that needs block contents.
 func (m EncodedMessage) Decode() (Message, error) {

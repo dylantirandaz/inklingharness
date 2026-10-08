@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/dylantirandaz/inklingharness/internal/agent"
@@ -74,7 +75,7 @@ func (a *acpSessions) NewSession(ctx context.Context, cwd string) (string, error
 
 // Prompt runs one turn. serveACP runs at most one prompt for each session at
 // a time, so the history of a session needs no lock of its own.
-func (a *acpSessions) Prompt(ctx context.Context, sessionID string, prompt agent.Prompt, observer agent.Observer, approve func(context.Context, anthropic.ToolUseBlock) (bool, error)) (*agent.Outcome, error) {
+func (a *acpSessions) Prompt(ctx context.Context, sessionID string, prompt acpPrompt, observer agent.Observer, approve func(context.Context, anthropic.ToolUseBlock) (bool, error)) (*agent.Outcome, error) {
 	a.mutex.Lock()
 	current, found := a.sessions[sessionID]
 	a.mutex.Unlock()
@@ -92,7 +93,18 @@ func (a *acpSessions) Prompt(ctx context.Context, sessionID string, prompt agent
 	if err != nil {
 		return &agent.Outcome{Messages: current.history}, err
 	}
-	prepared.Images = append(prepared.Images, prompt.Images...)
+	if len(prompt.Images) > 0 {
+		var text strings.Builder
+		text.WriteString(prepared.Text)
+		for index, image := range prompt.Images {
+			reference, err := config.ContextStore.CaptureImageBlock(ctx, image)
+			if err != nil {
+				return &agent.Outcome{Messages: current.history}, fmt.Errorf("store ACP image %d: %w", index+1, err)
+			}
+			fmt.Fprintf(&text, "\n\nEditor image %d: image_id=%s, media_type=%s. This image is stored privately. Use inspect_images for visual details; reuse its text notes.", index+1, reference.ID, reference.MediaType)
+		}
+		prepared.Text = text.String()
+	}
 	outcome, err := agent.Run(ctx, work.client, config, work.toolSet, current.history, prepared, observer)
 	current.history = outcome.Messages
 	return outcome, err

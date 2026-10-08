@@ -79,6 +79,7 @@ func newWorkspace(ctx context.Context, o *options, root string, stderr io.Writer
 	if err != nil {
 		return nil, errors.Join(err, ext.close())
 	}
+	config.ContextStore = store
 	removeStaleOutputs(store, stderr)
 	// run, rpc, and acp never save this session. Its ID only names the
 	// directory that keeps large command outputs after the command ends.
@@ -108,7 +109,7 @@ func (w *workspace) close() error {
 // prompt prepares one request: attachments and @mentions, then the context
 // of prompt hooks.
 func (w *workspace) prompt(ctx context.Context, text string, files []string) (attachment.Prepared, agent.Prompt, error) {
-	prepared, err := attachment.Prepare(ctx, w.project.WorkDir, text, files)
+	prepared, err := attachment.Prepare(ctx, w.project.WorkDir, text, files, w.config.ContextStore)
 	if err != nil {
 		return attachment.Prepared{}, agent.Prompt{}, err
 	}
@@ -116,7 +117,7 @@ func (w *workspace) prompt(ctx context.Context, text string, files []string) (at
 	if err != nil {
 		return attachment.Prepared{}, agent.Prompt{}, err
 	}
-	return prepared, agent.Prompt{Text: withHooks, Images: prepared.Images}, nil
+	return prepared, agent.Prompt{Text: withHooks}, nil
 }
 
 // rpcCommand serves one conversation to an editor over stdin and stdout; see

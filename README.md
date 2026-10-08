@@ -24,6 +24,12 @@ The agent provides streamed chat, saved sessions, file reads, search, exact text
 
 File changes and commands require approval unless you enable `-yes`. Commands run on your machine; this is not a sandbox. `OPENROUTER_API_KEY` overrides the stored key. Use `-h` on each command for its options.
 
+## Context and images
+
+Attach files with `-file path` or `@path`. Images are stored once in private session state, with a 5 MiB limit each. `inspect_images` sends selected images in a separate request; later turns reuse text notes. Each call accepts up to eight images and 10 MiB. Explicit re-inspection uses the saved original, even after source deletion.
+
+The agent can use `context_checkpoint` to retain notes and a next step. `context_read` retrieves exact older messages. Notes are lossy, not a privacy filter. Keep the session state's `resources` directory with session backups. Chat exports do not include stored resources.
+
 ## Develop
 
 Requires Go 1.24 or later, Git, and Bash.
@@ -44,4 +50,4 @@ think eval -yes -model thinkingmachines/inkling-small -effort high \
   evals/harder.jsonl
 ```
 
-File reads omit line-number prefixes but keep range and truncation notices. Search reuses file storage; stream decoding avoids extra text copies. These changes reduce local allocations. Model token use and total time still depend on the task and provider. Current measurements do not establish a lead over every other harness.
+Local allocation checks improved. Total model cost and time still vary by task. Current results do not establish a lead over every other harness.

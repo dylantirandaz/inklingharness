@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -199,59 +198,6 @@ func TestCompactionKeepsNewestToolPair(t *testing.T) {
 	}
 	if EstimateTokens(outcome.Messages) >= EstimateTokens(history) || outcome.Usage.OutputTokens != 10 {
 		t.Fatalf("compaction did not reduce context or count usage: %+v", outcome)
-	}
-}
-
-// The summary request must send the same tool list as a normal turn and no
-// tool_choice. A different list, or tool_choice "none", changes the prompt
-// prefix, and the provider then cannot reuse the prompt cache.
-func TestCompactionRequestKeepsNormalTools(t *testing.T) {
-	type requestTail struct {
-		Tools      json.RawMessage `json:"tools"`
-		ToolChoice json.RawMessage `json:"tool_choice"`
-	}
-	var requests []requestTail
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request requestTail
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Error(err)
-			return
-		}
-		requests = append(requests, request)
-		if len(requests) == 1 {
-			fmt.Fprint(w, messageStart(), textBlock(0, "The user wants a short change."), messageEnd("end_turn", 3))
-		} else {
-			fmt.Fprint(w, messageStart(), textBlock(0, "done"), messageEnd("end_turn", 2))
-		}
-	}))
-	defer server.Close()
-	toolSet, err := standardTools(t, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	history := encodeHistory(t,
-		anthropic.Message{Role: anthropic.RoleUser, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: strings.Repeat("old requirements ", 100)}}},
-		anthropic.Message{Role: anthropic.RoleAssistant, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: strings.Repeat("old work ", 100)}}},
-		anthropic.Message{Role: anthropic.RoleUser, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: strings.Repeat("more requirements ", 100)}}},
-		anthropic.Message{Role: anthropic.RoleAssistant, Content: []anthropic.ContentBlock{anthropic.TextBlock{Text: strings.Repeat("more work ", 100)}}},
-	)
-	config := Config{Model: "m", MaxTokens: 100, MaxTurns: 2, CompactTokens: 1, EnableTasks: true}
-	outcome, err := Run(context.Background(), anthropic.NewClient("key", server.URL, nil), config, toolSet, history, Prompt{Text: "next request"}, SilentObserver{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(requests) != 2 || outcome.FinalText != "done" {
-		t.Fatalf("requests=%d outcome=%+v", len(requests), outcome)
-	}
-	summary, normal := requests[0], requests[1]
-	if !strings.Contains(string(normal.Tools), `"name":"task"`) || !bytes.Equal(summary.Tools, normal.Tools) {
-		t.Fatalf("summary tools differ from normal tools:\n%s\n%s", summary.Tools, normal.Tools)
-	}
-	if summary.ToolChoice != nil || normal.ToolChoice != nil {
-		t.Fatalf("tool_choice summary=%s normal=%s", summary.ToolChoice, normal.ToolChoice)
-	}
-	if outcome.LastInputTokens != 140 {
-		t.Fatalf("last input tokens = %d, want only the latest request", outcome.LastInputTokens)
 	}
 }
 

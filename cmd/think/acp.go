@@ -54,7 +54,13 @@ const (
 // at the same time.
 type acpBackend interface {
 	NewSession(ctx context.Context, cwd string) (string, error)
-	Prompt(ctx context.Context, sessionID string, prompt agent.Prompt, observer agent.Observer, approve func(context.Context, anthropic.ToolUseBlock) (bool, error)) (*agent.Outcome, error)
+	Prompt(ctx context.Context, sessionID string, prompt acpPrompt, observer agent.Observer, approve func(context.Context, anthropic.ToolUseBlock) (bool, error)) (*agent.Outcome, error)
+}
+
+// acpPrompt holds incoming image data only until the workspace stores it.
+type acpPrompt struct {
+	Text   string
+	Images []anthropic.ImageBlock
 }
 
 // acpIncoming is one line from the client. A request has a method and an
@@ -558,7 +564,7 @@ func (s *acpServer) prompt(ctx context.Context, message acpIncoming) {
 // order. A resource link or an embedded resource puts "@" and its URI in the
 // text where it occurs, and the text of an embedded resource follows the
 // prompt in a context section.
-func agentPrompt(blocks []acpContentBlock) (agent.Prompt, error) {
+func agentPrompt(blocks []acpContentBlock) (acpPrompt, error) {
 	var text, sections strings.Builder
 	var images []anthropic.ImageBlock
 	for index, block := range blocks {
@@ -568,18 +574,18 @@ func agentPrompt(blocks []acpContentBlock) (agent.Prompt, error) {
 		case "image":
 			image, err := acpImage(block.MimeType, block.Data)
 			if err != nil {
-				return agent.Prompt{}, fmt.Errorf("prompt[%d]: %w", index, err)
+				return acpPrompt{}, fmt.Errorf("prompt[%d]: %w", index, err)
 			}
 			images = append(images, image)
 		case "resource_link":
 			if block.URI == "" {
-				return agent.Prompt{}, fmt.Errorf("prompt[%d]: resource_link needs a uri", index)
+				return acpPrompt{}, fmt.Errorf("prompt[%d]: resource_link needs a uri", index)
 			}
 			text.WriteString("@" + block.URI)
 		case "resource":
 			resource := block.Resource
 			if resource == nil || resource.URI == "" {
-				return agent.Prompt{}, fmt.Errorf("prompt[%d]: resource needs a resource with a uri", index)
+				return acpPrompt{}, fmt.Errorf("prompt[%d]: resource needs a resource with a uri", index)
 			}
 			switch {
 			case resource.Text != nil:
@@ -588,24 +594,24 @@ func agentPrompt(blocks []acpContentBlock) (agent.Prompt, error) {
 			case resource.Blob != nil:
 				image, err := acpImage(resource.MimeType, *resource.Blob)
 				if err != nil {
-					return agent.Prompt{}, fmt.Errorf("prompt[%d]: binary resource %s: %w", index, resource.URI, err)
+					return acpPrompt{}, fmt.Errorf("prompt[%d]: binary resource %s: %w", index, resource.URI, err)
 				}
 				text.WriteString("@" + resource.URI)
 				images = append(images, image)
 			default:
-				return agent.Prompt{}, fmt.Errorf("prompt[%d]: resource needs text or blob", index)
+				return acpPrompt{}, fmt.Errorf("prompt[%d]: resource needs text or blob", index)
 			}
 		case "audio":
-			return agent.Prompt{}, fmt.Errorf("prompt[%d]: audio is not supported", index)
+			return acpPrompt{}, fmt.Errorf("prompt[%d]: audio is not supported", index)
 		default:
-			return agent.Prompt{}, fmt.Errorf("prompt[%d]: unknown content type %q", index, block.Type)
+			return acpPrompt{}, fmt.Errorf("prompt[%d]: unknown content type %q", index, block.Type)
 		}
 	}
 	if strings.TrimSpace(text.String()) == "" {
-		return agent.Prompt{}, errors.New("prompt needs text or a resource")
+		return acpPrompt{}, errors.New("prompt needs text or a resource")
 	}
 	text.WriteString(sections.String())
-	return agent.Prompt{Text: text.String(), Images: images}, nil
+	return acpPrompt{Text: text.String(), Images: images}, nil
 }
 
 // acpImage accepts the image types of the Messages API. The API checks the
@@ -622,7 +628,7 @@ func acpImage(mimeType, data string) (anthropic.ImageBlock, error) {
 	return anthropic.ImageBlock{MediaType: mimeType, Data: data}, nil
 }
 
-func (s *acpServer) runTurn(ctx context.Context, session *acpSession, prompt agent.Prompt) {
+func (s *acpServer) runTurn(ctx context.Context, session *acpSession, prompt acpPrompt) {
 	observer := &acpObserver{server: s, session: session}
 	_, err := s.backend.Prompt(ctx, session.id, prompt, observer, observer.approve)
 	observer.failOpenCalls()
