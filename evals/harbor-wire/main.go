@@ -214,6 +214,10 @@ func (p *proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	if request.Method == http.MethodPost {
 		upstream.Header.Set("Authorization", "Bearer "+p.key)
+		if request.URL.Path == "/api/v1/messages" {
+			// Server-tool streams report the selected backend at message_stop.
+			upstream.Header.Set("X-OpenRouter-Metadata", "enabled")
+		}
 	}
 	upstream.Header.Set("Accept-Encoding", "identity")
 	response, err := p.client.Do(upstream)

@@ -1,6 +1,6 @@
 # Inkling
 
-A small Go coding agent for `thinkingmachines/inkling-small` through OpenRouter. It uses only the Go standard library and supports macOS and Linux.
+Go coding agent for `thinkingmachines/inkling-small` through OpenRouter. It uses the Go standard library and supports macOS and Linux.
 
 ## Install
 
@@ -53,4 +53,4 @@ python -m evals.harbor_run evals/terminal-bench.json &&
 python -m evals.harbor_wire out/terminal-bench/jobs/terminal-bench-2.0-566b971-vm
 ```
 
-Cost and time vary. Evidence does not establish a lead over every other harness.
+The recorder checks route evidence, including final server-tool metadata. Unverified routes fail. No universal lead is established.

@@ -15,6 +15,7 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 MODEL = "thinkingmachines/inkling-small"
+_BACKEND_MODEL = "thinkingmachines/inkling-small-20260730"
 _TOKEN_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 
 
@@ -146,13 +147,50 @@ def _generation_metadata(identifier: str, directory: Path) -> dict[str, object]:
             raise
     value: object = json.loads(body)
     metadata = _object(_object(value).get("data"))
-    if metadata.get("id") != identifier or metadata.get("provider_name") != "DeepInfra" or metadata.get("model") != "thinkingmachines/inkling-small-20260730":
+    if metadata.get("id") != identifier or metadata.get("provider_name") != "DeepInfra" or metadata.get("model") != _BACKEND_MODEL:
         raise ValueError(f"Wrong returned provider or model for {identifier}")
     saved.write_bytes(body)
     return metadata
 
 
+def _messages_route_error(response: dict[str, object], routing: dict[str, object] | None) -> str | None:
+    if routing is None:
+        if response.get("model") != MODEL or response.get("provider") != "DeepInfra":
+            return "Missing or wrong returned Messages model or provider"
+        return None
+    if routing.get("requested") != MODEL:
+        return "Wrong requested model in Messages routing metadata"
+    endpoints = routing.get("endpoints")
+    if not isinstance(endpoints, dict):
+        return "Missing Messages routing endpoints"
+    available = endpoints.get("available")
+    if not isinstance(available, list):
+        return "Missing Messages routing endpoints"
+    selected = False
+    for endpoint in available:
+        if not isinstance(endpoint, dict):
+            return "Invalid Messages routing endpoint"
+        if endpoint.get("selected") is True:
+            if endpoint.get("model") != _BACKEND_MODEL or endpoint.get("provider") != "DeepInfra":
+                return "Wrong selected Messages backend"
+            selected = True
+    if not selected:
+        return "No selected Messages backend"
+    attempts = routing.get("attempts")
+    if attempts is not None:
+        if not isinstance(attempts, list):
+            return "Invalid Messages routing attempts"
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                return "Invalid Messages routing attempt"
+            if attempt.get("model") != _BACKEND_MODEL or attempt.get("provider") != "DeepInfra":
+                return "Wrong attempted Messages backend"
+    return None
+
+
 def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
+    # Harbor must retain the first parse error, not repeat the hook during recovery.
+    context.metadata = {"usage_source": "raw OpenRouter wire responses", "all_recorded_usage_complete": False}
     wire = logs_dir / "wire"
     run_path = wire / "run.json"
     run = _read_object(run_path) if run_path.exists() else None
@@ -193,21 +231,23 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
         response: dict[str, object] | None = None
         counters: dict[str, int] = {}
         stopped = False
-        provider_verified = False
+        routing: dict[str, object] | None = None
         for event in events:
             kind = event.get("type")
             if endpoint == "/api/v1/messages":
                 if kind in ("message_start", "message"):
-                    message = _object(event.get("message")) if kind == "message_start" else event
-                    if message.get("model") != MODEL or message.get("provider") != "DeepInfra":
-                        raise ValueError(f"Wrong returned Messages model or provider in {directory}")
-                    provider_verified = True
-                    usage = _object(message.get("usage"))
+                    response = _object(event.get("message")) if kind == "message_start" else event
+                    routing_value = response.get("openrouter_metadata")
+                    routing = _object(routing_value) if routing_value is not None else None
+                    usage = _object(response.get("usage"))
                     stopped = kind == "message"
                 elif kind == "message_delta":
                     usage = _object(event.get("usage"))
                 elif kind == "message_stop":
                     stopped = True
+                    routing_value = event.get("openrouter_metadata")
+                    if routing_value is not None:
+                        routing = _object(routing_value)
                     continue
                 else:
                     continue
@@ -227,8 +267,14 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
             else:
                 raise ValueError(f"Unsupported endpoint {endpoint!r}")
         if endpoint == "/api/v1/messages":
-            verified += provider_verified
-            if stopped and provider_verified and "input_tokens" in counters and "output_tokens" in counters:
+            if response is None or not stopped:
+                failed += 1
+                continue
+            route_error = _messages_route_error(response, routing)
+            if route_error is not None:
+                raise ValueError(f"{route_error} in {directory}")
+            verified += 1
+            if "input_tokens" in counters and "output_tokens" in counters:
                 complete += 1
                 totals["input"] += sum(counters.get(field, 0) for field in _TOKEN_FIELDS[:3])
                 totals["cache"] += counters.get("cache_read_input_tokens", 0)
