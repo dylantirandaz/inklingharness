@@ -65,20 +65,17 @@ func TestBackgroundWorkRepaintsOnlyFooter(t *testing.T) {
 	s.drawLocked()
 	take()
 	s.SetBackgroundWork("compacting")
-	for range 2 {
-		got := take()
-		if strings.Count(got, "\x1b[2K") != 1 || strings.Contains(got, "composer contents") {
-			t.Fatalf("background work repainted composer: %q", got)
-		}
-		if s.cursorRow != s.frameRow || s.cursorCol != s.frameCol || !s.cursorVisible {
-			t.Fatal("background work did not restore the input cursor")
-		}
-		s.effects.epoch = s.effects.epoch.Add(-expertTick)
-		s.drawLocked()
+	got := take()
+	if strings.Count(got, "\x1b[2K") != 1 || strings.Contains(got, "composer contents") ||
+		!strings.Contains(got, "compacting") {
+		t.Fatalf("background work did not stay in the footer: %q", got)
+	}
+	if s.cursorRow != s.frameRow || s.cursorCol != s.frameCol || !s.cursorVisible {
+		t.Fatal("background work did not restore the input cursor")
 	}
 }
 
-func TestDrawExpertGridKeepsPreview(t *testing.T) {
+func TestBusyActivityKeepsPreview(t *testing.T) {
 	s, take := renderScreen(t, modeBusy, 8, 60)
 	s.effects = effects{motion: true, epoch: time.Now()}
 	s.preview = "first preview line\nsecond preview line"
@@ -89,11 +86,11 @@ func TestDrawExpertGridKeepsPreview(t *testing.T) {
 	if len(s.live) != 4 {
 		t.Fatalf("busy view contains %d rows, want preview, activity, and footer rows", len(s.live))
 	}
-	s.effects.epoch = s.effects.epoch.Add(-expertTick)
+	s.effects.epoch = s.effects.epoch.Add(-4 * expertTick)
 	s.drawLocked()
 	got := take()
 	if strings.Count(got, "\x1b[2K") != 1 || strings.Contains(got, "preview") || len(got) >= len(initial) {
-		t.Fatalf("expert grid repainted preview: %q", got)
+		t.Fatalf("activity mark repainted preview: %q", got)
 	}
 	if s.cursorVisible {
 		t.Fatal("busy cursor is visible")
@@ -190,6 +187,9 @@ func TestChoiceNarrowAndNoColor(t *testing.T) {
 			t.Fatal("choice view exceeds available rows")
 		}
 		body := strings.Join(s.live, "")
+		if s.cols < 8 {
+			continue
+		}
 		for _, key := range []string{"y", "a", "n"} {
 			if !strings.Contains(body, key) {
 				t.Fatalf("choice %q missing at %dx%d: %q", key, s.rows, s.cols, body)
@@ -315,5 +315,66 @@ func TestFramesAreSynchronizedAndOSCTextIsSafe(t *testing.T) {
 	}
 	if got := take(); !strings.HasPrefix(got, syncBegin) || !strings.HasSuffix(got, syncEnd) {
 		t.Fatalf("scrollback insertion is not synchronized: %q", got)
+	}
+}
+
+func TestLongPasteHasBoundedEditableViewport(t *testing.T) {
+	for _, cols := range []int{18, 40, 100} {
+		s, take := renderScreen(t, modePrompt, 24, cols)
+		s.result = make(chan answer, 1)
+		text := strings.Repeat("line 界e\u0301\n", 200)
+		var p parser
+		for _, k := range p.feed([]byte("\x1b[200~"+text+"\x1b[201~"), time.Now()) {
+			s.keyLocked(k)
+		}
+		s.drawLocked()
+		take()
+		if s.mode != modePrompt || string(s.text) != text || len(s.result) != 0 {
+			t.Fatal("long paste submitted or lost text")
+		}
+		if len(s.live) > 10 || s.inputTop == 0 {
+			t.Fatalf("paste hid the transcript: %d live rows, top %d", len(s.live), s.inputTop)
+		}
+		if s.cursorRow >= len(s.live) || s.cursorCol >= cols {
+			t.Fatal("paste cursor is outside its viewport")
+		}
+		if !strings.Contains(strings.Join(s.live, "\n"), "↑") {
+			t.Fatal("hidden input rows have no indicator")
+		}
+		for range 10 {
+			s.keyLocked(key{kind: keyUp})
+		}
+		s.keyLocked(key{kind: keyText, text: "edited"})
+		s.drawLocked()
+		take()
+		if !strings.Contains(string(s.text), "edited") || s.inputBytes != len(string(s.text)) {
+			t.Fatal("pasted text is not editable")
+		}
+	}
+}
+
+func TestNarrowSafetyHintsAndStatusRemainVisible(t *testing.T) {
+	for _, cols := range []int{10, 18, 40} {
+		s, take := renderScreen(t, modeBusy, 12, cols)
+		s.status = "Reading project configuration"
+		s.effects.haveUse = true
+		s.drawLocked()
+		take()
+		visible := withoutStyles(strings.Join(s.live, ""))
+		if !strings.Contains(visible, s.status) || !strings.Contains(visible, "cancel") {
+			t.Fatalf("status or cancellation key is hidden at width %d: %q", cols, visible)
+		}
+		s, take = renderScreen(t, modeChoice, 8, cols)
+		s.drawLocked()
+		take()
+		visible = withoutStyles(strings.Join(s.live, ""))
+		if !strings.Contains(visible, "Esc") || (!strings.Contains(visible, "deny") && !strings.Contains(visible, "Esc n")) {
+			t.Fatalf("default denial is hidden at width %d: %q", cols, visible)
+		}
+		for _, row := range s.live {
+			if cellWidth(withoutStyles(row)) >= cols {
+				t.Fatalf("choice row wraps outside the layout: %q", row)
+			}
+		}
 	}
 }

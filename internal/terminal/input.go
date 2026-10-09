@@ -26,6 +26,12 @@ const (
 	keyDelete
 	keyBackspace
 	keyClear
+	keyWordLeft
+	keyWordRight
+	keyWordBackspace
+	keyWordDelete
+	keyHistoryPrevious
+	keyHistoryNext
 )
 
 type key struct {
@@ -93,6 +99,12 @@ func (p *parser) feed(data []byte, now time.Time) []key {
 					kind = keyRight
 				case "\x1b[D", "\x1bOD":
 					kind = keyLeft
+				case "\x1b[1;3D", "\x1b[1;5D":
+					kind = keyWordLeft
+				case "\x1b[1;3C", "\x1b[1;5C":
+					kind = keyWordRight
+				case "\x1b[3;3~", "\x1b[3;5~":
+					kind = keyWordDelete
 				case "\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~":
 					kind = keyHome
 				case "\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~":
@@ -122,6 +134,28 @@ func (p *parser) feed(data []byte, now time.Time) []key {
 				p.stalePending = false
 				continue
 			}
+			var wordKey keyKind
+			switch p.pending[1] {
+			case 'b':
+				wordKey = keyWordLeft
+			case 'f':
+				wordKey = keyWordRight
+			case 'd':
+				wordKey = keyWordDelete
+			case 8, 127:
+				wordKey = keyWordBackspace
+			default:
+				wordKey = keyEscape
+			}
+			if wordKey != keyEscape {
+				p.pending = p.pending[2:]
+				p.escapeAt = time.Time{}
+				p.stalePending = false
+				if !p.paste {
+					keys = append(keys, key{kind: wordKey, stale: stale})
+				}
+				continue
+			}
 			p.pending = p.pending[1:]
 			p.escapeAt = time.Time{}
 			p.stalePending = false
@@ -148,6 +182,12 @@ func (p *parser) feed(data []byte, now time.Time) []key {
 			k.kind = keyBackspace
 		case 21:
 			k.kind = keyClear
+		case 23:
+			k.kind = keyWordBackspace
+		case 16:
+			k.kind = keyHistoryPrevious
+		case 14:
+			k.kind = keyHistoryNext
 		default:
 			if unicode.IsControl(r) && r != '\t' {
 				continue
@@ -218,7 +258,7 @@ func previousCluster(text []rune, pos int) int {
 		return 0
 	}
 	pos--
-	for pos > 0 && runeWidth(text[pos]) == 0 {
+	for pos > 0 && clusterMark(text[pos]) {
 		pos--
 	}
 	return pos
@@ -229,10 +269,69 @@ func nextCluster(text []rune, pos int) int {
 		return len(text)
 	}
 	pos++
-	for pos < len(text) && runeWidth(text[pos]) == 0 {
+	for pos < len(text) && clusterMark(text[pos]) {
 		pos++
 	}
 	return pos
+}
+
+func clusterMark(r rune) bool {
+	return r >= 32 && runeWidth(r) == 0
+}
+
+func previousWord(text []rune, pos int) int {
+	for pos > 0 && unicode.IsSpace(text[previousCluster(text, pos)]) {
+		pos = previousCluster(text, pos)
+	}
+	for pos > 0 && !unicode.IsSpace(text[previousCluster(text, pos)]) {
+		pos = previousCluster(text, pos)
+	}
+	return pos
+}
+
+func nextWord(text []rune, pos int) int {
+	for pos < len(text) && unicode.IsSpace(text[pos]) {
+		pos = nextCluster(text, pos)
+	}
+	for pos < len(text) && !unicode.IsSpace(text[pos]) {
+		pos = nextCluster(text, pos)
+	}
+	return pos
+}
+
+// inputCell places a rune and returns the next cell. Tabs use the same
+// four-cell stops as styledRows.
+func inputCell(r rune, width, row, col int) (int, int) {
+	if r == '\n' {
+		return row + 1, 0
+	}
+	cells := runeWidth(r)
+	if r == '\t' {
+		cells = 4 - col%4
+		for range cells {
+			if col == width {
+				row, col = row+1, 0
+			}
+			col++
+		}
+		return row, col
+	}
+	if col+cells > width {
+		row, col = row+1, 0
+	}
+	return row, col + cells
+}
+
+func inputPoint(text []rune, pos, width int) (int, int) {
+	row, col := 0, 0
+	for _, r := range text[:pos] {
+		row, col = inputCell(r, width, row, col)
+	}
+	if pos < len(text) && text[pos] != '\n' &&
+		col+max(runeWidth(text[pos]), 1) > width {
+		return row + 1, 0
+	}
+	return row, col
 }
 
 // styledRows wraps only visible cells, preserving trusted SGR sequences. Other

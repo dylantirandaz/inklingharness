@@ -268,15 +268,20 @@ func indentedJSON(value json.RawMessage) string {
 }
 
 // Approval includes the complete safe command or change, never a preview. An
-// amber bar marks every row: this block needs the user. Details pass through
-// Safe again, which also removes their styles; diff prefixes then select the
-// color, so they remain readable without color.
+// amber rule marks the request. Details pass through Safe again, which
+// removes their styles; diff prefixes then select the color. The prefixes
+// also show the change without color.
 func Approval(view ToolView, theme Theme) string {
 	bar := ApprovalBar(theme)
 	var out strings.Builder
-	out.WriteString(bar + theme.Amber("●") + " " + theme.Bold(theme.Ink("Approval needed")) + "  " + theme.Chip(" "+singleLine(view.Title)+" "))
-	for line := range strings.SplitSeq(Safe(view.Details), "\n") {
-		out.WriteString("\n" + bar + "  ")
+	title := singleLine(view.Title)
+	out.WriteString(bar + theme.Amber("Approval needed") + " · " + title)
+	details := Safe(view.Details)
+	if first, rest, found := strings.Cut(details, "\n"); found && first == title {
+		details = rest
+	}
+	for line := range strings.SplitSeq(details, "\n") {
+		out.WriteString("\n" + bar)
 		switch {
 		case strings.HasPrefix(line, "+ "):
 			out.WriteString(theme.Green(line))
@@ -286,13 +291,13 @@ func Approval(view ToolView, theme Theme) string {
 			out.WriteString(line)
 		}
 	}
-	out.WriteString("\n" + bar + "  " + theme.Graphite(theme.Italic("full filesystem access · not sandboxed")))
+	out.WriteString("\n" + bar + theme.Graphite("Full filesystem access · not sandboxed"))
 	return out.String()
 }
 
 // ApprovalBar starts each row of an approval card and of its outcome.
 func ApprovalBar(theme Theme) string {
-	return theme.Amber("▌") + " "
+	return theme.Amber("│") + " "
 }
 
 func requiredText(value *string, name string, emptyOK bool) error {

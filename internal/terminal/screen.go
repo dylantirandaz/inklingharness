@@ -94,6 +94,11 @@ type Screen struct {
 	history                  []string
 	historyPosition          int
 	draft                    string
+	draftPosition            int
+	verticalColumn           int
+	verticalMove             bool
+	inputTop, inputRows      int
+	activityRows, footerRows int
 	parser                   parser
 	// typing closes at the next prompt key other than Enter; see ArmTyping.
 	typing chan struct{}
@@ -364,6 +369,94 @@ func (s *Screen) composerRuleLocked(width int) string {
 	return s.rule.text
 }
 
+func (s *Screen) inputWidthLocked() int {
+	width := max(s.cols-1, 2)
+	if width >= 4 {
+		width -= 2
+	}
+	return width
+}
+
+// moveVerticalLocked uses terminal cells, not rune counts. Keep the column
+// through short rows so the next long row restores the intended position.
+func (s *Screen) moveVerticalLocked(down bool) bool {
+	width := s.inputWidthLocked()
+	row, col := inputPoint(s.text, s.position, width)
+	if !s.verticalMove {
+		s.verticalColumn = col
+	}
+	target := row - 1
+	if down {
+		target = row + 1
+	}
+	if target < 0 {
+		return false
+	}
+	best, found := s.position, false
+	r, c := 0, 0
+	for pos := 0; pos <= len(s.text); {
+		pr, pc := r, c
+		if pos < len(s.text) && s.text[pos] != '\n' &&
+			c+max(runeWidth(s.text[pos]), 1) > width {
+			pr, pc = r+1, 0
+		}
+		if pr > target {
+			break
+		}
+		if pr == target {
+			if !found || pc <= s.verticalColumn {
+				best = pos
+			}
+			found = true
+		}
+		if pos == len(s.text) {
+			break
+		}
+		end := nextCluster(s.text, pos)
+		for _, ch := range s.text[pos:end] {
+			r, c = inputCell(ch, width, r, c)
+		}
+		pos = end
+	}
+	if found {
+		s.position = best
+		s.verticalMove = true
+	}
+	return found
+}
+
+func (s *Screen) recallLocked(down bool) {
+	next := s.historyPosition - 1
+	if down {
+		next = s.historyPosition + 1
+	}
+	if next < 0 || next > len(s.history) {
+		return
+	}
+	if s.historyPosition == len(s.history) {
+		s.draft, s.draftPosition = string(s.text), s.position
+	}
+	s.historyPosition = next
+	text := s.draft
+	if next < len(s.history) {
+		text = s.history[next]
+	}
+	s.text, s.inputBytes = []rune(text), len(text)
+	s.position = len(s.text)
+	if next == len(s.history) {
+		s.position = s.draftPosition
+	}
+	s.verticalMove = false
+}
+
+func (s *Screen) deleteLocked(start, end int) {
+	for _, r := range s.text[start:end] {
+		s.inputBytes -= utf8.RuneLen(r)
+	}
+	s.text = append(s.text[:start], s.text[end:]...)
+	s.position = start
+}
+
 // layoutLocked builds the rows that change only with input, mode, preview,
 // or size: opening banner, preview, composer rule, input or choice rows. The
 // activity and footer rows get a fixed place and are filled at each draw.
@@ -374,6 +467,8 @@ func (s *Screen) layoutLocked() {
 	s.frame = s.frame[:0]
 	s.activityRow, s.footerRow = -1, -1
 	width := max(s.cols-1, 2)
+	s.inputTop, s.inputRows = 0, 0
+	s.activityRows, s.footerRows = 0, 0
 	// The opening banner takes the top rows while it plays, if the composer
 	// still fits under it.
 	rows := s.rows
@@ -383,21 +478,23 @@ func (s *Screen) layoutLocked() {
 	}
 	rule := s.mode == modePrompt && rows >= 3 && width >= 12
 	marker := s.mode == modePrompt && width >= 4
-	inner := width
-	if marker {
-		inner -= 2
-	}
+	inner := s.inputWidthLocked()
 	var bodyRows []string
 	var choiceBar string
 	editRow, editCol, start := 0, 0, 0
-	maxBody := rows
+	footer := styledRows(s.footerLocked(), width, s.theme.Colored())
+	maxFooter := max(1, min(3, rows-1))
+	footer = visibleRows(footer, maxFooter, width)
+	rule = rule && rows >= len(footer)+2
+	maxBody := max(1, rows-len(footer))
 	if rule {
 		maxBody--
 	}
-	// Keep one footer row unless it would displace the only input row.
-	if maxBody > 1 {
-		maxBody--
+	padding := s.mode == modePrompt && rows >= 10
+	if padding {
+		maxBody -= 2
 	}
+	maxBody = max(1, min(maxBody, min(6, max(2, rows/3))))
 	switch s.mode {
 	case modePrompt:
 		body := string(s.text)
@@ -405,73 +502,84 @@ func (s *Screen) layoutLocked() {
 			body = s.placeholder
 		}
 		bodyRows = styledRows(body, inner, false)
-		prefixRows := styledRows(string(s.text[:s.position]), inner, false)
-		editRow = len(prefixRows) - 1
-		editCol = cellWidth(prefixRows[editRow])
-		if s.position < len(s.text) && s.text[s.position] != '\n' &&
-			editCol+runeWidth(s.text[s.position]) > inner {
-			editRow++
-			editCol = 0
-		}
+		editRow, editCol = inputPoint(s.text, s.position, inner)
 		start = max(0, editRow-maxBody+1)
+		s.inputTop, s.inputRows = start, len(bodyRows)
 		bodyRows = bodyRows[start:min(start+maxBody, len(bodyRows))]
-	case modeChoice:
-		// The bar continues the approval card above and breathes while it
-		// waits. Shorten labels, then drop their styles, before hiding an
-		// option.
-		choiceBar = s.theme.Glow("▌", s.breathLocked(now)) + " "
-		key := s.theme.Key
-		for _, labels := range [...]string{
-			key("y") + " allow once   " + key("a") + " allow session   " + key("n") + " deny",
-			key("y") + " once  " + key("a") + " session  " + key("n") + " deny",
-			"y / a / n",
-			"y a n",
-			"yan",
-		} {
-			bodyRows = styledRows(labels, max(width-2, 1), s.theme.Colored())
-			if len(bodyRows) <= rows {
-				break
-			}
+		if len(bodyRows) == 1 && maxBody >= 2 {
+			bodyRows = append(bodyRows, "")
 		}
-		bodyRows = bodyRows[:min(len(bodyRows), rows)]
+	case modeChoice:
+		choiceBar = s.theme.Glow("│", 0.3+0.2*s.breathLocked(now)) + " "
+		if width < 4 {
+			choiceBar = ""
+		}
+		labels := "y allow once   a allow session   n deny"
+		if width < 44 {
+			labels = "y once · a session · n deny"
+		}
+		choiceWidth := max(width-cellWidth(withoutStyles(choiceBar)), 1)
+		bodyRows = styledRows(labels, choiceWidth, s.theme.Colored())
+		if len(bodyRows) > max(1, rows-len(footer)) {
+			bodyRows = styledRows("y a n", choiceWidth, false)
+		}
+		bodyRows = visibleRows(bodyRows, max(1, rows-len(footer)), choiceWidth)
 	case modeBusy:
 	}
-	activity := (s.mode == modeBusy && s.status != "") || s.handoffActiveLocked(now)
-	room := rows - len(bodyRows) - 1
+	activity := s.mode == modeBusy && s.status != ""
+	room := rows - len(bodyRows) - len(footer)
 	if rule {
 		room--
 	}
-	if activity {
-		room--
+	var activityLines []string
+	if activity && room > 0 {
+		activityLines = styledRows(s.activityLocked(), width, s.theme.Colored())
+		activityLines = visibleRows(activityLines, max(1, room), width)
+		room -= len(activityLines)
+	}
+	if padding {
+		room -= 2
 	}
 	if preview := s.previewLocked(now); preview != "" && room > 0 {
 		previewRows := styledRows(preview, width, s.theme.Colored())
 		s.frame = append(s.frame, previewRows[max(0, len(previewRows)-room):]...)
 	}
-	if activity && len(s.frame) < s.rows-1 {
-		s.activityRow = len(s.frame)
-		s.frame = append(s.frame, "")
+	if len(activityLines) > 0 {
+		s.activityRow, s.activityRows = len(s.frame), len(activityLines)
+		s.frame = append(s.frame, activityLines...)
 	}
 	if rule {
 		s.frame = append(s.frame, s.composerRuleLocked(width))
 	}
+	if padding {
+		s.frame = append(s.frame, "")
+	}
 	bodyStart := len(s.frame)
 	for i, row := range bodyRows {
 		if s.mode == modePrompt && len(s.text) == 0 {
-			row = s.theme.Graphite(s.theme.Italic(row))
+			row = s.theme.Graphite(row)
 		}
 		if marker {
 			prefix := "  "
 			if start+i == 0 {
 				prefix = s.theme.Bold(s.theme.Accent("›")) + " "
 			}
+			if i == 0 && start > 0 {
+				prefix = s.theme.Graphite("↑") + " "
+			} else if i == len(bodyRows)-1 && start+len(bodyRows) < s.inputRows {
+				prefix = s.theme.Graphite("↓") + " "
+			}
 			row = prefix + row
 		}
 		s.frame = append(s.frame, choiceBar+row)
 	}
-	if len(s.frame) < s.rows {
-		s.footerRow = len(s.frame)
+	if padding {
 		s.frame = append(s.frame, "")
+	}
+	if len(s.frame) < s.rows {
+		footer = visibleRows(footer, s.rows-len(s.frame), width)
+		s.footerRow, s.footerRows = len(s.frame), len(footer)
+		s.frame = append(s.frame, footer...)
 	}
 	s.frameRow, s.frameCol = len(s.frame)-1, 0
 	if s.mode == modePrompt {
@@ -485,54 +593,90 @@ func (s *Screen) layoutLocked() {
 	s.layoutDirty = false
 }
 
-// activityLocked is the animated row while the model or a tool works: the
-// expert grid, the status, and the elapsed seconds. After a turn it is the
-// hand-off of the grid into the reply dot.
+// visibleRows marks text that cannot fit in the available terminal rows.
+func visibleRows(rows []string, limit, width int) []string {
+	limit = max(limit, 1)
+	if len(rows) <= limit {
+		return rows
+	}
+	rows = rows[:limit]
+	last := styledRows(withoutStyles(rows[limit-1]), max(1, width-1), false)[0]
+	rows[limit-1] = last + "…"
+	return rows
+}
+
+// activityLocked keeps the status ahead of the small activity mark.
 func (s *Screen) activityLocked() string {
 	now := time.Now()
-	width := max(s.cols-1, 2)
 	if s.status == "" {
-		return styledRows(s.theme.Handoff(s.handoffProgressLocked(now), expertCells), width, s.theme.Colored())[0]
+		return s.theme.Graphite("·")
 	}
-	status := s.theme.Ink(s.status)
+	mark := "·"
+	if s.effects.motion && (s.tickLocked(now)/4)%2 != 0 {
+		mark = "•"
+	}
 	if s.effects.toolRunning {
-		status = s.theme.Fill(s.fillStepLocked(now)) + " " + status
+		mark = s.theme.Accent(mark)
+	} else {
+		mark = s.theme.Graphite(mark)
 	}
-	row := s.theme.Experts(s.tickLocked(now), expertCells, expertsFiring) + "  " + status
+	row := mark + " " + s.theme.Ink(s.status)
 	if !s.activitySince.IsZero() {
 		row += s.theme.Graphite(" · " + strconv.Itoa(int(now.Sub(s.activitySince).Seconds())) + "s")
 	}
-	return styledRows(row, width, s.theme.Colored())[0]
+	return row
 }
 
-// footerLocked is the status row: background work, the context footer, and
-// the key hints of the current mode when they fit.
+// footerLocked gives safety keys priority over optional context details.
 func (s *Screen) footerLocked() string {
 	now := time.Now()
 	width := max(s.cols-1, 2)
-	var lead, hint string
+	hint := ""
 	switch s.mode {
 	case modePrompt:
-		if s.background != "" {
-			lead = s.theme.Experts(s.tickLocked(now), 4, 1) + " " + s.theme.Graphite(s.theme.Italic(s.background)) + s.theme.Hairline(" · ")
+		hint = "Enter send · Ctrl-J new line"
+		if width < cellWidth(hint) {
+			hint = "Enter send · ^J line"
 		}
-		hint = "enter send · ctrl-j newline"
+		if width < cellWidth(hint) {
+			hint = "Enter send / ^J"
+		}
+		if width < cellWidth(hint) {
+			hint = "Enter / ^J"
+		}
+		if width < cellWidth(hint) {
+			hint = "Enter\n^J line"
+		}
 	case modeChoice:
-		lead = s.theme.Glow("●", s.breathLocked(now)) + " "
-		hint = "enter / esc deny"
+		hint = "Enter / Esc deny"
+		if width < cellWidth(hint) {
+			hint = "Enter/Esc deny"
+		}
+		if width < cellWidth(hint) {
+			hint = "^M/Esc n"
+		}
 	case modeBusy:
-		hint = "ctrl-c cancel"
+		hint = "Ctrl-C cancel"
+		if width < cellWidth(hint) {
+			hint = "^C cancel"
+		}
 	}
-	footer := s.footerTextLocked(now)
-	line := lead + footer
-	visible := cellWidth(withoutStyles(line))
-	if footer != "" {
-		hint = "   " + hint
+	line := s.theme.Graphite(hint)
+	extra := s.footerTextLocked(now)
+	if s.mode == modePrompt && s.background != "" {
+		if extra != "" {
+			extra += s.theme.Graphite(" · ")
+		}
+		extra += s.theme.Graphite(s.background)
 	}
-	if visible+cellWidth(hint) <= width {
-		line += s.theme.Graphite(hint)
+	if extra != "" {
+		if cellWidth(withoutStyles(extra))+cellWidth(hint)+3 <= width {
+			line += "   " + extra
+		} else {
+			line += "\n" + extra
+		}
 	}
-	return styledRows(line, width, s.theme.Colored())[0]
+	return line
 }
 
 func (s *Screen) drawLocked() {
@@ -558,10 +702,14 @@ func (s *Screen) renderLocked() {
 		s.lastFrame = time.Now()
 	}
 	if s.activityRow >= 0 {
-		s.frame[s.activityRow] = s.activityLocked()
+		rows := visibleRows(styledRows(s.activityLocked(), max(s.cols-1, 2), s.theme.Colored()), s.activityRows, max(s.cols-1, 2))
+		clear(s.frame[s.activityRow : s.activityRow+s.activityRows])
+		copy(s.frame[s.activityRow:s.activityRow+s.activityRows], rows)
 	}
 	if s.footerRow >= 0 {
-		s.frame[s.footerRow] = s.footerLocked()
+		rows := visibleRows(styledRows(s.footerLocked(), max(s.cols-1, 2), s.theme.Colored()), s.footerRows, max(s.cols-1, 2))
+		clear(s.frame[s.footerRow : s.footerRow+s.footerRows])
+		copy(s.frame[s.footerRow:s.footerRow+s.footerRows], rows)
 	}
 	visible := s.mode == modePrompt
 	dirty := len(s.frame) != len(s.live)
@@ -700,15 +848,14 @@ func (s *Screen) Notify(text string) {
 	s.flushPaintLocked()
 }
 
-// SetStatus shows what the model works on. Empty text ends the activity row
-// with the hand-off into the reply dot.
+// SetStatus shows current work. Empty text removes the activity row.
 func (s *Screen) SetStatus(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.setStatusLocked(text, false)
 }
 
-// SetToolStatus shows a running tool: its title after a drop that fills.
+// SetToolStatus shows a running tool with the model accent.
 func (s *Screen) SetToolStatus(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -720,15 +867,6 @@ func (s *Screen) setStatusLocked(text string, tool bool) {
 		return
 	}
 	now := time.Now()
-	switch {
-	case text == "" && s.status != "" && s.effects.motion:
-		s.effects.handoffAt = now
-	case text != "":
-		s.effects.handoffAt = time.Time{}
-	}
-	if tool && (!s.effects.toolRunning || text != s.status) {
-		s.effects.toolSince = now
-	}
 	if text != s.status {
 		s.activitySince = now
 	}
@@ -739,9 +877,8 @@ func (s *Screen) setStatusLocked(text string, tool bool) {
 	s.wake.signal()
 }
 
-// SetBackgroundWork shows work that runs while the user types, such as a
-// background compaction, as an animated mark in the footer. Empty text
-// removes it.
+// SetBackgroundWork shows work that continues while the user types.
+// Empty text removes it from the footer.
 func (s *Screen) SetBackgroundWork(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -749,6 +886,7 @@ func (s *Screen) SetBackgroundWork(text string) {
 		return
 	}
 	s.background = text
+	s.layoutDirty = true
 	s.drawLocked()
 	s.wake.signal()
 }
@@ -852,6 +990,8 @@ func (s *Screen) await(ctx context.Context, mode inputMode, placeholder string) 
 	s.position, s.inputBytes = 0, 0
 	s.historyPosition = len(s.history)
 	s.draft = ""
+	s.draftPosition, s.verticalColumn = 0, 0
+	s.verticalMove = false
 	s.layoutDirty = true
 	s.drawLocked()
 	// The new mode may animate, such as the breathing approval bar; the read
@@ -913,6 +1053,7 @@ func (s *Screen) insertLocked(text string) {
 	copy(s.text[s.position+len(insert):], s.text[s.position:oldLen])
 	copy(s.text[s.position:], insert)
 	s.position += len(insert)
+	s.verticalMove = false
 	s.inputBytes += len(text)
 	s.layoutDirty = true
 }
@@ -949,6 +1090,9 @@ func (s *Screen) keyLocked(k key) bool {
 		s.typing = nil
 	}
 	s.layoutDirty = true
+	if k.kind != keyUp && k.kind != keyDown {
+		s.verticalMove = false
+	}
 	switch k.kind {
 	case keyText:
 		s.insertLocked(k.text)
@@ -968,6 +1112,14 @@ func (s *Screen) keyLocked(k key) bool {
 		s.position = previousCluster(s.text, s.position)
 	case keyRight:
 		s.position = nextCluster(s.text, s.position)
+	case keyWordLeft:
+		s.position = previousWord(s.text, s.position)
+	case keyWordRight:
+		s.position = nextWord(s.text, s.position)
+	case keyWordBackspace:
+		s.deleteLocked(previousWord(s.text, s.position), s.position)
+	case keyWordDelete:
+		s.deleteLocked(s.position, nextWord(s.text, s.position))
 	case keyHome:
 		for s.position > 0 && s.text[s.position-1] != '\n' {
 			s.position--
@@ -977,39 +1129,22 @@ func (s *Screen) keyLocked(k key) bool {
 			s.position++
 		}
 	case keyBackspace:
-		start := previousCluster(s.text, s.position)
-		for _, r := range s.text[start:s.position] {
-			s.inputBytes -= utf8.RuneLen(r)
-		}
-		s.text = append(s.text[:start], s.text[s.position:]...)
-		s.position = start
+		s.deleteLocked(previousCluster(s.text, s.position), s.position)
 	case keyDelete:
-		end := nextCluster(s.text, s.position)
-		for _, r := range s.text[s.position:end] {
-			s.inputBytes -= utf8.RuneLen(r)
-		}
-		s.text = append(s.text[:s.position], s.text[end:]...)
+		s.deleteLocked(s.position, nextCluster(s.text, s.position))
 	case keyClear:
 		s.text = nil
 		s.position = 0
 		s.inputBytes = 0
+	case keyHistoryPrevious, keyHistoryNext:
+		s.recallLocked(k.kind == keyHistoryNext)
 	case keyUp, keyDown:
-		if s.historyPosition == len(s.history) {
-			s.draft = string(s.text)
+		if !s.moveVerticalLocked(k.kind == keyDown) {
+			s.recallLocked(k.kind == keyDown)
 		}
-		if k.kind == keyUp && s.historyPosition > 0 {
-			s.historyPosition--
-		}
-		if k.kind == keyDown && s.historyPosition < len(s.history) {
-			s.historyPosition++
-		}
-		text := s.draft
-		if s.historyPosition < len(s.history) {
-			text = s.history[s.historyPosition]
-		}
-		s.text = []rune(text)
-		s.inputBytes = len(text)
-		s.position = len(s.text)
+	case keyEscape, keyInterrupt:
+	default:
+		panic(fmt.Sprintf("terminal: unknown key kind %d", k.kind))
 	}
 	return false
 }
@@ -1018,6 +1153,7 @@ func (s *Screen) resizeLocked(rows, cols int) {
 	if rows == s.rows && cols == s.cols {
 		return
 	}
+	s.verticalMove = false
 	// Explicit live rows can wrap again when the terminal narrows. Their
 	// previous row coordinates are no longer suitable for a dirty-row diff.
 	up := 0

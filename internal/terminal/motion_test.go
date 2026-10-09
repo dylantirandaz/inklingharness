@@ -137,31 +137,6 @@ func TestApprovalWakesTheReadLoop(t *testing.T) {
 	}
 }
 
-// The end of a turn keeps the activity row for the hand-off, then removes it
-// and lets the prompt sleep.
-func TestHandoffEndsTheActivityRow(t *testing.T) {
-	s, _ := renderScreen(t, modeBusy, 10, 80)
-	s.effects = effects{motion: true, epoch: time.Now()}
-	s.SetStatus("Thinking")
-	s.SetStatus("")
-	s.mode = modePrompt
-	s.layoutDirty = true
-	s.drawLocked()
-	if s.activityRow < 0 || !strings.Contains(s.live[s.activityRow], "●") {
-		t.Fatalf("hand-off row missing: %q", s.live)
-	}
-	later := time.Now().Add(handoffDuration)
-	if s.frameIntervalLocked(time.Now()) != smoothInterval || s.frameIntervalLocked(later) != 0 {
-		t.Fatal("hand-off does not animate and then stop")
-	}
-	s.effects.handoffAt = s.effects.handoffAt.Add(-handoffDuration)
-	s.layoutDirty = true
-	s.drawLocked()
-	if s.activityRow >= 0 {
-		t.Fatalf("activity row stayed after the hand-off: %q", s.live)
-	}
-}
-
 // A new context estimate counts up to its value; without motion it jumps.
 func TestGaugeEasesToNewEstimate(t *testing.T) {
 	for _, motion := range []bool{true, false} {

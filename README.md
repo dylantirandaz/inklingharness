@@ -20,13 +20,15 @@ think chat -resume last
 think run -h
 ```
 
-The agent provides streamed chat, saved sessions, file reads, search, exact text edits, file writes, and Bash commands. JSON events, RPC, and ACP support use from other programs.
+Streamed chat, saved sessions, file tools, Bash, JSON events, RPC, and ACP are supported.
 
-File changes and commands require approval unless you enable `-yes`. Commands run on your machine; this is not a sandbox. `OPENROUTER_API_KEY` overrides the stored key. Use `-h` on each command for its options.
+File changes and commands require approval. `-yes` disables it. Commands are not sandboxed. `OPENROUTER_API_KEY` overrides the stored key.
+
+Chat keeps terminal scrollback. Ctrl-J adds a line. Up/Down moves within a draft; Ctrl-P/Ctrl-N selects history. Paste stays editable. Tool previews mark success or failure. `/tools` shows full results; `/help` lists keys; `/status` shows session details.
 
 ## Context and images
 
-Attach files with `-file path` or `@path`. Images are stored once in private session state, with a 5 MiB limit each. `inspect_images` sends selected images in a separate request; later turns reuse text notes. Each call accepts up to eight images and 10 MiB. Explicit re-inspection uses the saved original, even after source deletion.
+Attach with `-file path` or `@path`. Images are stored once in private session state: 5 MiB each. `inspect_images` sends up to eight images (10 MiB total) in a separate request. Later turns reuse notes. Re-inspection reads the stored original, even after source deletion.
 
 The agent can use `context_checkpoint` to retain notes and a next step. `context_read` retrieves exact older messages. Notes are lossy, not a privacy filter. Keep the session state's `resources` directory with session backups. Chat exports do not include stored resources.
 

@@ -44,7 +44,10 @@ const chatHelp = `Commands:
   /undo             restore the files and conversation from before the last prompt
   /rewind [N]       list prompts, or restore the state from before prompt N
   /quit             save and exit
-Enter sends. Ctrl-J adds a line. Up/Down recalls input. Ctrl-U clears it.
+Enter sends. Ctrl-J adds a line. Ctrl-U clears the input.
+Up/Down moves through input rows, then recalls history at the edges.
+Ctrl-P/Ctrl-N recalls history directly and restores the draft.
+Alt-Left/Right moves by word. Ctrl-W deletes the previous word.
 Pasted text stays in the input area until you press Enter.
 Attach files with @path or @"path with spaces". Use @@ for a literal @.
 In plain mode, end a line with a backslash to enter more lines.
@@ -381,11 +384,14 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	if screen != nil {
 		bannerWidth = screen.Width()
 	}
-	frames := presentation.BannerFrames(o.model, displayEffort(o.effort), projectContext.WorkDir, bannerWidth, theme, bannerFrames)
+	frames := presentation.BannerFrames(projectContext.WorkDir, bannerWidth, theme, bannerFrames)
 	if screen != nil && frames != nil {
 		screen.Intro(frames)
 	} else {
-		fmt.Fprintln(displayOutput, presentation.Banner(o.model, displayEffort(o.effort), projectContext.WorkDir, bannerWidth, theme))
+		fmt.Fprintln(displayOutput, presentation.Banner(projectContext.WorkDir, bannerWidth, theme))
+	}
+	if screen == nil {
+		fmt.Fprintf(displayOutput, "%s · %s effort\n", presentation.Safe(o.model), displayEffort(o.effort))
 	}
 	printPrivacyNotice(stderr, o.model)
 	if *resume != "" {
@@ -550,7 +556,18 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 					fmt.Fprintf(stderr, "inkling: %v\n", err)
 					return 1
 				}
-				fmt.Fprintf(stderr, "session=%s\nmodel=%s effort=%s\nworkdir=%s\nmessages=%d context_estimate=%d tokens approve_all=%t\n", current.ID, o.model, displayEffort(o.effort), current.WorkDir, len(current.Messages), agent.EstimateTokens(current.Messages), approval.allowAll)
+				if screen == nil {
+					fmt.Fprintf(stderr, "session=%s\nmodel=%s effort=%s\nworkdir=%s\nmessages=%d context_estimate=%d tokens approve_all=%t\n", current.ID, o.model, displayEffort(o.effort), current.WorkDir, len(current.Messages), agent.EstimateTokens(current.Messages), approval.allowAll)
+				} else {
+					fmt.Fprintf(progressOutput, "\n%s\n  %s  %s\n  %s  %s\n  %s  %s\n  %s  %s\n  %s  %d messages · about %d tokens\n  %s  %s\n\n",
+						presentation.Section("Session", theme),
+						theme.Graphite("ID          "), presentation.Safe(current.ID),
+						theme.Graphite("Model       "), presentation.Safe(o.model),
+						theme.Graphite("Effort      "), displayEffort(o.effort),
+						theme.Graphite("Directory   "), presentation.Safe(current.WorkDir),
+						theme.Graphite("Context     "), len(current.Messages), agent.EstimateTokens(current.Messages),
+						theme.Graphite("Auto-approve"), yesNo(approval.allowAll))
+				}
 			case "/usage":
 				if err := awaitBackground(); err != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", err)

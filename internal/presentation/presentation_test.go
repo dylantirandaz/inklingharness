@@ -223,7 +223,7 @@ func TestToolViewsAndBannerSanitize(t *testing.T) {
 	if err != nil || view.Title != `word_count {"path":"sum.go"}` || !strings.Contains(view.Details, `"path": "sum.go"`) {
 		t.Fatalf("custom view = %+v, %v", view, err)
 	}
-	banner := Banner("model\x1b[2J", "high", "folder\nspoof", 80, Theme{})
+	banner := Banner("folder\x1b[2J\nspoof", 80, Theme{})
 	if strings.Contains(banner, "\x1b") {
 		t.Fatalf("unsafe banner: %q", banner)
 	}
@@ -250,6 +250,46 @@ func TestResultPreviewBudgetAndDisclosure(t *testing.T) {
 	}
 	if got := ResultPreview("a\x1b[2Jb", false, 3, Theme{}); got != "ab" {
 		t.Fatalf("unsafe result: %q", got)
+	}
+}
+
+func TestResultPreviewLongUnicodeLine(t *testing.T) {
+	content := strings.Repeat("界", 161)
+	got := ResultPreview(content, false, 3, Theme{})
+	if !utf8.ValidString(got) || !strings.HasPrefix(got, strings.Repeat("界", 160)+"…\n") {
+		t.Fatalf("preview split or lost Unicode text: %q", got)
+	}
+	if !strings.Contains(got, "/tools") || strings.Contains(got, content) {
+		t.Fatalf("long line has no compact preview and disclosure: %q", got)
+	}
+	boundary := strings.Repeat("界", 160)
+	if got := ResultPreview(boundary, false, 3, Theme{}); got != boundary {
+		t.Fatalf("line at limit changed: %q", got)
+	}
+	if got := ResultPreview(content, true, 3, Theme{}); got != content {
+		t.Fatalf("single error line was shortened: %q", got)
+	}
+}
+
+func TestResultPreviewKeepsSourceLimitsAndErrorContext(t *testing.T) {
+	for _, notice := range []string{
+		"[output truncated: 400 bytes omitted; full output saved to /tmp/output.txt]",
+		"[truncated: line limit; continue with offset 20]",
+	} {
+		content := "initial error\n" + strings.Repeat("output\n", 8) + notice + "\n" +
+			strings.Repeat("output\n", 8) + "final error\n[exit code 1]\n\n"
+		for _, failed := range []bool{false, true} {
+			got := ResultPreview(content, failed, 6, Theme{})
+			if !strings.Contains(got, notice) || !strings.Contains(got, "/tools") {
+				t.Fatalf("source limit or full-output route missing: %q", got)
+			}
+			if failed && (!strings.Contains(got, "initial error") || !strings.Contains(got, "final error\n[exit code 1]")) {
+				t.Fatalf("error context missing: %q", got)
+			}
+			if strings.Count(got, notice) != 1 {
+				t.Fatalf("source limit repeated: %q", got)
+			}
+		}
 	}
 }
 
@@ -301,7 +341,7 @@ func TestCompactViewsRemainSafeWithoutColor(t *testing.T) {
 			Section(unsafe, theme),
 			ToolCompletion(unsafe, false, theme),
 			ToolCompletion(unsafe, true, theme),
-			Banner(unsafe, unsafe, unsafe, 40, theme),
+			Banner(unsafe, 40, theme),
 			UserTurn(unsafe, theme),
 		} {
 			if strings.Contains(view, "\x1b[2J") || (!theme.Colored() && strings.Contains(view, "\x1b")) {
@@ -345,14 +385,6 @@ func TestThemeDecorationKeepsVisibleText(t *testing.T) {
 				t.Fatalf("rule width %d = %q", width, got)
 			}
 		}
-		for tick := range 40 {
-			if got := Safe(theme.Experts(tick, 16, 3)); utf8.RuneCountInString(got) != 16 {
-				t.Fatalf("experts depth %d tick %d = %q, want 16 cells", theme.depth, tick, got)
-			}
-			if got := Safe(theme.Handoff(float64(tick)/39, 16)); !strings.HasPrefix(got, "●") || utf8.RuneCountInString(got) > 16 {
-				t.Fatalf("hand-off at %d = %q", tick, got)
-			}
-		}
 		for _, text := range []string{"Approval", "界"} {
 			for _, level := range []float64{0, 0.5, 1} {
 				if Safe(theme.Wet(text, level)) != text || Safe(theme.Glow(text, level)) != text {
@@ -380,38 +412,23 @@ func TestThemeDecorationKeepsVisibleText(t *testing.T) {
 	}
 }
 
-// Without color, the squares must still show the state: used or active
-// squares are filled, the rest are dots.
+// The gauge must show context use even when the terminal has no color.
 func TestSquaresShowStateWithoutColor(t *testing.T) {
 	for used, want := range map[int]string{0: "····", 1: "▪···", 50: "▪▪··", 100: "▪▪▪▪", 250: "▪▪▪▪"} {
 		if got := (Theme{}).Gauge(used, 100, 4, 1); got != want {
 			t.Fatalf("gauge %d = %q, want %q", used, got, want)
 		}
 	}
-	rows := map[string]bool{}
-	for tick := range 20 {
-		row := (Theme{}).Experts(tick, 16, 3)
-		if lit := strings.Count(row, "▪"); lit < 3 || lit > 6 {
-			t.Fatalf("tick %d lights %d experts: %q", tick, lit, row)
-		}
-		rows[row] = true
-	}
-	if len(rows) < 15 {
-		t.Fatalf("the expert grid barely changes: %d distinct rows in 20 ticks", len(rows))
-	}
-	if got := (Theme{}).Key("y"); got != "[y]" {
-		t.Fatalf("key without color = %q", got)
-	}
 }
 
 // The opening animation starts empty and ends exactly on the banner.
 func TestBannerFramesEndOnTheBanner(t *testing.T) {
 	theme := NewTheme(TrueColor, LightBackground, AccentPlum)
-	frames := BannerFrames("thinkingmachines/inkling-small", "high", "/work", 100, theme, 24)
+	frames := BannerFrames("/work", 100, theme, 24)
 	if len(frames) != 24 {
 		t.Fatalf("%d frames", len(frames))
 	}
-	if frames[23] != Banner("thinkingmachines/inkling-small", "high", "/work", 100, theme) {
+	if frames[23] != Banner("/work", 100, theme) {
 		t.Fatal("the last frame is not the banner")
 	}
 	if strings.TrimSpace(Safe(frames[0])) != "" {
@@ -425,8 +442,8 @@ func TestBannerFramesEndOnTheBanner(t *testing.T) {
 		}
 		shown = ink
 	}
-	if BannerFrames("m", "high", "/work", 100, NewTheme(ANSI16, DarkBackground, AccentBlue), 24) != nil ||
-		BannerFrames("m", "high", "/work", 30, theme, 24) != nil {
+	if BannerFrames("/work", 100, NewTheme(ANSI16, DarkBackground, AccentBlue), 24) != nil ||
+		BannerFrames("/work", 30, theme, 24) != nil {
 		t.Fatal("frames without a mark to animate")
 	}
 }

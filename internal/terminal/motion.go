@@ -12,33 +12,25 @@ import (
 type Style struct {
 	Depth  presentation.ColorDepth
 	Accent presentation.Accent
-	// Motion animates the opening banner, drying text, the expert grid, the
-	// filling tool drop, the hand-off, the gauge, and the approval bar.
-	// Without it nothing moves, and the screen wakes only once a second to
-	// count the elapsed seconds of a turn.
+	// Motion animates the banner, streamed text, activity mark, context
+	// count, and approval rule. Without it only elapsed seconds update.
 	Motion bool
 }
 
 const (
 	// smoothInterval paces short effects that must look fluid: the banner,
-	// drying text, the hand-off, and the gauge.
+	// streamed text and the context count.
 	smoothInterval = 33 * time.Millisecond
-	// steadyInterval paces effects that run for a whole turn or wait: the
-	// expert grid, the filling drop, and the breathing approval bar.
+	// steadyInterval paces the activity mark and the approval rule.
 	steadyInterval = 66 * time.Millisecond
 	// stillInterval updates the elapsed seconds when motion is off.
 	stillInterval = time.Second
 
-	introDuration   = 700 * time.Millisecond
-	wetDuration     = 240 * time.Millisecond
-	handoffDuration = 300 * time.Millisecond
-	gaugeDuration   = 450 * time.Millisecond
-	expertTick      = 120 * time.Millisecond
-	fillStep        = 150 * time.Millisecond
-	breathPeriod    = 2400 * time.Millisecond
-
-	expertCells   = 16
-	expertsFiring = 3
+	introDuration = 700 * time.Millisecond
+	wetDuration   = 240 * time.Millisecond
+	gaugeDuration = 450 * time.Millisecond
+	expertTick    = 120 * time.Millisecond
+	breathPeriod  = 2400 * time.Millisecond
 
 	// minimumLiveRows is the room that the banner must leave for the
 	// composer while it plays.
@@ -60,9 +52,7 @@ type effects struct {
 	previewPrefix, previewBody string
 	wet                        []wetRun
 
-	handoffAt   time.Time
 	toolRunning bool
-	toolSince   time.Time
 
 	use       presentation.ContextUse
 	haveUse   bool
@@ -201,27 +191,12 @@ func (s *Screen) wetActiveLocked(now time.Time) bool {
 	return len(wet) > 0 && now.Sub(wet[len(wet)-1].at) < wetDuration
 }
 
-func (s *Screen) handoffActiveLocked(now time.Time) bool {
-	return !s.effects.handoffAt.IsZero() && now.Sub(s.effects.handoffAt) < handoffDuration
-}
-
-func (s *Screen) handoffProgressLocked(now time.Time) float64 {
-	return float64(now.Sub(s.effects.handoffAt)) / float64(handoffDuration)
-}
-
-// tickLocked is the expert grid tick; without motion the grid stands still.
+// tickLocked sets the activity mark's phase; without motion it stays still.
 func (s *Screen) tickLocked(now time.Time) int {
 	if !s.effects.motion {
 		return 0
 	}
 	return int(now.Sub(s.effects.epoch) / expertTick)
-}
-
-func (s *Screen) fillStepLocked(now time.Time) int {
-	if !s.effects.motion {
-		return 0
-	}
-	return int(now.Sub(s.effects.toolSince) / fillStep)
 }
 
 // breathLocked is the breathing intensity from 0 to 1; without motion it is 1.
@@ -248,6 +223,7 @@ func (s *Screen) SetContext(use presentation.ContextUse) {
 		s.effects.gaugeFrom, s.effects.gaugeAt = float64(use.Tokens), time.Time{}
 	}
 	s.effects.use, s.effects.haveUse = use, true
+	s.layoutDirty = true
 	s.drawLocked()
 	s.wake.signal()
 }
@@ -295,7 +271,7 @@ func (s *Screen) frameIntervalLocked(now time.Time) time.Duration {
 		return 0
 	}
 	switch {
-	case s.effects.intro != nil, s.wetActiveLocked(now), s.handoffActiveLocked(now), s.gaugeMovingLocked(now):
+	case s.effects.intro != nil, s.wetActiveLocked(now), s.gaugeMovingLocked(now):
 		return smoothInterval
 	case busy, s.mode == modePrompt && s.background != "", s.mode == modeChoice && s.theme.Blends():
 		return steadyInterval

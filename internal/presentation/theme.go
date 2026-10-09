@@ -3,7 +3,6 @@ package presentation
 import (
 	"fmt"
 	"math"
-	"slices"
 	"strings"
 )
 
@@ -110,7 +109,6 @@ const (
 	roleRed
 	roleAmber
 	roleAccent
-	roleAccentSoft
 	roleCount
 )
 
@@ -126,28 +124,23 @@ var (
 	plum  = shaded{dark: rgb{208, 122, 174}, light: rgb{143, 63, 113}}
 
 	palette = [roleAccent]swatch{
-		roleInk:      {shaded{dark: rgb{239, 233, 225}, light: rgb{22, 19, 17}}, "39"},
-		roleGraphite: {shaded{dark: rgb{154, 146, 138}, light: rgb{103, 103, 103}}, "90"},
-		roleHairline: {shaded{dark: rgb{64, 58, 54}, light: rgb{218, 213, 207}}, "90"},
+		roleInk:      {shaded{dark: rgb{232, 232, 232}, light: rgb{40, 40, 40}}, "39"},
+		roleGraphite: {shaded{dark: rgb{160, 160, 160}, light: rgb{103, 103, 103}}, "90"},
+		roleHairline: {shaded{dark: rgb{64, 64, 64}, light: rgb{226, 226, 226}}, "90"},
 		roleGreen:    {green, "32"},
 		roleBlue:     {blue, "34"},
 		roleRed:      {shaded{dark: rgb{242, 97, 76}, light: rgb{214, 58, 39}}, "31"},
 		roleAmber:    {shaded{dark: rgb{247, 162, 36}, light: rgb{184, 116, 16}}, "33"},
 	}
 
-	// Each accent has an active color and a soft one, like the active and
-	// total parameter squares of a model card.
-	accents = [...]struct {
-		active, soft shaded
-		ansi16       string
-	}{
-		AccentGreen: {green, shaded{dark: rgb{36, 84, 68}, light: rgb{160, 214, 196}}, "32"},
-		AccentBlue:  {blue, shaded{dark: rgb{44, 72, 112}, light: rgb{133, 173, 224}}, "34"},
-		AccentPlum:  {plum, shaded{dark: rgb{96, 58, 82}, light: rgb{201, 163, 187}}, "35"},
+	accents = [...]swatch{
+		AccentGreen: {green, "32"},
+		AccentBlue:  {blue, "34"},
+		AccentPlum:  {plum, "35"},
 	}
 
 	// chipColor is the faint tint behind chips and the user's prompts.
-	chipColor = shaded{dark: rgb{38, 34, 31}, light: rgb{241, 238, 234}}
+	chipColor = shaded{dark: rgb{35, 35, 35}, light: rgb{245, 245, 245}}
 	// The shapes of the mark keep their brand colors on both shades; only the
 	// blot follows the ink.
 	markGreen, markBlue, markRed = rgb{14, 153, 114}, rgb{1, 85, 191}, rgb{239, 64, 44}
@@ -176,8 +169,7 @@ func NewTheme(depth ColorDepth, shade Shade, accent Accent) Theme {
 		theme.sgr[index] = theme.foreground(entry.color.on(shade), entry.ansi16)
 	}
 	model := accents[accent]
-	theme.sgr[roleAccent] = theme.foreground(model.active.on(shade), model.ansi16)
-	theme.sgr[roleAccentSoft] = theme.foreground(model.soft.on(shade), "90")
+	theme.sgr[roleAccent] = theme.foreground(model.color.on(shade), model.ansi16)
 	if depth >= ANSI256 {
 		theme.chip = theme.background(chipColor.on(shade))
 	}
@@ -310,61 +302,11 @@ func (t Theme) squareGlyph(r role) string {
 // fades need: drying ink, the breathing bar, and the mark reveal.
 func (t Theme) Blends() bool { return t.depth >= ANSI256 }
 
-// Experts is the working indicator: a row of squares like the parameter grid
-// of an Inkling model card, where a few experts fire at each tick, as in a
-// mixture-of-experts model, and the ones of the previous tick fade.
-func (t Theme) Experts(tick, cells, active int) string {
-	if cells <= 0 {
-		return ""
-	}
-	styles := make([]role, cells)
-	for index := range styles {
-		styles[index] = roleHairline
-	}
-	for _, index := range firing(tick-1, cells, active) {
-		styles[index] = roleAccentSoft
-	}
-	for _, index := range firing(tick, cells, active) {
-		styles[index] = roleAccent
-	}
-	return t.squares(styles, t.squareGlyph)
-}
-
-// firing picks active distinct cells for a tick. A hash of the tick, not a
-// random source, keeps a frame reproducible and the screen free of state.
-func firing(tick, cells, active int) []int {
-	active = min(active, cells)
-	chosen := make([]int, 0, active)
-	for draw := uint64(0); len(chosen) < active; draw++ {
-		index := int(mix(uint64(tick)*0x9e3779b97f4a7c15+draw) % uint64(cells))
-		if !slices.Contains(chosen, index) {
-			chosen = append(chosen, index)
-		}
-	}
-	return chosen
-}
-
 // mix is the splitmix64 finalizer.
 func mix(value uint64) uint64 {
 	value = (value ^ value>>30) * 0xbf58476d1ce4e5b9
 	value = (value ^ value>>27) * 0x94d049bb133111eb
 	return value ^ value>>31
-}
-
-// Handoff ends a turn: the row of squares slides into the reply dot. progress
-// runs from 0 to 1; at 1 only the dot is left.
-func (t Theme) Handoff(progress float64, cells int) string {
-	progress = min(max(progress, 0), 1)
-	remaining := int(math.Round(float64(cells-1) * (1 - progress*progress)))
-	return t.Accent("●") + t.paint(roleAccentSoft, strings.Repeat("▪", remaining))
-}
-
-// fillGlyphs is a running tool: an ink drop that fills until the result.
-var fillGlyphs = [...]string{"○", "◔", "◑", "◕"}
-
-// Fill is the glyph of a running tool at step; the finished row shows ●.
-func (t Theme) Fill(step int) string {
-	return t.Green(fillGlyphs[(step%len(fillGlyphs)+len(fillGlyphs))%len(fillGlyphs)])
 }
 
 // Wet draws text that just arrived: wetness 1 is pale, 0 is dry ink. Without

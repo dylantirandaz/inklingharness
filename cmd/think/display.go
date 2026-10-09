@@ -217,17 +217,36 @@ func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed t
 			c.nextTool = 0
 		}
 	}
-	fmt.Fprintln(c.stderr, "  "+presentation.ToolCompletion(title, result.IsError, c.theme))
-	if result.IsError || name == "bash" || name == "task" || c.verbose {
+	var completion string
+	if c.chat {
+		outcome := c.theme.Green("Done")
+		if result.IsError {
+			outcome = c.theme.Red("Failed")
+		}
+		completion = outcome + "  " + title + c.theme.Graphite(" · "+elapsed.Round(time.Millisecond).String())
+	} else {
+		completion = presentation.ToolCompletion(title, result.IsError, c.theme)
+	}
+	fmt.Fprintln(c.stderr, "  "+completion)
+	if c.chat || result.IsError || name == "bash" || name == "task" || c.verbose {
 		var preview string
 		if c.chat && !c.verbose {
-			preview = presentation.ResultPreview(result.Content, result.IsError, 3, c.theme)
+			budget := 3
+			if result.IsError {
+				budget = 6
+			}
+			preview = presentation.ResultPreview(result.Content, result.IsError, budget, c.theme)
 		} else {
 			preview = presentation.Safe(result.Content)
 		}
-		lead := "    " + c.theme.Hairline("│") + " "
-		for line := range strings.SplitSeq(preview, "\n") {
-			fmt.Fprintln(c.stderr, lead+line)
+		if preview != "" || !c.chat {
+			lead := "    "
+			if !c.chat {
+				lead += c.theme.Hairline("│") + " "
+			}
+			for line := range strings.SplitSeq(preview, "\n") {
+				fmt.Fprintln(c.stderr, lead+line)
+			}
 		}
 	}
 	if c.verbose {
@@ -386,11 +405,12 @@ func printLatestTools(output io.Writer, messages []anthropic.EncodedMessage, the
 				}
 			}
 			if call == nil {
-				fmt.Fprintf(output, "Missing saved call for result %s\n", presentation.Safe(result.ToolUseID))
+				fmt.Fprintf(output, "Missing saved call for result %s\n%s\n", presentation.Safe(result.ToolUseID), presentation.ToolCompletion("Result", result.IsError, theme))
+				fmt.Fprintln(output, presentation.Safe(result.Content))
 				continue
 			}
 			view := describeTool(call.Name, call.Input, theme)
-			fmt.Fprintf(output, "\n%s\n%s\n\nResult\n%s\n", view.Title, view.Details, presentation.Safe(result.Content))
+			fmt.Fprintf(output, "\n%s\n%s\n\n%s\n", presentation.ToolCompletion(view.Title, result.IsError, theme), view.Details, presentation.Safe(result.Content))
 		}
 		return nil
 	}
