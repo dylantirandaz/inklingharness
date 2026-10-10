@@ -41,8 +41,17 @@ async def exec_wire(
     command: str,
     env: dict[str, str] | None = None,
 ) -> None:
+    # Modal limits remote exec arguments to 64 KiB. A file keeps the command exact.
+    await agent._upload_config_text(
+        environment,
+        content=command,
+        remote_path="/installed-agent/harbor-run.sh",
+        filename="harbor-run.sh",
+    )
     try:
-        await agent.exec_as_agent(environment, command=command, env=env)
+        await agent.exec_as_agent(
+            environment, command="exec /bin/bash /installed-agent/harbor-run.sh", env=env
+        )
     except asyncio.CancelledError:
         # Harbor cancels its RPC wait, but Modal leaves the remote process alive.
         stopped = await environment.exec(
@@ -324,6 +333,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
         "observed_complete_usage": totals,
         "process": run,
     }
+    wire.mkdir(parents=True, exist_ok=True)
     (wire / "usage.json").write_text(json.dumps(context.metadata, indent=2) + "\n")
 
 

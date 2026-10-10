@@ -32,11 +32,9 @@ func ShouldCompact(config Config, messages []anthropic.EncodedMessage, lastInput
 // Compact replaces an older prefix with a model summary. The newest message,
 // or newest tool call/result pair, stays exact. Failure leaves history unchanged.
 //
-// The summary request sends the same tools as a normal turn and no
-// tool_choice. A measured provider removed the tools from the prompt when
-// tool_choice was "none", so that request missed the prompt cache from the
-// first tokens. The instruction forbids tools, and a reply with a tool call
-// fails below.
+// A summary must not call tools. A prompt instruction did not prevent
+// tool_use replies. tool_choice "none" can reduce cache reuse if the
+// provider removes the tool definitions from its prompt.
 func Compact(ctx context.Context, client *anthropic.Client, config Config, toolSet *tools.Set, history []anthropic.EncodedMessage, observer Observer) (outcome *Outcome, err error) {
 	ctx = latency.RequestContext(ctx)
 	span := latency.Begin(ctx, latency.Compaction, "compact")
@@ -73,7 +71,12 @@ func Compact(ctx context.Context, client *anthropic.Client, config Config, toolS
 	started := display.Start()
 	observer.Status("compacting older messages")
 	display.Add(started, nil)
-	response, err := client.Stream(ctx, anthropic.Request{Model: config.Model, MaxTokens: min(config.MaxTokens, 8192), System: config.System, Messages: messages, Tools: RequestTools(config, toolSet), Thinking: config.Thinking, Extra: config.Extra}, func(event anthropic.StreamEvent) error {
+	summaryExtra := make(map[string]json.RawMessage, len(config.Extra)+1)
+	for field, value := range config.Extra {
+		summaryExtra[field] = value
+	}
+	summaryExtra["tool_choice"] = json.RawMessage(`{"type":"none"}`)
+	response, err := client.Stream(ctx, anthropic.Request{Model: config.Model, MaxTokens: min(config.MaxTokens, 8192), System: config.System, Messages: messages, Tools: RequestTools(config, toolSet), Thinking: config.Thinking, Extra: summaryExtra}, func(event anthropic.StreamEvent) error {
 		switch event := event.(type) {
 		case anthropic.RetryEvent:
 			return forward(event, observer)

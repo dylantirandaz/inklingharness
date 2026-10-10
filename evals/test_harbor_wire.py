@@ -53,6 +53,21 @@ def _write_wire(logs: Path, routing: dict[str, object] | None, terminated: bool)
 
 
 class MessagesRouteTests(unittest.TestCase):
+    def test_missing_wire_logs_do_not_claim_usage_or_route(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            logs = Path(directory)
+            context = AgentContext()
+            populate_wire_context(logs, context)
+            self.assertFalse(context.is_empty())
+            self.assertIsNone(context.n_input_tokens)
+            self.assertIsNone(context.n_cache_tokens)
+            self.assertIsNone(context.n_output_tokens)
+            assert context.metadata is not None
+            self.assertIs(context.metadata["all_recorded_usage_complete"], False)
+            self.assertIsNone(context.metadata["process"])
+            with self.assertRaises(ValueError):
+                audit_wire_providers(logs)
+
     def test_server_search_identity_is_checked_at_message_stop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             logs = Path(directory)

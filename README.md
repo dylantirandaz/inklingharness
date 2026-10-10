@@ -34,6 +34,8 @@ Attach with `-file path` or `@path`. Images stay in private session state: 5 MiB
 
 Use `context_checkpoint` for working notes and `context_read` for exact older messages. Notes are lossy, not a privacy filter. Back up the session `resources` directory; chat exports exclude resources.
 
+Summary requests disable tool calls.
+
 ## Develop
 
 Requires Go 1.24 or later, Git, and Bash.
@@ -57,4 +59,4 @@ python -m evals.harbor_run evals/terminal-bench.json &&
 python -m evals.harbor_wire out/terminal-bench/jobs/terminal-bench-2.0-native
 ```
 
-`compact_tokens` sets Think's threshold. Messages/Responses routes must be verified. No universal lead is established.
+`compact_tokens` sets Think's threshold. Native launches use scripts. Verify Messages/Responses routes. No universal lead is established.
