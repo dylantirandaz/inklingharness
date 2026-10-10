@@ -1,5 +1,10 @@
-"""Run the prebuilt think CLI with the fixed Terminal-Bench profile."""
+"""Run the prebuilt think CLI with the fixed Terminal-Bench profile.
 
+compact_tokens sets the existing CLI threshold; None keeps the binary default.
+Without an explicit source version, identify the binary by its SHA-256 digest.
+"""
+
+import hashlib
 import logging
 import shlex
 from pathlib import Path
@@ -26,11 +31,18 @@ class InklingAgent(BaseInstalledAgent):
         logger: logging.Logger | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
+        compact_tokens: int | None = None,
     ) -> None:
         if model_name != MODEL:
             raise ValueError(f"InklingAgent requires model_name={MODEL!r}")
+        if compact_tokens is not None and compact_tokens < 0:
+            raise ValueError("compact_tokens must be nonnegative")
+        self._compact_tokens = compact_tokens
         self._binary_path = validate_linux_binary(binary_path)
         self._wire_binary_path = validate_linux_binary(wire_binary_path)
+        if version is None:
+            with self._binary_path.open("rb") as binary:
+                version = "sha256:" + hashlib.file_digest(binary, "sha256").hexdigest()
         super().__init__(
             logs_dir=logs_dir,
             model_name=model_name,
@@ -66,6 +78,8 @@ class InklingAgent(BaseInstalledAgent):
             "-json",
             "-extra", '{"provider":{"order":["deepinfra/fp8"],"allow_fallbacks":false}}',
         ]
+        if self._compact_tokens is not None:
+            arguments.extend(["-compact-tokens", str(self._compact_tokens)])
         child_command = (
             f"exec {shlex.join(arguments)} "
             '-base-url "${HARBOR_MESSAGES_BASE_URL:?Recorder did not supply Messages base}" -- "$1"'
