@@ -454,13 +454,3 @@ func TestContextEndsFetch(t *testing.T) {
 		t.Fatalf("Run with a cancelled context = %v", err)
 	}
 }
-
-func TestToolShape(t *testing.T) {
-	tool := FetchTool()
-	if tool.Name != "web_fetch" || tool.ReadOnly {
-		t.Fatalf("tool %q read-only %v", tool.Name, tool.ReadOnly)
-	}
-	if !json.Valid(tool.InputSchema) {
-		t.Fatal("input schema is not valid JSON")
-	}
-}

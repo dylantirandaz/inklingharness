@@ -1,6 +1,5 @@
-// Package web holds the web_fetch tool. The tool reads one http or https URL
-// and gives the model readable text: HTML becomes Markdown-like text, and
-// other text types stay as they are.
+// Package web provides web search and URL fetching. Both return text with
+// source URLs and require approval before sending data to the network.
 package web
 
 import (

@@ -877,7 +877,7 @@ func acpToolKindOf(name string) acpToolKind {
 	switch name {
 	case "read_file":
 		return acpKindRead
-	case "glob", "grep":
+	case "glob", "grep", "web_search":
 		return acpKindSearch
 	case "edit_file", "write_file":
 		return acpKindEdit

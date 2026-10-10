@@ -109,13 +109,11 @@ func (e *extensions) systemPrompt() string {
 	return strings.Join(sections, "\n\n")
 }
 
-// toolSet adds, after the standard tools and in a fixed order, web_fetch,
-// remember, ask_user, then the custom and MCP tools. ask is nil when no user
-// can answer; then ask_user is left out, because it could only fail and its
-// definition costs tokens in every request.
+// toolSet adds web_search, web_fetch, remember, ask_user, then custom and MCP
+// tools in a fixed order. ask_user is absent when no user can answer.
 func (e *extensions) toolSet(standard *tools.Set, ask questionAsker) (*tools.Set, error) {
 	all := append([]tools.Tool(nil), standard.All()...)
-	all = append(all, web.FetchTool(), extend.MemoryTool(e.workDir))
+	all = append(all, web.SearchTool(), web.FetchTool(), extend.MemoryTool(e.workDir))
 	if ask != nil {
 		all = append(all, askUserTool(ask))
 	}

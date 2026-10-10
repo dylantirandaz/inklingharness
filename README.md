@@ -1,6 +1,6 @@
 # Inkling
 
-Go coding agent for `thinkingmachines/inkling-small` through OpenRouter. It uses the Go standard library and supports macOS and Linux.
+Go coding agent for `thinkingmachines/inkling-small` through OpenRouter. Standard library only; macOS and Linux.
 
 ## Install
 
@@ -20,17 +20,19 @@ think chat -resume last
 think run -h
 ```
 
-Streamed chat, saved sessions, file tools, Bash, JSON events, RPC, and ACP are supported.
+Includes file tools, Bash, saved chat, JSON events, RPC, and ACP.
 
-File changes and commands require approval. `-yes` disables it. Commands are not sandboxed. `OPENROUTER_API_KEY` overrides the stored key.
+File changes, commands, and web requests require approval. `-yes` disables it. Commands are not sandboxed. `OPENROUTER_API_KEY` overrides the stored key.
+
+`web_search` sends queries to [Exa's free, rate-limited service](https://exa.ai/docs/get-started/exa-mcp); no extra key is required. `web_fetch` reads source URLs.
 
 Chat keeps terminal scrollback. Ctrl-J adds a line. Up/Down moves within a draft; Ctrl-P/Ctrl-N selects history. Paste stays editable. Tool previews mark success or failure. `/tools` shows full results; `/help` lists keys; `/status` shows session details.
 
 ## Context and images
 
-Attach with `-file path` or `@path`. Images are stored once in private session state: 5 MiB each. `inspect_images` sends up to eight images (10 MiB total) in a separate request. Later turns reuse notes. Re-inspection reads the stored original, even after source deletion.
+Attach with `-file path` or `@path`. Images stay in private session state: 5 MiB each. `inspect_images` sends up to eight images (10 MiB total) per request. Later turns reuse notes; re-inspection uses the original even after source deletion.
 
-The agent can use `context_checkpoint` to retain notes and a next step. `context_read` retrieves exact older messages. Notes are lossy, not a privacy filter. Keep the session state's `resources` directory with session backups. Chat exports do not include stored resources.
+Use `context_checkpoint` for working notes and `context_read` for exact older messages. Notes are lossy, not a privacy filter. Back up the session `resources` directory; chat exports exclude resources.
 
 ## Develop
 

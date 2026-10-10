@@ -33,6 +33,8 @@ type toolInput struct {
 	Tool           *string         `json:"tool"`
 	Arguments      json.RawMessage `json:"arguments"`
 	URL            *string         `json:"url"`
+	Query          *string         `json:"query"`
+	Count          *int            `json:"count"`
 	MaxChars       *int            `json:"max_chars"`
 	Fact           *string         `json:"fact"`
 	Question       *string         `json:"question"`
@@ -58,7 +60,7 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		return ToolView{}, errors.New("tool input must be a JSON object")
 	}
 	switch name {
-	case "read_file", "write_file", "edit_file", "glob", "grep", "bash", "bash_job", "task", "mcp_list", "mcp_call", "web_fetch", "remember", "ask_user":
+	case "read_file", "write_file", "edit_file", "glob", "grep", "bash", "bash_job", "task", "mcp_list", "mcp_call", "web_search", "web_fetch", "remember", "ask_user":
 	default:
 		return describeOtherTool(name, input, details)
 	}
@@ -203,6 +205,21 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		view.Title = "MCP " + brief(*args.Server+"/"+*args.Tool)
 		if details {
 			view.Details = "Call " + singleLine(*args.Tool) + " on MCP server " + singleLine(*args.Server) + "\nArguments\n" + indentedJSON(args.Arguments)
+		}
+	case "web_search":
+		if err := requiredText(args.Query, "query", false); err != nil {
+			return ToolView{}, err
+		}
+		count, err := positive(args.Count, 5, "count")
+		if err != nil {
+			return ToolView{}, err
+		}
+		if count > 10 {
+			return ToolView{}, errors.New("count must not exceed 10")
+		}
+		view.Title = "Search web " + brief(*args.Query)
+		if details {
+			view.Details = fmt.Sprintf("Query: %s\nResult limit: %d\nThe query goes to Exa; results go to the model provider.", Safe(*args.Query), count)
 		}
 	case "web_fetch":
 		if err := requiredText(args.URL, "url", false); err != nil {
