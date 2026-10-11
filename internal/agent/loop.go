@@ -316,8 +316,7 @@ func checkpoint(ctx context.Context, config Config, outcome *Outcome) (err error
 	return nil
 }
 
-// RequestTools returns the tool definitions of every request for this
-// configuration. Compaction sends the same list so the cached prefix stays valid.
+// RequestTools returns the shared tool list for this configuration.
 func RequestTools(config Config, toolSet *tools.Set) []anthropic.ToolDefinition {
 	definitions := toolDefinitions(toolSet)
 	if config.EnableTasks {
