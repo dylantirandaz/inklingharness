@@ -63,6 +63,12 @@ PROFILES = {
     "openai/gpt-6-luna": WireProfile(
         "openai/gpt-6-luna", "openai/gpt-6-luna-20260922", "openai", "OpenAI", "max", 128000, 1050000, 0.1, 0.5, 0.01
     ),
+    # DeepSeek's own Terminal-Bench 4.0 result (31.2%) used maximum effort.
+    # DeepSeek's first-party route trains on prompts, so the run uses
+    # DeepInfra's fp8 route, which caches repeated prefixes.
+    "deepseek/deepseek-v4.1-flash": WireProfile(
+        "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-20260910", "deepinfra/fp8", "DeepInfra", "max", 128000, 1048576, 0.14, 0.42, 0.0042
+    ),
 }
 
 

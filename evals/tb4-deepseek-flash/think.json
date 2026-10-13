@@ -1,0 +1,43 @@
+{
+  "job_name": "tb4-dsv41flash-max-think",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 3,
+  "n_concurrent_trials": 8,
+  "timeout_multiplier": 1.0,
+  "retry": {
+    "max_retries": 3,
+    "exclude_exceptions": [
+      "AgentTimeoutError",
+      "VerifierTimeoutError",
+      "RewardFileNotFoundError",
+      "RewardFileEmptyError",
+      "VerifierOutputParseError",
+      "AgentSafetyRefusalError"
+    ]
+  },
+  "environment": {
+    "type": "modal",
+    "cpu_enforcement_policy": "auto",
+    "memory_enforcement_policy": "auto"
+  },
+  "agents": [
+    {
+      "import_path": "evals.harbor_inkling:InklingAgent",
+      "model_name": "deepseek/deepseek-v4.1-flash",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "binary_path": "out/terminal-bench/tb4/think-linux-amd64",
+        "wire_binary_path": "out/terminal-bench/tb4/harbor-wire-linux-amd64",
+        "effort": "max"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "name": "terminal-bench/terminal-bench",
+      "ref": "sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732"
+    }
+  ]
+}
