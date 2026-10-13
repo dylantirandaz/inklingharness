@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -530,5 +531,26 @@ func TestNearest256UsesCubeAndGray(t *testing.T) {
 		if got := nearest256(test.color); got != test.want {
 			t.Errorf("nearest256(%v) = %d, want %d", test.color, got, test.want)
 		}
+	}
+}
+
+func TestToolRowAndShortDuration(t *testing.T) {
+	theme := Theme{}
+	if got := ToolRow("Run go test ./...", false, 1200*time.Millisecond, theme); got != "● Ran go test ./...  1.2s" {
+		t.Fatalf("row = %q", got)
+	}
+	if got := ToolRow("Run rm -rf x", true, 0, theme); got != "✕ Run rm -rf x" {
+		t.Fatalf("failed row = %q", got)
+	}
+	for elapsed, want := range map[time.Duration]string{
+		85 * time.Millisecond: "85ms", 14 * time.Second: "14s", 185 * time.Second: "3m05s",
+	} {
+		if got := ShortDuration(elapsed); got != want {
+			t.Fatalf("ShortDuration(%v) = %q, want %q", elapsed, got, want)
+		}
+	}
+	card := ApprovalCard(ToolView{Title: "Edit a.go", Details: "Edit a.go\n- old\n+ new"}, theme)
+	if card != "Edit a.go\n- old\n+ new\nFull filesystem access · not sandboxed" {
+		t.Fatalf("card = %q", card)
 	}
 }

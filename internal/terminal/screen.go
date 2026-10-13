@@ -50,7 +50,13 @@ type answer struct {
 // Screen owns one terminal input reader and serializes every output operation.
 // Call Close before using either descriptor outside the screen again.
 type Screen struct {
-	mu            sync.Mutex
+	mu sync.Mutex
+	// card is the approval request shown inside the choice box; empty when
+	// it went to the scrollback because the box could not hold it.
+	card string
+	// box is true while the live area draws its input inside a card; the
+	// input then wraps four cells narrower.
+	box           bool
 	input, output *os.File
 	wake          wakePipe
 	state         syscall.Termios
@@ -369,8 +375,35 @@ func (s *Screen) composerRuleLocked(width int) string {
 	return s.rule.text
 }
 
+// boxWidth is the narrowest live area that draws the composer as a card.
+const boxWidth = 12
+
+// boxed draws rows inside a rounded card of width cells. The title sits in
+// the top border. Rows must already fit width-4 cells.
+func (s *Screen) boxed(rows []string, width int, border func(string) string, title string) []string {
+	inner := width - 4
+	top := border("╭─")
+	used := 2
+	if plain := withoutStyles(title); plain != "" && cellWidth(plain)+4 <= inner {
+		top += " " + title + " "
+		used += cellWidth(plain) + 2
+	}
+	top += border(strings.Repeat("─", max(width-1-used, 0)) + "╮")
+	out := make([]string, 0, len(rows)+2)
+	out = append(out, top)
+	left, right := border("│")+" ", " "+border("│")
+	for _, row := range rows {
+		pad := max(inner-cellWidth(withoutStyles(row)), 0)
+		out = append(out, left+row+strings.Repeat(" ", pad)+right)
+	}
+	return append(out, border("╰"+strings.Repeat("─", max(width-2, 0))+"╯"))
+}
+
 func (s *Screen) inputWidthLocked() int {
 	width := max(s.cols-1, 2)
+	if s.box {
+		return width - 6
+	}
 	if width >= 4 {
 		width -= 2
 	}
@@ -476,21 +509,27 @@ func (s *Screen) layoutLocked() {
 		s.frame = append(s.frame, intro...)
 		rows -= len(intro)
 	}
-	rule := s.mode == modePrompt && rows >= 3 && width >= 12
 	marker := s.mode == modePrompt && width >= 4
-	inner := s.inputWidthLocked()
 	var bodyRows []string
 	var choiceBar string
 	editRow, editCol, start := 0, 0, 0
 	footer := styledRows(s.footerLocked(), width, s.theme.Colored())
 	maxFooter := max(1, min(3, rows-1))
 	footer = visibleRows(footer, maxFooter, width)
-	rule = rule && rows >= len(footer)+2
+	// The composer and the approval sit in a rounded card when there is room
+	// for its two borders; otherwise a hairline or nothing separates them.
+	box := s.mode != modeBusy && width >= boxWidth && rows >= len(footer)+3
+	s.box = box
+	inner := s.inputWidthLocked()
+	rule := !box && s.mode == modePrompt && rows >= len(footer)+2 && width >= boxWidth
 	maxBody := max(1, rows-len(footer))
 	if rule {
 		maxBody--
 	}
-	padding := s.mode == modePrompt && rows >= 10
+	if box {
+		maxBody -= 2
+	}
+	padding := !box && s.mode == modePrompt && rows >= 10
 	if padding {
 		maxBody -= 2
 	}
@@ -511,25 +550,38 @@ func (s *Screen) layoutLocked() {
 		}
 	case modeChoice:
 		choiceBar = s.theme.Glow("│", 0.3+0.2*s.breathLocked(now)) + " "
-		if width < 4 {
+		if width < 4 || box {
 			choiceBar = ""
 		}
-		labels := "y allow once   a allow session   n deny"
-		if width < 44 {
+		labels := s.theme.Key("y") + " allow once   " + s.theme.Key("a") + " allow session   " + s.theme.Key("n") + " deny"
+		if width < 52 {
 			labels = "y once · a session · n deny"
 		}
 		choiceWidth := max(width-cellWidth(withoutStyles(choiceBar)), 1)
+		choiceRows := max(1, rows-len(footer))
+		if box {
+			choiceWidth, choiceRows = width-4, max(1, rows-len(footer)-2)
+		}
 		bodyRows = styledRows(labels, choiceWidth, s.theme.Colored())
-		if len(bodyRows) > max(1, rows-len(footer)) {
+		if len(bodyRows) > choiceRows {
 			bodyRows = styledRows("y a n", choiceWidth, false)
 		}
-		bodyRows = visibleRows(bodyRows, max(1, rows-len(footer)), choiceWidth)
+		if box && s.card != "" {
+			card := styledRows(s.card, choiceWidth, s.theme.Colored())
+			if len(card)+1+len(bodyRows) <= choiceRows {
+				bodyRows = append(append(card, ""), bodyRows...)
+			}
+		}
+		bodyRows = visibleRows(bodyRows, choiceRows, choiceWidth)
 	case modeBusy:
 	}
 	activity := s.mode == modeBusy && s.status != ""
 	room := rows - len(bodyRows) - len(footer)
 	if rule {
 		room--
+	}
+	if box {
+		room -= 2
 	}
 	var activityLines []string
 	if activity && room > 0 {
@@ -555,6 +607,10 @@ func (s *Screen) layoutLocked() {
 		s.frame = append(s.frame, "")
 	}
 	bodyStart := len(s.frame)
+	if box {
+		bodyStart++
+	}
+	live := make([]string, 0, len(bodyRows))
 	for i, row := range bodyRows {
 		if s.mode == modePrompt && len(s.text) == 0 {
 			row = s.theme.Graphite(row)
@@ -571,7 +627,17 @@ func (s *Screen) layoutLocked() {
 			}
 			row = prefix + row
 		}
-		s.frame = append(s.frame, choiceBar+row)
+		live = append(live, choiceBar+row)
+	}
+	switch {
+	case box && s.mode == modeChoice:
+		glow := 0.3 + 0.2*s.breathLocked(now)
+		border := func(text string) string { return s.theme.Glow(text, glow) }
+		s.frame = append(s.frame, s.boxed(live, width, border, s.theme.Amber("Approval needed"))...)
+	case box:
+		s.frame = append(s.frame, s.boxed(live, width, s.theme.Hairline, "")...)
+	default:
+		s.frame = append(s.frame, live...)
 	}
 	if padding {
 		s.frame = append(s.frame, "")
@@ -586,6 +652,9 @@ func (s *Screen) layoutLocked() {
 		s.frameRow = bodyStart + editRow - start
 		s.frameCol = editCol
 		if marker {
+			s.frameCol += 2
+		}
+		if box {
 			s.frameCol += 2
 		}
 		s.frameCol = min(s.frameCol, s.cols-1)
@@ -670,7 +739,11 @@ func (s *Screen) footerLocked() string {
 		extra += s.theme.Graphite(s.background)
 	}
 	if extra != "" {
-		if cellWidth(withoutStyles(extra))+cellWidth(hint)+3 <= width {
+		// Under the composer card, keys sit under its text on the left and
+		// the session details end under its right edge.
+		if gap := width - 4 - cellWidth(withoutStyles(extra)) - cellWidth(hint); width >= boxWidth && gap >= 3 && !strings.Contains(hint, "\n") {
+			line = "  " + line + strings.Repeat(" ", gap) + extra
+		} else if cellWidth(withoutStyles(extra))+cellWidth(hint)+3 <= width {
 			line += "   " + extra
 		} else {
 			line += "\n" + extra
@@ -1028,6 +1101,36 @@ func (s *Screen) Prompt(ctx context.Context, placeholder string) (string, error)
 func (s *Screen) Choose(ctx context.Context) (Choice, error) {
 	value, err := s.await(ctx, modeChoice, "")
 	return value.choice, err
+}
+
+// CardFits reports whether ChooseCard can show card inside the approval box
+// at the current terminal size, so the request leaves no trace in the
+// scrollback once it is answered.
+func (s *Screen) CardFits(card string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	width := max(s.cols-1, 2)
+	if width < 52 || card == "" {
+		return false
+	}
+	// Borders, a gap, the choice row, and up to two footer rows.
+	return len(styledRows(card, width-4, false))+6 <= s.rows
+}
+
+// ChooseCard asks for an approval with card shown above the choices. The
+// caller checks CardFits first; a card that stops fitting after a resize is
+// left out and the choices remain.
+func (s *Screen) ChooseCard(ctx context.Context, card string) (Choice, error) {
+	s.mu.Lock()
+	s.card = card
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.card = ""
+		s.layoutDirty = true
+		s.mu.Unlock()
+	}()
+	return s.Choose(ctx)
 }
 
 // ArmTyping returns a channel that closes at the next prompt key other than

@@ -290,26 +290,39 @@ func indentedJSON(value json.RawMessage) string {
 // also show the change without color.
 func Approval(view ToolView, theme Theme) string {
 	bar := ApprovalBar(theme)
-	var out strings.Builder
 	title := singleLine(view.Title)
+	var out strings.Builder
 	out.WriteString(bar + theme.Amber("Approval needed") + " · " + title)
+	for _, line := range approvalLines(view, theme) {
+		out.WriteString("\n" + bar + line)
+	}
+	return out.String()
+}
+
+// ApprovalCard is the same request for the approval box above the
+// composer: the box carries the amber title, so the card starts with the
+// action in bold.
+func ApprovalCard(view ToolView, theme Theme) string {
+	return theme.Bold(theme.Ink(singleLine(view.Title))) + "\n" + strings.Join(approvalLines(view, theme), "\n")
+}
+
+func approvalLines(view ToolView, theme Theme) []string {
+	title := singleLine(view.Title)
 	details := Safe(view.Details)
 	if first, rest, found := strings.Cut(details, "\n"); found && first == title {
 		details = rest
 	}
+	var lines []string
 	for line := range strings.SplitSeq(details, "\n") {
-		out.WriteString("\n" + bar)
 		switch {
 		case strings.HasPrefix(line, "+ "):
-			out.WriteString(theme.Green(line))
+			line = theme.Green(line)
 		case strings.HasPrefix(line, "- "):
-			out.WriteString(theme.Red(line))
-		default:
-			out.WriteString(line)
+			line = theme.Red(line)
 		}
+		lines = append(lines, line)
 	}
-	out.WriteString("\n" + bar + theme.Graphite("Full filesystem access · not sandboxed"))
-	return out.String()
+	return append(lines, theme.Graphite("Full filesystem access · not sandboxed"))
 }
 
 // ApprovalBar starts each row of an approval card and of its outcome.

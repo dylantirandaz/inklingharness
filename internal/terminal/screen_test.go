@@ -53,8 +53,8 @@ func TestDrawUnchangedAndCursorOnly(t *testing.T) {
 	if got := take(); got == "" || strings.Contains(got, "\x1b[2K") || strings.Contains(got, "ab界") {
 		t.Fatalf("cursor-only move repainted text: %q", got)
 	}
-	if s.cursorCol != 6 {
-		t.Fatalf("cursor column = %d, want marker offset plus four cells", s.cursorCol)
+	if s.cursorCol != 8 {
+		t.Fatalf("cursor column = %d, want card border and marker offsets plus four cells", s.cursorCol)
 	}
 }
 
@@ -153,8 +153,8 @@ func TestComposerCursorOffsetsAndClipping(t *testing.T) {
 		text                           string
 		position, rows, cols, row, col int
 	}{
-		{"wide and combining", "ab界e\u0301", 5, 6, 20, 1, 7},
-		{"wrapped boundary", "abcdefghijklmZ", 13, 6, 16, 2, 2},
+		{"wide and combining", "ab界e\u0301", 5, 6, 20, 1, 9},
+		{"wrapped boundary", "abcdefghijklmZ", 13, 6, 16, 2, 8},
 		{"clipped boundary", "abcdefghijklmZ", 13, 3, 16, 1, 2},
 		{"narrow without rule", "界x", 1, 2, 8, 0, 4},
 		{"tiny without marker", "界", 1, 1, 3, 0, 2},
@@ -376,5 +376,54 @@ func TestNarrowSafetyHintsAndStatusRemainVisible(t *testing.T) {
 				t.Fatalf("choice row wraps outside the layout: %q", row)
 			}
 		}
+	}
+}
+
+func TestComposerCardAndApprovalCard(t *testing.T) {
+	s, take := renderScreen(t, modePrompt, 10, 60)
+	s.drawLocked()
+	take()
+	if !strings.HasPrefix(s.live[0], "╭") || !strings.HasPrefix(s.live[len(s.live)-2], "╰") {
+		t.Fatalf("composer is not a card: %q", s.live)
+	}
+	for _, row := range s.live[:len(s.live)-1] {
+		if got := cellWidth(withoutStyles(row)); got != 59 {
+			t.Fatalf("card row is %d cells, want 59: %q", got, row)
+		}
+	}
+	s.mode, s.card, s.layoutDirty = modeChoice, "Run go test\ngo test ./...", true
+	s.drawLocked()
+	take()
+	frame := strings.Join(s.live, "\n")
+	if !strings.Contains(s.live[0], "Approval needed") || !strings.Contains(frame, "go test ./...") || !strings.Contains(frame, "allow once") {
+		t.Fatalf("approval card is missing its request or choices: %q", s.live)
+	}
+	s.card, s.layoutDirty = strings.Repeat("line\n", 20), true
+	s.drawLocked()
+	take()
+	if strings.Contains(strings.Join(s.live, "\n"), "line") || len(s.live) > 10 {
+		t.Fatalf("a card that does not fit must leave only the choices: %q", s.live)
+	}
+}
+
+func TestWrapWords(t *testing.T) {
+	rows := WrapWords("the quick brown fox jumps", 10)
+	if strings.Join(rows, "|") != "the quick|brown fox|jumps" {
+		t.Fatalf("rows = %q", rows)
+	}
+	if rows := WrapWords("abcdefghijklmnop", 8); strings.Join(rows, "|") != "abcdefgh|ijklmnop" {
+		t.Fatalf("a long word must split: %q", rows)
+	}
+	styled := WrapWords("aa \x1b[1mbold words here\x1b[0m end", 9)
+	for _, row := range styled[:len(styled)-1] {
+		if cellWidth(withoutStyles(row)) > 9 {
+			t.Fatalf("row too wide: %q", row)
+		}
+	}
+	if !strings.HasSuffix(styled[0], "\x1b[0m") || !strings.HasPrefix(styled[1], "\x1b[1m") {
+		t.Fatalf("a style must close at the row end and reopen on the next: %q", styled)
+	}
+	if got := withoutStyles(strings.Join(styled, " ")); got != "aa bold words here end" {
+		t.Fatalf("wrapping changed the text: %q", got)
 	}
 }

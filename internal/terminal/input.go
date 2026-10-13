@@ -417,3 +417,77 @@ func withoutStyles(text string) string {
 	}
 	return b.String()
 }
+
+// WrapWords wraps styled text to width cells at spaces, so a reply line can
+// continue under a hanging indent instead of at the terminal's left edge. A
+// word longer than the width is split. Each row that ends inside a style
+// closes it, and the next row opens it again, so an indent between rows
+// never takes a chip's tint.
+func WrapWords(text string, width int) []string {
+	if width < 8 {
+		return styledRows(text, max(width, 1), true)
+	}
+	text = strings.ReplaceAll(text, "\t", "    ")
+	var rows []string
+	var row strings.Builder
+	cells, style := 0, ""
+	breakAt, breakCells, breakStyle := -1, 0, ""
+	end := func(row, style string) string {
+		if style != "" {
+			return row + "\x1b[0m"
+		}
+		return row
+	}
+	for len(text) > 0 {
+		if strings.HasPrefix(text, "\x1b[") {
+			stop := 2
+			for stop < len(text) && (text[stop] < 0x40 || text[stop] > 0x7e) {
+				stop++
+			}
+			if stop < len(text) {
+				sequence := text[:stop+1]
+				if text[stop] == 'm' {
+					if sequence == "\x1b[0m" || sequence == "\x1b[m" {
+						style = ""
+					} else {
+						style += sequence
+					}
+				}
+				row.WriteString(sequence)
+				text = text[stop+1:]
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(text)
+		text = text[size:]
+		cell := runeWidth(r)
+		if r == ' ' {
+			if cells+cell > width {
+				rows = append(rows, end(row.String(), style))
+				row.Reset()
+				row.WriteString(style)
+				cells, breakAt = 0, -1
+				continue
+			}
+			breakAt, breakCells, breakStyle = row.Len(), cells, style
+		}
+		if cells+cell > width {
+			current := row.String()
+			row.Reset()
+			if breakAt >= 0 && breakCells > 0 {
+				rows = append(rows, end(current[:breakAt], breakStyle))
+				row.WriteString(breakStyle)
+				row.WriteString(current[breakAt+1:])
+				cells -= breakCells + 1
+			} else {
+				rows = append(rows, end(current, style))
+				row.WriteString(style)
+				cells = 0
+			}
+			breakAt = -1
+		}
+		row.WriteRune(r)
+		cells += cell
+	}
+	return append(rows, row.String())
+}

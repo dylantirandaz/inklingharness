@@ -42,6 +42,9 @@ type consoleObserver struct {
 	plainEnded bool
 	pending    []pendingTool
 	nextTool   int
+	// approval reports how long the user took to answer, which a tool's
+	// elapsed time includes but its own work does not.
+	approval *approvals
 }
 
 func newConsoleObserver(stdout, stderr io.Writer, screen *terminal.Screen, chat bool, theme presentation.Theme, showThinking, verbose bool) *consoleObserver {
@@ -107,10 +110,8 @@ func (c *consoleObserver) Text(delta string) {
 			c.line.WriteString(part)
 			part = c.line.String()
 		}
-		completeLines.WriteString(c.replyPrefix())
+		c.commitLine(&completeLines, part)
 		c.leadShown = true
-		completeLines.WriteString(c.markdown.Line(part))
-		completeLines.WriteByte('\n')
 		c.line.Reset()
 		delta = rest
 	}
@@ -158,6 +159,21 @@ func (c *consoleObserver) flushThinking() {
 	c.thinking.Reset()
 }
 
+// commitLine renders one complete reply line and wraps it at words, so its
+// continuation rows align under the text after the assistant sigil.
+func (c *consoleObserver) commitLine(out *strings.Builder, line string) {
+	for index, row := range terminal.WrapWords(c.markdown.Line(line), max(c.screen.Width()-3, 1)) {
+		if index > 0 {
+			out.WriteString("  ")
+		} else {
+			out.WriteString(c.replyPrefix())
+		}
+		out.WriteString(row)
+		out.WriteByte('\n')
+	}
+	c.leadShown = true
+}
+
 func (c *consoleObserver) flushText() {
 	if c.screen == nil {
 		if !c.plainEnded {
@@ -168,8 +184,9 @@ func (c *consoleObserver) flushText() {
 	}
 	c.screen.SetPreview("")
 	if c.line.Len() > 0 {
-		fmt.Fprintln(c.stdout, c.replyPrefix()+c.markdown.Line(c.line.String()))
-		c.leadShown = true
+		var line strings.Builder
+		c.commitLine(&line, c.line.String())
+		io.WriteString(c.stdout, line.String())
 		c.line.Reset()
 	}
 }
@@ -219,11 +236,10 @@ func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed t
 	}
 	var completion string
 	if c.chat {
-		outcome := c.theme.Green("Done")
-		if result.IsError {
-			outcome = c.theme.Red("Failed")
+		if c.approval != nil {
+			elapsed = max(elapsed-c.approval.takeWait(), 0)
 		}
-		completion = outcome + "  " + title + c.theme.Graphite(" · "+elapsed.Round(time.Millisecond).String())
+		completion = presentation.ToolRow(title, result.IsError, elapsed, c.theme)
 	} else {
 		completion = presentation.ToolCompletion(title, result.IsError, c.theme)
 	}
@@ -240,11 +256,11 @@ func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed t
 			preview = presentation.Safe(result.Content)
 		}
 		if preview != "" || !c.chat {
-			lead := "    "
-			if !c.chat {
-				lead += c.theme.Hairline("│") + " "
-			}
+			lead := "    " + c.theme.Hairline("│") + " "
 			for line := range strings.SplitSeq(preview, "\n") {
+				if c.chat && !result.IsError {
+					line = c.theme.Graphite(line)
+				}
 				fmt.Fprintln(c.stderr, lead+line)
 			}
 		}
@@ -289,7 +305,16 @@ func (c *consoleObserver) Finish() {
 	c.activity("")
 }
 
-func printUser(output io.Writer, prompt string, theme presentation.Theme) {
+// printUser wraps the prompt at words when the terminal width is known, so
+// its rows continue under the prompt marker.
+func printUser(output io.Writer, prompt string, width int, theme presentation.Theme) {
+	if width > 0 {
+		var rows []string
+		for line := range strings.SplitSeq(presentation.Safe(prompt), "\n") {
+			rows = append(rows, terminal.WrapWords(line, max(width-3, 1))...)
+		}
+		prompt = strings.Join(rows, "\n")
+	}
 	fmt.Fprintln(output, "\n"+presentation.UserTurn(prompt, theme))
 }
 

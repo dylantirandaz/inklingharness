@@ -6,6 +6,7 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -360,5 +361,49 @@ func shortTokens(count int) string {
 		return fmt.Sprintf("%.1fk", float64(count)/1000)
 	default:
 		return fmt.Sprintf("%dk", (count+500)/1000)
+	}
+}
+
+// pastTense names the first word of each tool title once the tool is done.
+var pastTense = map[string]string{
+	"Run": "Ran", "Write": "Wrote", "Edit": "Edited", "Search": "Searched",
+	"Find": "Found", "Delegate": "Delegated", "Fetch": "Fetched",
+	"Remember": "Remembered", "Ask": "Asked",
+}
+
+// ToolRow records a finished tool in the conversation: a green dot or a red
+// cross, the verb in bold (past tense once it succeeded), the target, and a quiet
+// duration. The glyphs differ so the outcome does not depend on color.
+func ToolRow(title string, failed bool, elapsed time.Duration, theme Theme) string {
+	dot := theme.Green("●")
+	if failed {
+		dot = theme.Red("✕")
+	}
+	verb, target, _ := strings.Cut(singleLine(title), " ")
+	if past, found := pastTense[verb]; found && !failed {
+		verb = past
+	}
+	line := dot + " " + theme.Bold(verb)
+	if target != "" {
+		line += " " + target
+	}
+	if elapsed >= time.Millisecond {
+		line += "  " + theme.Graphite(ShortDuration(elapsed))
+	}
+	return line
+}
+
+// ShortDuration keeps two significant figures at most: 85ms, 1.2s, 14s, 3m05s.
+func ShortDuration(elapsed time.Duration) string {
+	switch {
+	case elapsed < time.Second:
+		return fmt.Sprintf("%dms", elapsed.Milliseconds())
+	case elapsed < 10*time.Second:
+		return fmt.Sprintf("%.1fs", elapsed.Seconds())
+	case elapsed < time.Minute:
+		return fmt.Sprintf("%ds", int(elapsed.Round(time.Second).Seconds()))
+	default:
+		elapsed = elapsed.Round(time.Second)
+		return fmt.Sprintf("%dm%02ds", int(elapsed.Minutes()), int(elapsed.Seconds())%60)
 	}
 }

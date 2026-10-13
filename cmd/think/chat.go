@@ -109,6 +109,15 @@ type approvals struct {
 	screen   *terminal.Screen
 	theme    presentation.Theme
 	signals  shipSignals
+	// waited is the time spent on the last answered approval.
+	waited time.Duration
+}
+
+// takeWait returns the time the last approval waited for the user, once.
+func (approval *approvals) takeWait() time.Duration {
+	waited := approval.waited
+	approval.waited = 0
+	return waited
 }
 
 func (approval *approvals) check(ctx context.Context, call anthropic.ToolUseBlock) (bool, error) {
@@ -123,29 +132,50 @@ func (approval *approvals) check(ctx context.Context, call anthropic.ToolUseBloc
 		return false, nil
 	}
 	view := describeTool(call.Name, call.Input, approval.theme)
-	fmt.Fprintf(approval.output, "\n%s\n", presentation.Approval(view, approval.theme))
+	// A request that fits shows inside the approval box and leaves only its
+	// outcome; a longer one, such as a large diff, stays in the scrollback.
+	card := ""
+	if approval.screen != nil {
+		card = presentation.ApprovalCard(view, approval.theme)
+		if !approval.screen.CardFits(card) {
+			card = ""
+		}
+	}
+	if card == "" {
+		fmt.Fprintf(approval.output, "\n%s\n", presentation.Approval(view, approval.theme))
+	}
 	if approval.screen != nil {
 		approval.screen.SetStatus("Waiting for approval")
 		approval.signals.approval(presentation.Safe(view.Title))
-		choice, err := approval.screen.Choose(ctx)
+		started := time.Now()
+		choice, err := approval.screen.ChooseCard(ctx, card)
+		approval.waited = time.Since(started)
 		approval.signals.working()
 		if err != nil {
 			return false, err
 		}
 		approval.screen.SetToolStatus(presentation.Safe(view.Title))
 		outcome := func(text string, style func(string) string) {
+			if card != "" {
+				fmt.Fprintln(approval.output, "  "+approval.theme.Graphite("· ")+style(text))
+				return
+			}
 			fmt.Fprintln(approval.output, presentation.ApprovalBar(approval.theme)+style(text))
 		}
 		switch choice {
 		case terminal.AllowOnce:
-			outcome("allowed once", approval.theme.Green)
+			if card == "" {
+				outcome("allowed once", approval.theme.Green)
+			}
 			return true, nil
 		case terminal.AllowSession:
 			approval.allowAll = true
 			outcome("allowed for this session", approval.theme.Green)
 			return true, nil
 		case terminal.Deny:
-			outcome("denied", approval.theme.Red)
+			if card == "" {
+				outcome("denied", approval.theme.Red)
+			}
 			return false, nil
 		default:
 			return false, fmt.Errorf("unknown approval choice %v", choice)
@@ -372,6 +402,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		approval.input = input
 	}
 	observer := newConsoleObserver(displayOutput, progressOutput, screen, true, theme, o.showThinking, o.verbose)
+	observer.approval = approval
 	saveOnStart := *resume != "last" || current.Model != o.model || current.Effort != o.effort
 	current.Model, current.Effort = o.model, o.effort
 	if saveOnStart {
@@ -824,7 +855,11 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		policy.beforeChange = pending.settled
 		ext.configure(&config, toolSet, policy, approval.check)
 		config.Notices = jobs.Notices
-		printUser(displayOutput, shown, theme)
+		width := 0
+		if screen != nil {
+			width = screen.Width()
+		}
+		printUser(displayOutput, shown, width, theme)
 		signals.working()
 		turnCtx, finish := control.begin(ctx)
 		turnCtx, timing := timedContext(turnCtx, o)
