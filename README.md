@@ -59,4 +59,4 @@ python -m evals.harbor_run evals/terminal-bench.json &&
 python -m evals.harbor_wire out/terminal-bench/jobs/terminal-bench-2.0-native
 ```
 
-`compact_tokens` sets Think's threshold. Native launches use scripts. Verify Messages/Responses routes. No universal lead is established.
+`compact_tokens` sets Think's threshold. Native launches use scripts. Verify Messages/Responses routes. Seven-harness results show no universal lead.
