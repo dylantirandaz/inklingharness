@@ -21,9 +21,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     arguments = parser.parse_args()
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        parser.error("OPENROUTER_API_KEY is required")
-    config = JobConfig.model_validate_json(arguments.config.read_text())
+    text = arguments.config.read_text()
+    # Each job names the upstream key its recorder needs.
+    for variable in ("OPENROUTER_API_KEY", "PRIME_API_KEY"):
+        if "${" + variable + "}" in text and not os.environ.get(variable):
+            parser.error(f"{variable} is required")
+    config = JobConfig.model_validate_json(text)
     return asyncio.run(run(config))
 
 

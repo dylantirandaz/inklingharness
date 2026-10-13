@@ -1,4 +1,5 @@
-// Command harbor-wire records the real peer process and its OpenRouter traffic.
+// Command harbor-wire records the real peer process and its inference traffic,
+// sent to OpenRouter or to Prime Intellect Inference.
 package main
 
 import (
@@ -34,6 +35,41 @@ type wireProfile struct {
 	Provider  string `json:"provider"`
 	Effort    string `json:"effort"`
 	MaxTokens int    `json:"max_tokens"`
+	// Upstream is empty for OpenRouter, or "prime" for Prime Intellect
+	// Inference, which serves one route per model and takes no provider field.
+	Upstream string `json:"upstream,omitempty"`
+}
+
+const primeUpstream = "prime"
+
+// upstreamHost returns the API host; both serve /api/v1/messages and
+// /api/v1/responses at the same paths.
+func (p wireProfile) upstreamHost() string {
+	if p.Upstream == primeUpstream {
+		return "https://api.pinference.ai"
+	}
+	return "https://openrouter.ai"
+}
+
+func (p wireProfile) keyVariable() string {
+	if p.Upstream == primeUpstream {
+		return "PRIME_API_KEY"
+	}
+	return "OPENROUTER_API_KEY"
+}
+
+// upstreamBody drops the OpenRouter route after it was checked: Prime has no
+// provider routing, so the field would only be noise in its request.
+func upstreamBody(body []byte, fixed wireProfile) ([]byte, error) {
+	if fixed.Upstream != primeUpstream {
+		return body, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, err
+	}
+	delete(fields, "provider")
+	return json.Marshal(fields)
 }
 
 func defaultProfile() wireProfile {
@@ -89,7 +125,7 @@ func requestBody(body []byte, path string, policy messagesPolicy, fixed wireProf
 		if profile.MaxTokens != fixed.MaxTokens || profile.OutputConfig.Effort != fixed.Effort || len(profile.Provider.Order) != 1 || profile.Provider.Order[0] != fixed.Provider || profile.Provider.AllowFallbacks == nil || *profile.Provider.AllowFallbacks {
 			return nil, errors.New("Messages request differs from the fixed profile")
 		}
-		return body, nil
+		return upstreamBody(body, fixed)
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
@@ -123,7 +159,11 @@ func requestBody(body []byte, path string, policy messagesPolicy, fixed wireProf
 	default:
 		return nil, fmt.Errorf("unsupported endpoint %q", path)
 	}
-	fields["provider"] = fixed.route()
+	if fixed.Upstream == primeUpstream {
+		delete(fields, "provider")
+	} else {
+		fields["provider"] = fixed.route()
+	}
 	return json.Marshal(fields)
 }
 
@@ -136,7 +176,9 @@ type exchange struct {
 	StatusCode      *int      `json:"status_code"`
 	ContentType     string    `json:"content_type"`
 	ContentEncoding string    `json:"content_encoding"`
-	Error           *string   `json:"error"`
+	// UpstreamRequestID is Prime's X-Inference-Id for the call.
+	UpstreamRequestID string  `json:"upstream_request_id,omitempty"`
+	Error             *string `json:"error"`
 }
 
 type proxy struct {
@@ -228,7 +270,7 @@ func (p *proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			p.fail(err)
 		}
 	}()
-	upstream, err := http.NewRequestWithContext(request.Context(), request.Method, "https://openrouter.ai"+request.URL.RequestURI(), bytes.NewReader(forwarded))
+	upstream, err := http.NewRequestWithContext(request.Context(), request.Method, p.profile.upstreamHost()+request.URL.RequestURI(), bytes.NewReader(forwarded))
 	if err != nil {
 		reject(err, http.StatusInternalServerError, true)
 		return
@@ -239,8 +281,15 @@ func (p *proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	if request.Method == http.MethodPost {
 		upstream.Header.Set("Authorization", "Bearer "+p.key)
-		// Completed responses can lack a later generation lookup record.
-		upstream.Header.Set("X-OpenRouter-Metadata", "enabled")
+		if p.profile.Upstream != primeUpstream {
+			// Completed responses can lack a later generation lookup record.
+			upstream.Header.Set("X-OpenRouter-Metadata", "enabled")
+		}
+	}
+	if p.profile.Upstream == primeUpstream {
+		// Prime's edge rejects some client user agents; one fixed agent keeps
+		// every harness's requests equally admissible.
+		upstream.Header.Set("User-Agent", "harbor-wire/1")
 	}
 	upstream.Header.Set("Accept-Encoding", "identity")
 	response, err := p.client.Do(upstream)
@@ -252,6 +301,7 @@ func (p *proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	metadata.StatusCode = &response.StatusCode
 	metadata.ContentType = response.Header.Get("Content-Type")
 	metadata.ContentEncoding = response.Header.Get("Content-Encoding")
+	metadata.UpstreamRequestID = response.Header.Get("X-Inference-Id")
 	for name, values := range response.Header {
 		switch strings.ToLower(name) {
 		case "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade":
@@ -380,6 +430,7 @@ func childEnvironment(messagesURL, responsesURL string) []string {
 		"OPENROUTER_API_KEY":        "private-loopback-only",
 		"ANTHROPIC_AUTH_TOKEN":      "private-loopback-only",
 		"OPENAI_API_KEY":            "private-loopback-only",
+		"PRIME_API_KEY":             "private-loopback-only",
 		"ANTHROPIC_API_KEY":         "",
 	}
 	inherited := os.Environ()
@@ -439,6 +490,17 @@ func run(arguments []string) error {
 	flags.StringVar(&profile.Provider, "provider", profile.Provider, "the only OpenRouter provider slug, without fallbacks")
 	flags.StringVar(&profile.Effort, "effort", profile.Effort, "the reasoning effort every request uses")
 	flags.IntVar(&profile.MaxTokens, "max-tokens", profile.MaxTokens, "the output token cap every request uses")
+	flags.Func("upstream", "openrouter (default) or prime", func(value string) error {
+		switch value {
+		case "openrouter":
+			profile.Upstream = ""
+		case primeUpstream:
+			profile.Upstream = primeUpstream
+		default:
+			return fmt.Errorf("unknown upstream %q", value)
+		}
+		return nil
+	})
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -451,9 +513,9 @@ func run(arguments []string) error {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		return errors.New("harbor-wire requires native Linux amd64")
 	}
-	key, exists := os.LookupEnv("OPENROUTER_API_KEY")
+	key, exists := os.LookupEnv(profile.keyVariable())
 	if !exists || key == "" {
-		return errors.New("OPENROUTER_API_KEY is required")
+		return fmt.Errorf("%s is required", profile.keyVariable())
 	}
 	if err := os.Mkdir(*directory, 0o700); err != nil {
 		return err

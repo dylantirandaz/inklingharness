@@ -235,5 +235,71 @@ class ResponsesRouteTests(unittest.TestCase):
             self.assertIs(context.metadata["all_recorded_usage_complete"], False)
 
 
+def _write_prime_wire(logs: Path, *, forwarded_route: bool = False, inference_id: str | None = "req_1", returned_model: str | None = None) -> None:
+    profile = PROFILES["deepseek/deepseek-v4.1-flash"]
+    wire = logs / "wire"
+    record = wire / "0001"
+    record.mkdir(parents=True)
+    incoming = {
+        "model": profile.model, "max_tokens": profile.max_tokens,
+        "output_config": {"effort": profile.effort}, "provider": profile.route(),
+        "messages": [{"role": "user", "content": "Check the release date."}],
+    }
+    forwarded = dict(incoming)
+    if not forwarded_route:
+        forwarded.pop("provider")
+    (record / "incoming.json").write_text(json.dumps(incoming))
+    (record / "0001.request.json").write_text(json.dumps(forwarded))
+    (wire / "profile.json").write_text(json.dumps(profile.recorded()))
+    (wire / "run.json").write_text(json.dumps({"requests": 1}))
+    metadata: dict[str, object] = {
+        "path": "/api/v1/messages", "method": "POST", "status_code": 200,
+        "content_type": "text/event-stream; charset=utf-8", "content_encoding": "",
+    }
+    if inference_id is not None:
+        metadata["upstream_request_id"] = inference_id
+    (record / "metadata.json").write_text(json.dumps(metadata))
+    events = [
+        {"type": "message_start", "message": {"id": "msg_1", "model": returned_model or profile.model, "usage": {"input_tokens": 7738, "output_tokens": 1}}},
+        {"type": "message_delta", "usage": {"input_tokens": 7738, "output_tokens": 32, "cache_read_input_tokens": 7552}},
+        {"type": "message_stop"},
+    ]
+    (record / "0001.response.sse").write_text("".join("data: " + json.dumps(event) + "\n\n" for event in events))
+
+
+class PrimeRouteTests(unittest.TestCase):
+    def test_prime_record_is_verified_without_double_counting_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            logs = Path(directory)
+            _write_prime_wire(logs)
+            context = AgentContext()
+            populate_wire_context(logs, context)
+            # Prime's input_tokens already includes the cached prefix.
+            self.assertEqual(context.n_input_tokens, 7738)
+            self.assertEqual(context.n_cache_tokens, 7552)
+            self.assertEqual(context.n_output_tokens, 32)
+            assert context.metadata is not None
+            self.assertEqual(context.metadata["provider_verified_records"], 1)
+            self.assertEqual(context.metadata["usage_source"], "raw Prime Intellect wire responses")
+            audit_wire_providers(logs)
+            self.assertIn("-upstream", PROFILES["deepseek/deepseek-v4.1-flash"].wire_flags())
+
+    def test_prime_record_fails_without_evidence_or_with_a_forwarded_route(self) -> None:
+        cases = {
+            "route_forwarded": {"forwarded_route": True},
+            "no_inference_id": {"inference_id": None},
+            "wrong_model": {"returned_model": "deepseek/deepseek-v4-flash"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for name, options in cases.items():
+                with self.subTest(case=name):
+                    logs = Path(directory) / name
+                    _write_prime_wire(logs, **options)
+                    context = AgentContext()
+                    with self.assertRaises(ValueError):
+                        populate_wire_context(logs, context)
+                    self.assertIsNone(context.n_input_tokens)
+
+
 if __name__ == "__main__":
     unittest.main()

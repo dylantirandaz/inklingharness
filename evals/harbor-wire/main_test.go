@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -61,5 +62,24 @@ func TestRequestBodyRejectsOtherProfiles(t *testing.T) {
 	}
 	if _, err := requestBody([]byte(`{"model":"thinkingmachines/inkling-small","max_tokens":16384,"output_config":{"effort":"high"},"provider":{"order":["deepinfra/fp8"],"allow_fallbacks":false}}`), "/api/v1/messages", verifyMessages, defaultProfile()); err != nil {
 		t.Errorf("default profile rejected: %v", err)
+	}
+}
+
+func TestPrimeUpstreamStripsTheCheckedRoute(t *testing.T) {
+	prime := wireProfile{Model: "deepseek/deepseek-v4.1-flash", Provider: "prime", Effort: "max", MaxTokens: 128000, Upstream: primeUpstream}
+	if prime.upstreamHost() != "https://api.pinference.ai" || prime.keyVariable() != "PRIME_API_KEY" {
+		t.Fatalf("wrong Prime upstream: %s %s", prime.upstreamHost(), prime.keyVariable())
+	}
+	route := `"provider":{"order":["prime"],"allow_fallbacks":false}`
+	verified, err := requestBody([]byte(`{"model":"deepseek/deepseek-v4.1-flash","max_tokens":128000,"output_config":{"effort":"max"},`+route+`}`), "/api/v1/messages", verifyMessages, prime)
+	if err != nil || strings.Contains(string(verified), "provider") {
+		t.Fatalf("verified Messages body kept its route or failed: %s %v", verified, err)
+	}
+	normalized, err := requestBody([]byte(`{"model":"deepseek/deepseek-v4.1-flash","max_tokens":5,`+route+`}`), "/api/v1/messages", normalizeMessages, prime)
+	if err != nil || strings.Contains(string(normalized), "provider") || !strings.Contains(string(normalized), `"max_tokens":128000`) {
+		t.Fatalf("normalized Messages body is wrong: %s %v", normalized, err)
+	}
+	if _, err := requestBody([]byte(`{"model":"deepseek/deepseek-v4.1-flash","max_tokens":128000,"output_config":{"effort":"max"},"provider":{"order":["deepinfra/fp8"],"allow_fallbacks":false}}`), "/api/v1/messages", verifyMessages, prime); err == nil {
+		t.Fatal("a request with another route was accepted")
 	}
 }

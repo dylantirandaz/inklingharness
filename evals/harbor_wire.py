@@ -37,18 +37,27 @@ class WireProfile:
     price_input: float
     price_output: float
     price_cache_read: float
+    # "openrouter", or "prime" for Prime Intellect Inference. Harnesses send
+    # the same route either way; for Prime, harbor-wire checks and strips it.
+    upstream: str = "openrouter"
 
     def route(self) -> dict[str, object]:
         return {"order": [self.provider], "allow_fallbacks": False}
 
     def wire_flags(self) -> list[str]:
-        return [
+        flags = [
             "-model", self.model, "-provider", self.provider,
             "-effort", self.effort, "-max-tokens", str(self.max_tokens),
         ]
+        if self.upstream != "openrouter":
+            flags += ["-upstream", self.upstream]
+        return flags
 
     def recorded(self) -> dict[str, object]:
-        return {"model": self.model, "provider": self.provider, "effort": self.effort, "max_tokens": self.max_tokens}
+        recorded: dict[str, object] = {"model": self.model, "provider": self.provider, "effort": self.effort, "max_tokens": self.max_tokens}
+        if self.upstream != "openrouter":
+            recorded["upstream"] = self.upstream
+        return recorded
 
 
 PROFILES = {
@@ -64,10 +73,12 @@ PROFILES = {
         "openai/gpt-6-luna", "openai/gpt-6-luna-20260922", "openai", "OpenAI", "max", 128000, 1050000, 0.1, 0.5, 0.01
     ),
     # DeepSeek's own Terminal-Bench 4.0 result (31.2%) used maximum effort.
-    # DeepSeek's first-party route trains on prompts, so the run uses
-    # DeepInfra's fp8 route, which caches repeated prefixes.
+    # The run uses Prime Intellect Inference, billed to the Prime wallet that
+    # also pays for the sandboxes. Prime ignores the effort field on every
+    # endpoint (probed: low, high and max reason alike), so every harness gets
+    # Prime's default reasoning; harnesses still send max for uniformity.
     "deepseek/deepseek-v4.1-flash": WireProfile(
-        "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-20260910", "deepinfra/fp8", "DeepInfra", "max", 128000, 1048576, 0.14, 0.42, 0.0042
+        "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash", "prime", "Prime Intellect", "max", 128000, 1048576, 0.30, 1.20, 0.03, "prime"
     ),
 }
 
@@ -189,10 +200,16 @@ def _audit_request(directory: Path, endpoint: str, profile: WireProfile) -> None
     forwarded = _read_object(directory / "0001.request.json")
     if forwarded.get("model") != profile.model or incoming.get("model") != profile.model:
         raise ValueError(f"Wrong model in {directory}")
-    if forwarded.get("provider") != profile.route():
-        raise ValueError(f"Wrong provider profile in {directory}")
     expected = dict(incoming)
-    expected["provider"] = profile.route()
+    if profile.upstream == "prime":
+        # harbor-wire forwards no route to Prime.
+        if "provider" in forwarded:
+            raise ValueError(f"A route was forwarded to Prime in {directory}")
+        expected.pop("provider", None)
+    else:
+        if forwarded.get("provider") != profile.route():
+            raise ValueError(f"Wrong provider profile in {directory}")
+        expected["provider"] = profile.route()
     if endpoint == "/api/v1/messages":
         if forwarded.get("max_tokens") != profile.max_tokens or _object(forwarded.get("output_config")).get("effort") != profile.effort:
             raise ValueError(f"Wrong Messages profile in {directory}")
@@ -239,6 +256,17 @@ def _generation_metadata(identifier: str, directory: Path, profile: WireProfile)
     return metadata
 
 
+def _prime_error(response: dict[str, object], metadata: dict[str, object], profile: WireProfile) -> str | None:
+    """Prime serves one route per model: the returned model and Prime's own
+    inference ID are the provider evidence."""
+    if response.get("model") != profile.backend_model:
+        return "Missing or wrong returned model"
+    identifier = metadata.get("upstream_request_id")
+    if not isinstance(identifier, str) or not identifier:
+        return "Missing Prime inference ID"
+    return None
+
+
 def _route_error(response: dict[str, object], routing: dict[str, object] | None, profile: WireProfile) -> str | None:
     if routing is None:
         if response.get("model") != profile.model or response.get("provider") != profile.provider_name:
@@ -276,9 +304,10 @@ def _route_error(response: dict[str, object], routing: dict[str, object] | None,
 
 def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
     # Harbor must retain the first parse error, not repeat the hook during recovery.
-    context.metadata = {"usage_source": "raw OpenRouter wire responses", "all_recorded_usage_complete": False}
+    context.metadata = {"usage_source": "raw wire responses", "all_recorded_usage_complete": False}
     wire = logs_dir / "wire"
     profile = recorded_profile(wire)
+    source = "raw Prime Intellect wire responses" if profile.upstream == "prime" else "raw OpenRouter wire responses"
     run_path = wire / "run.json"
     run = _read_object(run_path) if run_path.exists() else None
     totals = {"input": 0, "cache": 0, "output": 0}
@@ -357,13 +386,18 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
             if response is None or not stopped:
                 failed += 1
                 continue
-            route_error = _route_error(response, routing, profile)
+            route_error = _prime_error(response, metadata, profile) if profile.upstream == "prime" else _route_error(response, routing, profile)
             if route_error is not None:
                 raise ValueError(f"{route_error} in {directory}")
             verified += 1
             if "input_tokens" in counters and "output_tokens" in counters:
                 complete += 1
-                totals["input"] += sum(counters.get(field, 0) for field in _TOKEN_FIELDS[:3])
+                if profile.upstream == "prime":
+                    # Prime's input_tokens already includes cache reads (probed:
+                    # 7738 input with 7552 cached on a repeated prefix).
+                    totals["input"] += counters["input_tokens"]
+                else:
+                    totals["input"] += sum(counters.get(field, 0) for field in _TOKEN_FIELDS[:3])
                 totals["cache"] += counters.get("cache_read_input_tokens", 0)
                 totals["output"] += counters["output_tokens"]
             else:
@@ -378,7 +412,12 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
             if not isinstance(identifier, str):
                 raise ValueError(f"Invalid response ID in {directory}")
             routing_value = response.get("openrouter_metadata")
-            if routing_value is None:
+            if profile.upstream == "prime":
+                route_error = _prime_error(response, metadata, profile)
+                if route_error is not None:
+                    raise ValueError(f"{route_error} in {directory}")
+                verified += 1
+            elif routing_value is None:
                 pending.append({"record": directory.name, "id": identifier})
             else:
                 route_error = _route_error(response, _object(routing_value), profile)
@@ -399,7 +438,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
         context.n_cache_tokens = totals["cache"]
         context.n_output_tokens = totals["output"]
     context.metadata = {
-        "usage_source": "raw OpenRouter wire responses",
+        "usage_source": source,
         "profile": asdict(profile),
         "response_records": len(records),
         "complete_response_records": complete,

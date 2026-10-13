@@ -25,7 +25,7 @@
       "import_path": "evals.harbor_pi_omp:PiAgent",
       "model_name": "deepseek/deepseek-v4.1-flash",
       "env": {
-        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+        "PRIME_API_KEY": "${PRIME_API_KEY}"
       },
       "kwargs": {
         "wire_binary_path": "out/terminal-bench/tb4/harbor-wire-linux-amd64",
