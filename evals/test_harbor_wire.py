@@ -7,12 +7,12 @@ import unittest
 
 from harbor.models.agent.context import AgentContext
 
-from evals.harbor_wire import MODEL, audit_wire_providers, populate_wire_context
+from evals.harbor_wire import MODEL, PROFILES, audit_wire_providers, populate_wire_context, profile_for
 
 
-def _routing(provider: str, model: str) -> dict[str, object]:
+def _routing(provider: str, model: str, requested: str = MODEL) -> dict[str, object]:
     return {
-        "requested": MODEL,
+        "requested": requested,
         "endpoints": {"available": [{"provider": provider, "model": model, "selected": True}]},
     }
 
@@ -50,6 +50,64 @@ def _write_wire(logs: Path, routing: dict[str, object] | None, terminated: bool)
     ]
     stream = "".join("data: " + json.dumps(event) + "\n\n" for event in events)
     (record / "0001.response.sse").write_text(stream if terminated else stream.rstrip("\n"))
+
+
+def _write_profiled_wire(logs: Path, profile_model: str, recorded: dict[str, object], routing: dict[str, object]) -> None:
+    """Write a Messages record made under another model's recorded profile."""
+    profile = PROFILES[profile_model]
+    _write_wire(logs, routing, True)
+    wire = logs / "wire"
+    request = {
+        "model": profile.model,
+        "max_tokens": profile.max_tokens,
+        "output_config": {"effort": profile.effort},
+        "provider": profile.route(),
+        "messages": [{"role": "user", "content": "Check the release date."}],
+    }
+    for name in ("incoming.json", "0001.request.json"):
+        (wire / "0001" / name).write_text(json.dumps(request))
+    (wire / "profile.json").write_text(json.dumps(recorded))
+
+
+class RecordedProfileTests(unittest.TestCase):
+    def test_astra_profile_is_audited_against_its_own_route(self) -> None:
+        astra = PROFILES["openai/gpt-6-astra"]
+        with tempfile.TemporaryDirectory() as directory:
+            logs = Path(directory)
+            _write_profiled_wire(logs, astra.model, astra.recorded(), _routing("OpenAI", astra.backend_model, astra.model))
+            context = AgentContext()
+            populate_wire_context(logs, context)
+            self.assertEqual(context.n_output_tokens, 595)
+            assert context.metadata is not None
+            self.assertEqual(context.metadata["profile"]["provider"], "openai")
+            audit_wire_providers(logs)
+            audit = json.loads((logs / "wire" / "provider-audit.json").read_text())
+            self.assertEqual(audit["backend_model"], "openai/gpt-6-astra-20260903")
+
+    def test_astra_record_fails_under_the_wrong_route_or_profile(self) -> None:
+        astra = PROFILES["openai/gpt-6-astra"]
+        cases = {
+            "inkling_backend": (astra.recorded(), _routing("DeepInfra", "thinkingmachines/inkling-small-20260730", astra.model)),
+            "azure_route": (astra.recorded(), _routing("Azure", astra.backend_model, astra.model)),
+            "changed_cap": ({**astra.recorded(), "max_tokens": 16384}, _routing("OpenAI", astra.backend_model, astra.model)),
+            "unknown_model": ({**astra.recorded(), "model": "openai/unknown"}, _routing("OpenAI", astra.backend_model, astra.model)),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for name, (recorded, routing) in cases.items():
+                with self.subTest(case=name):
+                    logs = Path(directory) / name
+                    _write_profiled_wire(logs, astra.model, recorded, routing)
+                    context = AgentContext()
+                    with self.assertRaises(ValueError):
+                        populate_wire_context(logs, context)
+                    self.assertIsNone(context.n_input_tokens)
+
+    def test_effort_override_is_part_of_the_recorded_profile(self) -> None:
+        high = profile_for("openai/gpt-6-astra", "high")
+        self.assertEqual(high.recorded()["effort"], "high")
+        self.assertIn("high", high.wire_flags())
+        with self.assertRaises(ValueError):
+            profile_for("openai/unknown")
 
 
 class MessagesRouteTests(unittest.TestCase):

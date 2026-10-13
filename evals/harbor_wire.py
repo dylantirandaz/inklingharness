@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from collections.abc import Iterator
+from dataclasses import asdict, dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -15,7 +16,77 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 MODEL = "thinkingmachines/inkling-small"
-_BACKEND_MODEL = "thinkingmachines/inkling-small-20260730"
+
+
+@dataclass(frozen=True)
+class WireProfile:
+    """The fixed inference profile of a run, enforced by harbor-wire.
+
+    provider is the OpenRouter route slug; provider_name and backend_model are
+    what OpenRouter reports for that route.
+    """
+
+    model: str
+    backend_model: str
+    provider: str
+    provider_name: str
+    effort: str
+    max_tokens: int
+    context_length: int
+    # Per-million-token prices on the route, for native cost displays only.
+    price_input: float
+    price_output: float
+    price_cache_read: float
+
+    def route(self) -> dict[str, object]:
+        return {"order": [self.provider], "allow_fallbacks": False}
+
+    def wire_flags(self) -> list[str]:
+        return [
+            "-model", self.model, "-provider", self.provider,
+            "-effort", self.effort, "-max-tokens", str(self.max_tokens),
+        ]
+
+    def recorded(self) -> dict[str, object]:
+        return {"model": self.model, "provider": self.provider, "effort": self.effort, "max_tokens": self.max_tokens}
+
+
+PROFILES = {
+    MODEL: WireProfile(MODEL, "thinkingmachines/inkling-small-20260730", "deepinfra/fp8", "DeepInfra", "high", 16384, 524288, 0.45, 1.2, 0.1),
+    # OpenAI's standard tier, priced as OpenAI's own API. The public Codex and
+    # Pi Terminal-Bench 4.0 jobs ran this model at xhigh with its full output.
+    "openai/gpt-6-astra": WireProfile(
+        "openai/gpt-6-astra", "openai/gpt-6-astra-20260903", "openai", "OpenAI", "xhigh", 128000, 1050000, 10.0, 50.0, 1.0
+    ),
+    # The official Terminal-Bench 4.0 entry for this model is Codex at max
+    # effort, so max is the matched setting.
+    "openai/gpt-6-luna": WireProfile(
+        "openai/gpt-6-luna", "openai/gpt-6-luna-20260922", "openai", "OpenAI", "max", 128000, 1050000, 0.1, 0.5, 0.01
+    ),
+}
+
+
+def profile_for(model_name: str, effort: str | None = None) -> WireProfile:
+    if model_name not in PROFILES:
+        raise ValueError(f"No wire profile for model {model_name!r}; known: {sorted(PROFILES)}")
+    profile = PROFILES[model_name]
+    return profile if effort is None else replace(profile, effort=effort)
+
+
+def recorded_profile(wire: Path) -> WireProfile:
+    """Return the profile harbor-wire enforced. Runs before profiles were
+    recorded used the Inkling Small profile."""
+    path = wire / "profile.json"
+    if not path.exists():
+        return PROFILES[MODEL]
+    recorded = _read_object(path)
+    model = recorded.get("model")
+    if not isinstance(model, str):
+        raise ValueError(f"Invalid recorded profile in {wire}")
+    profile = profile_for(model, recorded.get("effort") if isinstance(recorded.get("effort"), str) else None)
+    if profile.recorded() != recorded:
+        raise ValueError(f"Recorded profile {recorded} differs from the known profile {profile.recorded()} in {wire}")
+    return profile
 _TOKEN_FIELDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 
 
@@ -107,36 +178,36 @@ def _count(value: object) -> int:
     return value
 
 
-def _audit_request(directory: Path, endpoint: str) -> None:
+def _audit_request(directory: Path, endpoint: str, profile: WireProfile) -> None:
     incoming = _read_object(directory / "incoming.json")
     forwarded = _read_object(directory / "0001.request.json")
-    if forwarded.get("model") != MODEL or incoming.get("model") != MODEL:
+    if forwarded.get("model") != profile.model or incoming.get("model") != profile.model:
         raise ValueError(f"Wrong model in {directory}")
-    if forwarded.get("provider") != {"order": ["deepinfra/fp8"], "allow_fallbacks": False}:
+    if forwarded.get("provider") != profile.route():
         raise ValueError(f"Wrong provider profile in {directory}")
     expected = dict(incoming)
-    expected["provider"] = {"order": ["deepinfra/fp8"], "allow_fallbacks": False}
+    expected["provider"] = profile.route()
     if endpoint == "/api/v1/messages":
-        if forwarded.get("max_tokens") != 16384 or _object(forwarded.get("output_config")).get("effort") != "high":
+        if forwarded.get("max_tokens") != profile.max_tokens or _object(forwarded.get("output_config")).get("effort") != profile.effort:
             raise ValueError(f"Wrong Messages profile in {directory}")
-        expected["max_tokens"] = 16384
+        expected["max_tokens"] = profile.max_tokens
         output = dict(_object(incoming["output_config"])) if "output_config" in incoming else {}
-        output["effort"] = "high"
+        output["effort"] = profile.effort
         expected["output_config"] = output
         for field in ("thinking", "temperature"):
             if field not in forwarded:
                 expected.pop(field, None)
     elif endpoint == "/api/v1/responses":
-        if forwarded.get("max_output_tokens") != 16384 or _object(forwarded.get("reasoning")).get("effort") != "high":
+        if forwarded.get("max_output_tokens") != profile.max_tokens or _object(forwarded.get("reasoning")).get("effort") != profile.effort:
             raise ValueError(f"Wrong Responses profile in {directory}")
-        expected["max_output_tokens"] = 16384
+        expected["max_output_tokens"] = profile.max_tokens
     else:
         raise ValueError(f"Unsupported recorded endpoint {endpoint!r}")
     if forwarded != expected:
         raise ValueError(f"The recorder changed a prompt, tool, history, or other non-profile field in {directory}")
 
 
-def _generation_metadata(identifier: str, directory: Path) -> dict[str, object]:
+def _generation_metadata(identifier: str, directory: Path, profile: WireProfile) -> dict[str, object]:
     saved = directory / "generation.json"
     if saved.exists():
         body = saved.read_bytes()
@@ -156,18 +227,18 @@ def _generation_metadata(identifier: str, directory: Path) -> dict[str, object]:
             raise
     value: object = json.loads(body)
     metadata = _object(_object(value).get("data"))
-    if metadata.get("id") != identifier or metadata.get("provider_name") != "DeepInfra" or metadata.get("model") != _BACKEND_MODEL:
+    if metadata.get("id") != identifier or metadata.get("provider_name") != profile.provider_name or metadata.get("model") != profile.backend_model:
         raise ValueError(f"Wrong returned provider or model for {identifier}")
     saved.write_bytes(body)
     return metadata
 
 
-def _route_error(response: dict[str, object], routing: dict[str, object] | None) -> str | None:
+def _route_error(response: dict[str, object], routing: dict[str, object] | None, profile: WireProfile) -> str | None:
     if routing is None:
-        if response.get("model") != MODEL or response.get("provider") != "DeepInfra":
+        if response.get("model") != profile.model or response.get("provider") != profile.provider_name:
             return "Missing or wrong returned model or provider"
         return None
-    if routing.get("requested") != MODEL:
+    if routing.get("requested") != profile.model:
         return "Wrong requested model in routing metadata"
     endpoints = routing.get("endpoints")
     if not isinstance(endpoints, dict):
@@ -180,7 +251,7 @@ def _route_error(response: dict[str, object], routing: dict[str, object] | None)
         if not isinstance(endpoint, dict):
             return "Invalid routing endpoint"
         if endpoint.get("selected") is True:
-            if endpoint.get("model") != _BACKEND_MODEL or endpoint.get("provider") != "DeepInfra":
+            if endpoint.get("model") != profile.backend_model or endpoint.get("provider") != profile.provider_name:
                 return "Wrong selected backend"
             selected = True
     if not selected:
@@ -192,7 +263,7 @@ def _route_error(response: dict[str, object], routing: dict[str, object] | None)
         for attempt in attempts:
             if not isinstance(attempt, dict):
                 return "Invalid routing attempt"
-            if attempt.get("model") != _BACKEND_MODEL or attempt.get("provider") != "DeepInfra":
+            if attempt.get("model") != profile.backend_model or attempt.get("provider") != profile.provider_name:
                 return "Wrong attempted backend"
     return None
 
@@ -201,6 +272,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
     # Harbor must retain the first parse error, not repeat the hook during recovery.
     context.metadata = {"usage_source": "raw OpenRouter wire responses", "all_recorded_usage_complete": False}
     wire = logs_dir / "wire"
+    profile = recorded_profile(wire)
     run_path = wire / "run.json"
     run = _read_object(run_path) if run_path.exists() else None
     totals = {"input": 0, "cache": 0, "output": 0}
@@ -229,7 +301,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
         if metadata.get("status_code") != 200:
             failed += 1
             continue
-        _audit_request(directory, endpoint)
+        _audit_request(directory, endpoint, profile)
         if metadata.get("content_encoding") not in (None, "", "identity"):
             raise ValueError(f"Unexpected response encoding in {directory}")
         response_path = directory / "0001.response.sse"
@@ -279,7 +351,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
             if response is None or not stopped:
                 failed += 1
                 continue
-            route_error = _route_error(response, routing)
+            route_error = _route_error(response, routing, profile)
             if route_error is not None:
                 raise ValueError(f"{route_error} in {directory}")
             verified += 1
@@ -294,7 +366,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
             if response is None or not stopped:
                 failed += 1
                 continue
-            if response.get("model") != MODEL or not isinstance(response.get("id"), str):
+            if response.get("model") != profile.model or not isinstance(response.get("id"), str):
                 raise ValueError(f"Missing returned Responses identity in {directory}")
             identifier = response["id"]
             if not isinstance(identifier, str):
@@ -303,7 +375,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
             if routing_value is None:
                 pending.append({"record": directory.name, "id": identifier})
             else:
-                route_error = _route_error(response, _object(routing_value))
+                route_error = _route_error(response, _object(routing_value), profile)
                 if route_error is not None:
                     raise ValueError(f"{route_error} in {directory}")
                 verified += 1
@@ -322,6 +394,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
         context.n_output_tokens = totals["output"]
     context.metadata = {
         "usage_source": "raw OpenRouter wire responses",
+        "profile": asdict(profile),
         "response_records": len(records),
         "complete_response_records": complete,
         "failed_or_incomplete_records": failed,
@@ -340,6 +413,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
 def audit_wire_providers(logs_dir: Path) -> None:
     """Verify delayed provider metadata after the native task and grader finish."""
     wire = logs_dir / "wire"
+    profile = recorded_profile(wire)
     usage = _read_object(wire / "usage.json")
     if usage.get("all_recorded_usage_complete") is not True:
         raise ValueError(f"Native wire usage is incomplete in {wire}")
@@ -352,11 +426,11 @@ def audit_wire_providers(logs_dir: Path) -> None:
         identifier, name = entry.get("id"), entry.get("record")
         if not isinstance(identifier, str) or not isinstance(name, str) or not name.isdecimal():
             raise ValueError(f"Invalid provider audit entry in {wire}")
-        _generation_metadata(identifier, wire / name)
+        _generation_metadata(identifier, wire / name, profile)
         verified += 1
     if verified != usage.get("inference_records"):
         raise ValueError(f"Missing provider evidence in {wire}")
-    (wire / "provider-audit.json").write_text(json.dumps({"verified_inference_records": verified, "provider": "DeepInfra", "model": MODEL}, indent=2) + "\n")
+    (wire / "provider-audit.json").write_text(json.dumps({"verified_inference_records": verified, "provider": profile.provider_name, "model": profile.model, "backend_model": profile.backend_model}, indent=2) + "\n")
 
 
 def main() -> int:

@@ -15,9 +15,11 @@ from harbor.models.agent.context import AgentContext
 
 from evals.harbor_wire import (
     MODEL,
+    WireProfile,
     exec_wire,
     install_wire,
     populate_wire_context,
+    profile_for,
     validate_linux_binary,
 )
 
@@ -41,12 +43,22 @@ def _isolated_env(peer: str) -> dict[str, str]:
     }
 
 
-def _launch_command(arguments: list[str], bin_dir: str) -> str:
+def _route_env(profile: WireProfile) -> dict[str, str]:
+    """Model metadata for the route extensions, which register the provider."""
+    return {
+        "HARBOR_MODEL_ID": profile.model,
+        "HARBOR_MODEL_CONTEXT": str(profile.context_length),
+        "HARBOR_MODEL_MAX_TOKENS": str(profile.max_tokens),
+        "HARBOR_MODEL_PRICES": f"{profile.price_input},{profile.price_output},{profile.price_cache_read}",
+    }
+
+
+def _launch_command(arguments: list[str], bin_dir: str, profile: WireProfile) -> str:
     # PATH expansion happens in the task shell, never on the controller host.
     return (
         f'export PATH={shlex.quote(bin_dir)}:"$PATH"; '
         "exec /installed-agent/harbor-wire "
-        f"-logs {_LOGS}/wire -messages-policy normalize -- "
+        f"-logs {_LOGS}/wire -messages-policy normalize {shlex.join(profile.wire_flags())} -- "
         f"{shlex.join(arguments)} </dev/null "
         f">{_LOGS}/events.jsonl 2>{_LOGS}/stderr.log"
     )
@@ -64,9 +76,9 @@ class PiAgent(BaseInstalledAgent):
         logger: logging.Logger | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
+        effort: str | None = None,
     ) -> None:
-        if model_name != MODEL:
-            raise ValueError(f"PiAgent requires model_name={MODEL!r}")
+        self._profile = profile_for(model_name, effort)
         if version not in (None, _PI_VERSION):
             raise ValueError(f"PiAgent requires version={_PI_VERSION!r}")
         self._wire_binary_path = validate_linux_binary(wire_binary_path)
@@ -116,7 +128,7 @@ class PiAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
-        env = _isolated_env("pi")
+        env = {**_isolated_env("pi"), **_route_env(self._profile)}
         await self.exec_as_agent(
             environment,
             command='umask 077; mkdir -p "$PI_CODING_AGENT_DIR"',
@@ -126,12 +138,12 @@ class PiAgent(BaseInstalledAgent):
             f"{_PI_BIN}/pi",
             "--offline", "--no-extensions", "--no-skills", "--no-prompt-templates",
             "--no-themes", "--no-context-files", "--approve", "--no-session",
-            "--provider", "inkling-eval", "--model", MODEL,
-            "--thinking", "high", "--extension", "/installed-agent/pi-route.ts",
+            "--provider", "inkling-eval", "--model", self._profile.model,
+            "--thinking", self._profile.effort, "--extension", "/installed-agent/pi-route.ts",
             "--mode", "json", "--print", "--", instruction,
         ]
         await exec_wire(
-            self, environment, command=_launch_command(arguments, _PI_BIN), env=env
+            self, environment, command=_launch_command(arguments, _PI_BIN, self._profile), env=env
         )
         # Harbor synchronizes logs before calling populate_context_post_run.
 
@@ -224,7 +236,7 @@ class OMPAgent(BaseInstalledAgent):
             "--", instruction,
         ]
         await exec_wire(
-            self, environment, command=_launch_command(arguments, _OMP_BIN), env=env
+            self, environment, command=_launch_command(arguments, _OMP_BIN, profile_for(MODEL)), env=env
         )
 
     def populate_context_post_run(self, context: AgentContext) -> None:

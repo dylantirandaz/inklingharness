@@ -13,8 +13,8 @@ does. Harbor owns the task timeout.
 
 The model comes from a user-defined provider named harbor-wire. It uses the
 anthropic_messages transport, so Hermes keeps the model name unchanged. In -z
-mode Hermes sends no reasoning settings. The recorder sets high effort, the
-16384-token output cap, and the route policy. The Responses transport is not
+mode Hermes sends no reasoning settings. The recorder sets the profile's
+effort, output cap, and route policy. The Responses transport is not
 used. Without a reasoning setting it sends medium effort, and the recorder
 rejects that. Auxiliary tasks such as compression and titles default to the
 main provider and model.
@@ -43,9 +43,11 @@ from harbor.models.agent.context import AgentContext
 
 from evals.harbor_wire import (
     MODEL,
+    WireProfile,
     exec_wire,
     install_wire,
     populate_wire_context,
+    profile_for,
     validate_linux_binary,
 )
 
@@ -99,32 +101,34 @@ def install_command() -> str:
     )
 
 
-def config_content() -> str:
+def config_content(profile: WireProfile | None = None) -> str:
     # Hermes expands ${VAR} when it loads config, inside the recorder child.
+    profile = profile or profile_for(MODEL)
     return (
         "model:\n"
         f"  provider: {_PROVIDER}\n"
-        f"  default: {MODEL}\n"
-        "  context_length: 524288\n"
-        "  max_tokens: 16384\n"
+        f"  default: {profile.model}\n"
+        f"  context_length: {profile.context_length}\n"
+        f"  max_tokens: {profile.max_tokens}\n"
         "providers:\n"
         f"  {_PROVIDER}:\n"
         f"    name: {_PROVIDER}\n"
         "    base_url: ${HERMES_WIRE_BASE_URL}\n"
         "    key_env: HARBOR_WIRE_TOKEN\n"
         "    api_mode: anthropic_messages\n"
-        f"    default_model: {MODEL}\n"
+        f"    default_model: {profile.model}\n"
     )
 
 
-def child_command() -> str:
+def child_command(profile: WireProfile | None = None) -> str:
     """Start the filter, then exec Hermes so the recorder samples Hermes itself."""
+    profile = profile or profile_for(MODEL)
     port_file = f"{_LOGS}/hermes-filter.port"
     hermes = [
         _EXECUTABLE,
         "-z", '"$1"',
         "--provider", _PROVIDER,
-        "-m", MODEL,
+        "-m", profile.model,
         "--usage-file", f"{_LOGS}/hermes-usage.json",
     ]
     return (
@@ -157,9 +161,9 @@ class HermesAgent(BaseInstalledAgent):
         logger: logging.Logger | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
+        effort: str | None = None,
     ) -> None:
-        if model_name != MODEL:
-            raise ValueError(f"HermesAgent requires model_name={MODEL!r}")
+        self._profile = profile_for(model_name, effort)
         if version not in (None, _VERSION):
             raise ValueError(f"HermesAgent requires version={_VERSION!r}")
         self._wire_binary_path = validate_linux_binary(wire_binary_path)
@@ -206,12 +210,12 @@ class HermesAgent(BaseInstalledAgent):
                 "printf '%s\\n' 'Hermes requires an isolated managed scope' >&2; "
                 "exit 1; fi; "
                 'mkdir -p "$HERMES_HOME"; '
-                f"printf %s {shlex.quote(config_content())} "
+                f"printf %s {shlex.quote(config_content(self._profile))} "
                 '>"$HERMES_HOME/config.yaml"'
             ),
             env=env,
         )
-        arguments = ["/bin/bash", "-c", child_command(), "hermes-wire", instruction]
+        arguments = ["/bin/bash", "-c", child_command(self._profile), "hermes-wire", instruction]
         # -z prints only the final response; the session store, agent.log,
         # and usage report stay under /logs/agent for Harbor to sync.
         await exec_wire(
@@ -219,7 +223,7 @@ class HermesAgent(BaseInstalledAgent):
             environment,
             command=(
                 "exec /installed-agent/harbor-wire "
-                f"-logs {_LOGS}/wire -messages-policy normalize -- "
+                f"-logs {_LOGS}/wire -messages-policy normalize {shlex.join(self._profile.wire_flags())} -- "
                 f"{shlex.join(arguments)} </dev/null "
                 f">{_LOGS}/final-response.txt 2>{_LOGS}/stderr.log"
             ),

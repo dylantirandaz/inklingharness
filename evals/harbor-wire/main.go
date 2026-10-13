@@ -26,9 +26,28 @@ import (
 	"github.com/dylantirandaz/inklingharness/internal/record"
 )
 
-const model = "thinkingmachines/inkling-small"
+// wireProfile is the fixed inference profile of one run: the model, the one
+// OpenRouter provider it may use, the reasoning effort, and the output cap.
+// The defaults are the Inkling Small profile of the earlier comparisons.
+type wireProfile struct {
+	Model     string `json:"model"`
+	Provider  string `json:"provider"`
+	Effort    string `json:"effort"`
+	MaxTokens int    `json:"max_tokens"`
+}
 
-var fixedRoute = json.RawMessage(`{"order":["deepinfra/fp8"],"allow_fallbacks":false}`)
+func defaultProfile() wireProfile {
+	return wireProfile{Model: "thinkingmachines/inkling-small", Provider: "deepinfra/fp8", Effort: "high", MaxTokens: 16384}
+}
+
+func (p wireProfile) route() json.RawMessage {
+	encoded, err := json.Marshal(map[string]any{"order": []string{p.Provider}, "allow_fallbacks": false})
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
 var copyBuffers sync.Pool
 
 type messagesPolicy string
@@ -53,16 +72,21 @@ type requestProfile struct {
 	} `json:"provider"`
 }
 
-func requestBody(body []byte, path string, policy messagesPolicy) ([]byte, error) {
+func requestBody(body []byte, path string, policy messagesPolicy, fixed wireProfile) ([]byte, error) {
 	var profile requestProfile
 	if err := json.Unmarshal(body, &profile); err != nil {
 		return nil, fmt.Errorf("decode request profile: %w", err)
 	}
-	if profile.Model != model {
-		return nil, fmt.Errorf("expected model %q, got %q", model, profile.Model)
+	if profile.Model != fixed.Model {
+		return nil, fmt.Errorf("expected model %q, got %q", fixed.Model, profile.Model)
+	}
+	maxTokens := json.RawMessage(strconv.Itoa(fixed.MaxTokens))
+	effort, err := json.Marshal(fixed.Effort)
+	if err != nil {
+		return nil, err
 	}
 	if path == "/api/v1/messages" && policy == verifyMessages {
-		if profile.MaxTokens != 16384 || profile.OutputConfig.Effort != "high" || len(profile.Provider.Order) != 1 || profile.Provider.Order[0] != "deepinfra/fp8" || profile.Provider.AllowFallbacks == nil || *profile.Provider.AllowFallbacks {
+		if profile.MaxTokens != fixed.MaxTokens || profile.OutputConfig.Effort != fixed.Effort || len(profile.Provider.Order) != 1 || profile.Provider.Order[0] != fixed.Provider || profile.Provider.AllowFallbacks == nil || *profile.Provider.AllowFallbacks {
 			return nil, errors.New("Messages request differs from the fixed profile")
 		}
 		return body, nil
@@ -78,28 +102,28 @@ func requestBody(body []byte, path string, policy messagesPolicy) ([]byte, error
 		}
 		delete(fields, "thinking")
 		delete(fields, "temperature")
-		fields["max_tokens"] = json.RawMessage(`16384`)
+		fields["max_tokens"] = maxTokens
 		output := make(map[string]json.RawMessage)
 		if existing, exists := fields["output_config"]; exists {
 			if err := json.Unmarshal(existing, &output); err != nil || output == nil {
 				return nil, errors.New("output_config must be an object")
 			}
 		}
-		output["effort"] = json.RawMessage(`"high"`)
+		output["effort"] = effort
 		encoded, err := json.Marshal(output)
 		if err != nil {
 			return nil, err
 		}
 		fields["output_config"] = encoded
 	case "/api/v1/responses":
-		if profile.Reasoning.Effort != "high" {
-			return nil, errors.New("Responses request must use native high reasoning effort")
+		if profile.Reasoning.Effort != fixed.Effort {
+			return nil, fmt.Errorf("Responses request must use native %s reasoning effort", fixed.Effort)
 		}
-		fields["max_output_tokens"] = json.RawMessage(`16384`)
+		fields["max_output_tokens"] = maxTokens
 	default:
 		return nil, fmt.Errorf("unsupported endpoint %q", path)
 	}
-	fields["provider"] = fixedRoute
+	fields["provider"] = fixed.route()
 	return json.Marshal(fields)
 }
 
@@ -119,6 +143,7 @@ type proxy struct {
 	directory string
 	key       string
 	policy    messagesPolicy
+	profile   wireProfile
 	client    *http.Client
 	sequence  atomic.Uint64
 	failure   chan error
@@ -180,7 +205,7 @@ func (p *proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	forwarded := body
 	if request.Method == http.MethodPost {
-		forwarded, err = requestBody(body, request.URL.Path, p.policy)
+		forwarded, err = requestBody(body, request.URL.Path, p.policy, p.profile)
 		if err != nil {
 			reject(err, http.StatusBadRequest, true)
 			return
@@ -409,8 +434,16 @@ func run(arguments []string) error {
 			return fmt.Errorf("unknown Messages policy %q", value)
 		}
 	})
+	profile := defaultProfile()
+	flags.StringVar(&profile.Model, "model", profile.Model, "the only OpenRouter model the child may request")
+	flags.StringVar(&profile.Provider, "provider", profile.Provider, "the only OpenRouter provider slug, without fallbacks")
+	flags.StringVar(&profile.Effort, "effort", profile.Effort, "the reasoning effort every request uses")
+	flags.IntVar(&profile.MaxTokens, "max-tokens", profile.MaxTokens, "the output token cap every request uses")
 	if err := flags.Parse(arguments); err != nil {
 		return err
+	}
+	if profile.Model == "" || profile.Provider == "" || profile.Effort == "" || profile.MaxTokens <= 0 {
+		return errors.New("model, provider, effort, and a positive max-tokens are required")
 	}
 	if directory == nil || policy == nil || len(flags.Args()) == 0 {
 		return errors.New("logs, messages-policy, and a child command are required")
@@ -426,6 +459,13 @@ func run(arguments []string) error {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(*directory, "pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		return err
+	}
+	encodedProfile, err := json.Marshal(profile)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(*directory, "profile.json"), append(encodedProfile, '\n'), 0o600); err != nil {
 		return err
 	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -444,7 +484,7 @@ func run(arguments []string) error {
 	transport := defaultTransport.Clone()
 	transport.DisableCompression = true
 	defer transport.CloseIdleConnections()
-	handler := &proxy{directory: *directory, key: key, policy: *policy, client: &http.Client{Transport: transport}, failure: make(chan error, 1), cancel: cancelProxy}
+	handler := &proxy{directory: *directory, key: key, policy: *policy, profile: profile, client: &http.Client{Transport: transport}, failure: make(chan error, 1), cancel: cancelProxy}
 	server := &http.Server{Handler: handler}
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {

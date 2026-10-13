@@ -1,10 +1,13 @@
-"""Run the prebuilt think CLI with the fixed Terminal-Bench profile.
+"""Run the prebuilt think CLI with a fixed wire profile.
 
-compact_tokens sets the existing CLI threshold; None keeps the binary default.
+The model selects its profile in evals.harbor_wire.PROFILES; effort overrides
+the profile's effort. compact_tokens sets the existing CLI threshold; None
+keeps the binary default.
 Without an explicit source version, identify the binary by its SHA-256 digest.
 """
 
 import hashlib
+import json
 import logging
 import shlex
 from pathlib import Path
@@ -13,7 +16,7 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from evals.harbor_wire import MODEL, exec_wire, install_wire, populate_wire_context, validate_linux_binary
+from evals.harbor_wire import exec_wire, install_wire, populate_wire_context, profile_for, validate_linux_binary
 
 
 _BINARY = "/installed-agent/think"
@@ -32,9 +35,9 @@ class InklingAgent(BaseInstalledAgent):
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
         compact_tokens: int | None = None,
+        effort: str | None = None,
     ) -> None:
-        if model_name != MODEL:
-            raise ValueError(f"InklingAgent requires model_name={MODEL!r}")
+        self._profile = profile_for(model_name, effort)
         if compact_tokens is not None and compact_tokens < 0:
             raise ValueError("compact_tokens must be nonnegative")
         self._compact_tokens = compact_tokens
@@ -70,13 +73,13 @@ class InklingAgent(BaseInstalledAgent):
         arguments = [
             _BINARY,
             "run",
-            "-model", MODEL,
-            "-effort", "high",
-            "-max-tokens", "16384",
+            "-model", self._profile.model,
+            "-effort", self._profile.effort,
+            "-max-tokens", str(self._profile.max_tokens),
             "-max-turns", "10000",
             "-yes",
             "-json",
-            "-extra", '{"provider":{"order":["deepinfra/fp8"],"allow_fallbacks":false}}',
+            "-extra", json.dumps({"provider": self._profile.route()}, separators=(",", ":")),
         ]
         if self._compact_tokens is not None:
             arguments.extend(["-compact-tokens", str(self._compact_tokens)])
@@ -89,7 +92,7 @@ class InklingAgent(BaseInstalledAgent):
             self, environment,
             command=(
                 "exec /installed-agent/harbor-wire "
-                f"-logs {_LOGS}/wire -messages-policy normalize -- "
+                f"-logs {_LOGS}/wire -messages-policy normalize {shlex.join(self._profile.wire_flags())} -- "
                 f"{shlex.join(child)} </dev/null "
                 f">{_LOGS}/events.jsonl 2>{_LOGS}/stderr.log"
             ),

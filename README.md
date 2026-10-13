@@ -60,3 +60,5 @@ python -m evals.harbor_wire out/terminal-bench/jobs/terminal-bench-2.0-native
 ```
 
 `compact_tokens` sets Think's threshold. Native launches use scripts. Verify Messages/Responses routes. Seven-harness results show no universal lead.
+
+Terminal-Bench 4.0 (66 tasks, part of the Artificial Analysis Coding Agent Index) compares harnesses on one model. `evals/tb4-luna/` holds one job per harness (Think, Pi, Claude Code, Codex 0.151.0, Hermes) on `openai/gpt-6-luna` at max effort: the official board's Codex entry (16.4%) is the anchor. Controls match the public Terminal-Bench 4.0 jobs: dataset digest `sha256:39d9f44b…`, Modal, timeout multiplier 1.0, three attempts per task. Use Harbor 0.24.0, and build both binaries into `out/terminal-bench/tb4/`. Each model's route, effort and output cap live in `PROFILES` in `evals/harbor_wire.py`; harbor-wire enforces them and records them in `profile.json`, and the audit checks each trial against it. Public per-task results for GPT-6 Astra (Codex, Pi, Reason) are in `out/reference-tb4/`.

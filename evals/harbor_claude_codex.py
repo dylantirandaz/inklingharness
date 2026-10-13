@@ -18,10 +18,10 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from evals.harbor_wire import (
-    MODEL,
     exec_wire,
     install_wire,
     populate_wire_context,
+    profile_for,
     validate_linux_binary,
 )
 
@@ -34,6 +34,9 @@ _PREFIX = f"{_ROOT}/npm"
 
 class _NativePeer(BaseInstalledAgent):
     PINNED_VERSION: ClassVar[str]
+    # Other released versions a comparison may pin, for example to match a
+    # public job.
+    ALLOWED_VERSIONS: ClassVar[tuple[str, ...]] = ()
     PACKAGE: ClassVar[str]
     EXECUTABLE: ClassVar[str]
 
@@ -46,18 +49,19 @@ class _NativePeer(BaseInstalledAgent):
         logger: logging.Logger | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
+        effort: str | None = None,
     ) -> None:
-        if model_name != MODEL:
-            raise ValueError(f"This comparison requires model {MODEL!r}")
-        if version is not None and version != self.PINNED_VERSION:
-            raise ValueError(f"This peer requires version {self.PINNED_VERSION!r}")
+        self._profile = profile_for(model_name, effort)
+        if version is not None and version != self.PINNED_VERSION and version not in self.ALLOWED_VERSIONS:
+            raise ValueError(f"This peer supports versions {(self.PINNED_VERSION, *self.ALLOWED_VERSIONS)!r}")
+        self._package_version = version or self.PINNED_VERSION
         self._wire_binary = validate_linux_binary(wire_binary_path)
         super().__init__(
             logs_dir=logs_dir,
             model_name=model_name,
             logger=logger,
             extra_env=extra_env,
-            version=self.PINNED_VERSION,
+            version=self._package_version,
         )
 
     async def install(self, environment: BaseEnvironment) -> None:
@@ -79,7 +83,7 @@ class _NativePeer(BaseInstalledAgent):
                 f"{_HOME}/.local/state {_HOME}/.cache {_HOME}/claude {_HOME}/codex && "
                 + nvm_node_install_snippet()
                 + f" && npm install --prefix {_PREFIX} -g "
-                + shlex.quote(f"{self.PACKAGE}@{self.PINNED_VERSION}")
+                + shlex.quote(f"{self.PACKAGE}@{self._package_version}")
                 + f' && ln -sf "$(command -v node)" {_BIN}/node'
                 + f" && {{ {_PREFIX}/bin/{self.EXECUTABLE} --version && "
                 + "node --version && npm --version && uname -srm; } "
@@ -100,7 +104,7 @@ class _NativePeer(BaseInstalledAgent):
             command=(
                 f'export PATH={_BIN}:{_PREFIX}/bin:"$PATH"; '
                 "exec /installed-agent/harbor-wire "
-                f"-logs {_LOGS}/wire -messages-policy verify -- "
+                f"-logs {_LOGS}/wire -messages-policy verify {shlex.join(self._profile.wire_flags())} -- "
                 f"{shlex.join(arguments)} </dev/null "
                 f">{_LOGS}/events.jsonl 2>{_LOGS}/stderr.log"
             ),
@@ -127,16 +131,18 @@ class ClaudeCodeAgent(_NativePeer):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        profile = self._profile
+        model = profile.model
         env = {
             "CLAUDE_CONFIG_DIR": f"{_HOME}/claude",
-            "ANTHROPIC_MODEL": MODEL,
-            "ANTHROPIC_SMALL_FAST_MODEL": MODEL,
-            "CLAUDE_CODE_SUBAGENT_MODEL": MODEL,
-            "ANTHROPIC_DEFAULT_FABLE_MODEL": MODEL,
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": MODEL,
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": MODEL,
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": MODEL,
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384",
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_SMALL_FAST_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(profile.max_tokens),
             "CLAUDE_CODE_MAX_RETRIES": "0",
             "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -144,9 +150,9 @@ class ClaudeCodeAgent(_NativePeer):
             "IS_SANDBOX": "1",
             "CLAUDE_CODE_EXTRA_BODY": json.dumps(
                 {
-                    "provider": {"order": ["deepinfra/fp8"], "allow_fallbacks": False},
-                    "output_config": {"effort": "high"},
-                    "max_tokens": 16384,
+                    "provider": profile.route(),
+                    "output_config": {"effort": profile.effort},
+                    "max_tokens": profile.max_tokens,
                 },
                 separators=(",", ":"),
             ),
@@ -165,8 +171,8 @@ class ClaudeCodeAgent(_NativePeer):
                 "--dangerously-skip-permissions",
                 "--setting-sources", "",
                 "--strict-mcp-config",
-                "--model", MODEL,
-                "--effort", "high",
+                "--model", model,
+                "--effort", profile.effort,
                 "--", instruction,
             ],
             env,
@@ -175,6 +181,8 @@ class ClaudeCodeAgent(_NativePeer):
 
 class CodexAgent(_NativePeer):
     PINNED_VERSION = "0.146.0"
+    # The public Terminal-Bench 4.0 Codex jobs ran 0.151.0.
+    ALLOWED_VERSIONS = ("0.151.0",)
     PACKAGE = "@openai/codex"
     EXECUTABLE = "codex"
 
@@ -213,9 +221,10 @@ class CodexAgent(_NativePeer):
             "--json",
         ]
         for setting in (
-            f'model="{MODEL}"',
+            f'model="{self._profile.model}"',
             'model_provider="canary_openrouter"',
-            'model_reasoning_effort="high"',
+            f'model_reasoning_effort="{self._profile.effort}"',
+            f"model_context_window={self._profile.context_length}",
             'model_providers.canary_openrouter.name="Private OpenRouter Responses canary"',
             'model_providers.canary_openrouter.env_key="OPENROUTER_API_KEY"',
             'model_providers.canary_openrouter.wire_api="responses"',
