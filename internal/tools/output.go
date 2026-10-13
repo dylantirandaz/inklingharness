@@ -180,7 +180,7 @@ func (c *outputCollector) finish() string {
 	}
 	first, second := c.orderedTail()
 	if c.total <= outputInlineBytes {
-		return string(c.head) + string(first)
+		return cleanTerminalText(string(c.head) + string(first))
 	}
 	head := trimIncompleteRuneEnd(c.head)
 	tail := trimIncompleteRuneStart(append(append(make([]byte, 0, outputTailBytes), first...), second...))
@@ -188,7 +188,7 @@ func (c *outputCollector) finish() string {
 
 	var text strings.Builder
 	text.Grow(len(head) + len(tail) + 512)
-	text.Write(head)
+	text.WriteString(cleanTerminalText(string(head)))
 	if !bytes.HasSuffix(head, []byte("\n")) {
 		text.WriteByte('\n')
 	}
@@ -206,7 +206,7 @@ func (c *outputCollector) finish() string {
 		text.WriteString("full output was not saved: " + strings.ReplaceAll(c.saveErr.Error(), "\n", "; "))
 	}
 	text.WriteString("]\n")
-	text.Write(tail)
+	text.WriteString(cleanTerminalText(string(tail)))
 	return text.String()
 }
 
