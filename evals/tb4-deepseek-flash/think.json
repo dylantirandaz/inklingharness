@@ -16,7 +16,7 @@
     ]
   },
   "environment": {
-    "type": "modal",
+    "type": "prime",
     "cpu_enforcement_policy": "auto",
     "memory_enforcement_policy": "auto"
   },
