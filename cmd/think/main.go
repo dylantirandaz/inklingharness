@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,6 +28,7 @@ import (
 	"github.com/dylantirandaz/inklingharness/internal/record"
 	"github.com/dylantirandaz/inklingharness/internal/session"
 	"github.com/dylantirandaz/inklingharness/internal/terminal"
+	"github.com/dylantirandaz/inklingharness/internal/tinker"
 	"github.com/dylantirandaz/inklingharness/internal/tools"
 )
 
@@ -219,7 +221,8 @@ func (o *options) client() (*anthropic.Client, error) {
 		}
 		recorder = directoryRecorder
 	}
-	return anthropic.NewClient(apiKey, o.baseURL, recorder), nil
+	// tinker:// models are fine-tuned checkpoints that Tinker serves.
+	return anthropic.NewClientWithTransport(apiKey, o.baseURL, recorder, tinker.NewTransport(http.DefaultTransport)), nil
 }
 
 // prewarm opens the API connection while the command prepares its first

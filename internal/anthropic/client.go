@@ -46,6 +46,12 @@ func NewClient(apiKey, baseURL string, recorder Recorder) *Client {
 	return &Client{httpClient: &http.Client{}, baseURL: baseURL, apiKey: apiKey, recorder: recorder}
 }
 
+// NewClientWithTransport builds a client whose requests go through transport,
+// for example one that serves some models from another API.
+func NewClientWithTransport(apiKey, baseURL string, recorder Recorder, transport http.RoundTripper) *Client {
+	return &Client{httpClient: &http.Client{Transport: transport}, baseURL: baseURL, apiKey: apiKey, recorder: recorder}
+}
+
 // ToolDefinition describes one tool to the model.
 type ToolDefinition struct {
 	Name        string          `json:"name"`

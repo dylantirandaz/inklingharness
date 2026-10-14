@@ -41,6 +41,7 @@ const chatHelp = `Commands:
   /plan TASK        investigate with read-only tools and reply with a plan
   /goal [CMD|off]   keep working until CMD passes (at most 5 rounds); off clears it
   /context          show what fills the context window
+  /tinker [MODEL]   fine-tune MODEL on your sessions with Tinker and switch to it; no MODEL shows progress
   /undo             restore the files and conversation from before the last prompt
   /rewind [N]       list prompts, or restore the state from before prompt N
   /quit             save and exit
@@ -506,6 +507,8 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	// sends next, without user input.
 	var activeGoal goal
 	var queued string
+	// tinkerWatch switches the chat to each checkpoint that /tinker trains.
+	tinkerWatch := &tinkerWatcher{}
 	for {
 		var line string
 		var err error
@@ -560,6 +563,9 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		if err != nil {
 			fmt.Fprintf(stderr, "inkling: read prompt: %v\n", errors.Join(err, stopBackground()))
 			return 1
+		}
+		if model, switched := tinkerWatch.poll(stderr); switched {
+			o.model, current.Model = model, model
 		}
 		commandText := strings.TrimSpace(line)
 		if commandText == "" {
@@ -761,6 +767,23 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				}
 				if step == goalContinue {
 					queued = prompt
+				}
+				continue
+			case "/tinker":
+				if err := awaitBackground(); err != nil {
+					fmt.Fprintf(stderr, "inkling: %v\n", err)
+					return 1
+				}
+				if err := store.Save(current); err != nil {
+					fmt.Fprintf(stderr, "inkling: save session: %v\n", err)
+					return 1
+				}
+				config, configErr := chatConfig(o, projectContext, ext, store)
+				if configErr == nil {
+					configErr = tinkerWatch.command(stderr, argument, store, projectContext.WorkDir, config.System, agent.RequestTools(config, toolSet))
+				}
+				if configErr != nil {
+					fmt.Fprintf(stderr, "inkling: tinker: %v\n", configErr)
 				}
 				continue
 			case "/context":
