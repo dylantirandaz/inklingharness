@@ -1,3 +1,5 @@
 /think
 /inkling
 /out/
+__pycache__/
+/omp-session-*.html
