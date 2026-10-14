@@ -62,3 +62,13 @@ python -m evals.harbor_wire out/terminal-bench/jobs/terminal-bench-2.0-native
 `compact_tokens` sets Think's threshold. Native launches use scripts. Verify Messages/Responses routes. Seven-harness results show no universal lead.
 
 Terminal-Bench 4.0 (66 tasks, part of the Artificial Analysis Coding Agent Index) compares harnesses on one model. `evals/tb4-luna/` holds one job per harness (Think, Pi, Claude Code, Codex 0.151.0, Hermes) on `openai/gpt-6-luna` at max effort: the official board's Codex entry (16.4%) is the anchor. Controls match the public Terminal-Bench 4.0 jobs: dataset digest `sha256:39d9f44b…`, Modal, timeout multiplier 1.0, three attempts per task. Use Harbor 0.24.0, and build both binaries into `out/terminal-bench/tb4/`. Each model's route, effort and output cap live in `PROFILES` in `evals/harbor_wire.py`; harbor-wire enforces them and records them in `profile.json`, and the audit checks each trial against it. Public per-task results for GPT-6 Astra (Codex, Pi, Reason) are in `out/reference-tb4/`. `evals/tb4-deepseek-flash/` holds the same five jobs on `deepseek/deepseek-v4.1-flash` at max effort, the cheaper comparison model: DeepSeek reports 31.2% for it on Terminal-Bench 4.0 in its own harness. DeepSeek's first-party route is excluded by OpenRouter accounts that block providers that train on prompts, so the profile pins DeepInfra fp8, which caches repeated prefixes.
+
+## Train
+
+Recorded runs double as training data. `evals/tinker_dataset.py` rebuilds every trial's model calls (Messages and Responses) into conversation threads, keeps the reasoning from each reply, and tags each thread with its task, harness, model and verifier reward. By default it keeps passing trials and holds out about 20% of tasks, chosen by name hash, so no task appears on both sides. `evals/tinker_train.py` fine-tunes a LoRA adapter on those threads with Tinker (rejection-sampling fine-tuning), rendering each harness's recorded tools in the model's own format, and reports held-out loss as it trains. It needs `tinker`, `tinker-cookbook` and `TINKER_API_KEY`; `--dry-run` only counts tokens and estimates cost.
+
+```sh
+python -m evals.tinker_dataset out/terminal-bench/jobs/*/ --model thinkingmachines/inkling-small --out out/tinker/train.jsonl --eval-out out/tinker/eval.jsonl &&
+python -m evals.tinker_train --train out/tinker/train.jsonl --eval out/tinker/eval.jsonl --dry-run &&
+python -m evals.tinker_train --train out/tinker/train.jsonl --eval out/tinker/eval.jsonl --log-path out/tinker/sft-1
+```
