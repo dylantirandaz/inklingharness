@@ -74,6 +74,7 @@ class PiAgent(BaseInstalledAgent):
         *,
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
+        skills_dir: str | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
         effort: str | None = None,
@@ -86,6 +87,7 @@ class PiAgent(BaseInstalledAgent):
             logs_dir=logs_dir,
             model_name=model_name,
             logger=logger,
+            skills_dir=skills_dir,
             extra_env=extra_env,
             version=_PI_VERSION,
         )
@@ -161,6 +163,7 @@ class OMPAgent(BaseInstalledAgent):
         *,
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
+        skills_dir: str | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
     ) -> None:
@@ -173,6 +176,7 @@ class OMPAgent(BaseInstalledAgent):
             logs_dir=logs_dir,
             model_name=model_name,
             logger=logger,
+            skills_dir=skills_dir,
             extra_env=extra_env,
             version=_OMP_VERSION,
         )

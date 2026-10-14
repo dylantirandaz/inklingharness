@@ -32,6 +32,7 @@ class InklingAgent(BaseInstalledAgent):
         binary_path: str | Path,
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
+        skills_dir: str | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
         compact_tokens: int | None = None,
@@ -50,6 +51,7 @@ class InklingAgent(BaseInstalledAgent):
             logs_dir=logs_dir,
             model_name=model_name,
             logger=logger,
+            skills_dir=skills_dir,
             extra_env=extra_env,
             version=version,
         )

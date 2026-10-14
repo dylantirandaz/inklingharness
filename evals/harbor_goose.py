@@ -65,6 +65,7 @@ class GooseAgent(BaseInstalledAgent):
         *,
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
+        skills_dir: str | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
     ) -> None:
@@ -77,6 +78,7 @@ class GooseAgent(BaseInstalledAgent):
             logs_dir=logs_dir,
             model_name=model_name,
             logger=logger,
+            skills_dir=skills_dir,
             extra_env=extra_env,
             version=_VERSION,
         )
