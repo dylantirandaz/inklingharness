@@ -236,7 +236,7 @@ class ResponsesRouteTests(unittest.TestCase):
 
 
 def _write_prime_wire(logs: Path, *, forwarded_route: bool = False, inference_id: str | None = "req_1", returned_model: str | None = None) -> None:
-    profile = PROFILES["deepseek/deepseek-v4.1-flash"]
+    profile = PROFILES["prime/deepseek-v4.1-flash"]
     wire = logs / "wire"
     record = wire / "0001"
     record.mkdir(parents=True)
@@ -282,7 +282,7 @@ class PrimeRouteTests(unittest.TestCase):
             self.assertEqual(context.metadata["provider_verified_records"], 1)
             self.assertEqual(context.metadata["usage_source"], "raw Prime Intellect wire responses")
             audit_wire_providers(logs)
-            self.assertIn("-upstream", PROFILES["deepseek/deepseek-v4.1-flash"].wire_flags())
+            self.assertIn("-upstream", PROFILES["prime/deepseek-v4.1-flash"].wire_flags())
 
     def test_prime_record_fails_without_evidence_or_with_a_forwarded_route(self) -> None:
         cases = {

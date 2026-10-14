@@ -73,11 +73,15 @@ PROFILES = {
         "openai/gpt-6-luna", "openai/gpt-6-luna-20260922", "openai", "OpenAI", "max", 128000, 1050000, 0.1, 0.5, 0.01
     ),
     # DeepSeek's own Terminal-Bench 4.0 result (31.2%) used maximum effort.
-    # The run uses Prime Intellect Inference, billed to the Prime wallet that
-    # also pays for the sandboxes. Prime ignores the effort field on every
-    # endpoint (probed: low, high and max reason alike), so every harness gets
-    # Prime's default reasoning; harnesses still send max for uniformity.
+    # Inference goes through OpenRouter pinned to DeepInfra fp8 (no training
+    # on prompts, caches repeated prefixes), about a third of Prime
+    # Inference's price; sandboxes still run on Prime.
     "deepseek/deepseek-v4.1-flash": WireProfile(
+        "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-20260910", "deepinfra/fp8", "DeepInfra", "max", 128000, 1048576, 0.14, 0.42, 0.0042
+    ),
+    # The same model on Prime Intellect Inference, kept for comparison runs.
+    # Prime ignores the effort field on every endpoint.
+    "prime/deepseek-v4.1-flash": WireProfile(
         "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash", "prime", "Prime Intellect", "max", 128000, 1048576, 0.30, 1.20, 0.03, "prime"
     ),
 }
@@ -100,6 +104,10 @@ def recorded_profile(wire: Path) -> WireProfile:
     model = recorded.get("model")
     if not isinstance(model, str):
         raise ValueError(f"Invalid recorded profile in {wire}")
+    upstream = recorded.get("upstream")
+    if isinstance(upstream, str):
+        # Non-OpenRouter profiles are keyed by upstream and model name.
+        model = f"{upstream}/{model.split('/', 1)[-1]}"
     profile = profile_for(model, recorded.get("effort") if isinstance(recorded.get("effort"), str) else None)
     if profile.recorded() != recorded:
         raise ValueError(f"Recorded profile {recorded} differs from the known profile {profile.recorded()} in {wire}")

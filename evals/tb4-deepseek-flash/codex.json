@@ -25,7 +25,7 @@
       "import_path": "evals.harbor_claude_codex:CodexAgent",
       "model_name": "deepseek/deepseek-v4.1-flash",
       "env": {
-        "PRIME_API_KEY": "${PRIME_API_KEY}"
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
       },
       "kwargs": {
         "wire_binary_path": "out/terminal-bench/tb4/harbor-wire-linux-amd64",
@@ -37,7 +37,10 @@
   "datasets": [
     {
       "name": "terminal-bench/terminal-bench",
-      "ref": "sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732"
+      "ref": "sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732",
+      "exclude_task_names": [
+        "jax-speedrun-gpu"
+      ]
     }
   ]
 }
