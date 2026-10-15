@@ -27,6 +27,9 @@ def main() -> int:
         if "${" + variable + "}" in text and not os.environ.get(variable):
             parser.error(f"{variable} is required")
     config = JobConfig.model_validate_json(text)
+    # Docker Compose resolves relative host paths against the task's folder,
+    # so artifact copies to a relative jobs_dir land nowhere.
+    config.jobs_dir = Path(config.jobs_dir).resolve()
     return asyncio.run(run(config))
 
 

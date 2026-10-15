@@ -5,6 +5,10 @@ drop in the Prime wallet balance (sandboxes and images) since the guard
 started, plus --already for money spent before it. At the limit the guard
 sends SIGTERM to the process group of every PID file it watches.
 
+With --backend docker the trials run in local Docker: there is no wallet to
+read, and the guard instead removes unused Terminal-Bench images when free
+disk falls below --min-disk-gb, and removes trial containers when it stops.
+
   python out/terminal-bench/with_key.py evals.budget_guard --limit 400 --already 1.73 out/terminal-bench/tb4-*.pid
 """
 
@@ -42,6 +46,35 @@ def prime_balance() -> float:
     return float(match.group(1).replace(",", ""))
 
 
+TB_IMAGE = "harborframework/terminal-bench"
+
+
+def free_disk_gb() -> float:
+    stats = os.statvfs(os.path.expanduser("~"))
+    return stats.f_bavail * stats.f_frsize / 1e9
+
+
+def _docker(*args: str, timeout: int = 300) -> str:
+    return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout).stdout
+
+
+def prune_tb_images() -> list[str]:
+    """Remove Terminal-Bench images no container uses; Docker refuses to remove one in use."""
+    used = set(_docker("ps", "-a", "--format", "{{.Image}}").split())
+    removed = []
+    for image in _docker("image", "ls", TB_IMAGE, "--format", "{{.Repository}}:{{.Tag}}").split():
+        if image not in used and _docker("rmi", image).strip():
+            removed.append(image)
+    return removed
+
+
+def remove_tb_containers() -> list[str]:
+    ids = [line.split()[0] for line in _docker("ps", "-a", "--format", "{{.ID}} {{.Image}}").splitlines() if TB_IMAGE in line]
+    if ids:
+        _docker("rm", "-f", *ids)
+    return ids
+
+
 def stop(pid_files: list[Path]) -> list[int]:
     stopped = []
     for path in pid_files:
@@ -60,15 +93,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--already", type=float, default=0.0, help="Dollars spent before the guard started")
     parser.add_argument("--min-credits", type=float, default=2.0, help="Stop when OpenRouter credits or the Prime wallet fall below this")
     parser.add_argument("--interval", type=float, default=120.0)
+    parser.add_argument("--backend", choices=["prime", "docker"], default="prime")
+    parser.add_argument("--min-disk-gb", type=float, default=15.0, help="Docker backend: prune unused task images below this much free disk")
     parser.add_argument("--once", action="store_true", help="Print the current spend and exit")
     parser.add_argument("pid_files", nargs="*", type=Path)
     arguments = parser.parse_args(argv)
     started = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-    start_usage, start_balance = _retry(openrouter_usage), _retry(prime_balance)
+    docker = arguments.backend == "docker"
+    read_balance = (lambda: 0.0) if docker else prime_balance
+    start_usage, start_balance = _retry(openrouter_usage), _retry(read_balance)
     while True:
         try:
             inference = openrouter_usage() - start_usage
-            balance = prime_balance()
+            balance = read_balance()
             sandboxes = start_balance - balance
             credits = openrouter_credits_left()
         except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -77,7 +114,17 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(min(arguments.interval, 30.0))
             continue
         spent = arguments.already + inference + sandboxes
-        print(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "spent": round(spent, 2), "inference": round(inference, 2), "sandboxes": round(sandboxes, 2), "limit": arguments.limit, "openrouter_credits_left": round(credits, 2), "prime_balance": round(balance, 2)}), flush=True)
+        record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "spent": round(spent, 2), "inference": round(inference, 2), "limit": arguments.limit, "openrouter_credits_left": round(credits, 2)}
+        if docker:
+            record["free_disk_gb"] = round(free_disk_gb(), 1)
+            if record["free_disk_gb"] < arguments.min_disk_gb and not arguments.once:
+                try:
+                    record["pruned_images"] = prune_tb_images()
+                except (OSError, subprocess.SubprocessError) as error:
+                    record["prune_error"] = str(error)
+        else:
+            record.update(sandboxes=round(sandboxes, 2), prime_balance=round(balance, 2))
+        print(json.dumps(record), flush=True)
         if arguments.once:
             return 0
         reason = None
@@ -85,12 +132,15 @@ def main(argv: list[str] | None = None) -> int:
             reason = "budget limit reached"
         elif credits < arguments.min_credits:
             reason = "OpenRouter credits exhausted"
-        elif balance < arguments.min_credits:
+        elif not docker and balance < arguments.min_credits:
             reason = "Prime wallet exhausted"
         if reason is not None:
             print(json.dumps({"reason": reason, "stopped": stop(arguments.pid_files)}), flush=True)
             time.sleep(60)
-            print(json.dumps({"deleted_sandboxes": delete_sandboxes(started)}), flush=True)
+            if docker:
+                print(json.dumps({"removed_containers": remove_tb_containers()}), flush=True)
+            else:
+                print(json.dumps({"deleted_sandboxes": delete_sandboxes(started)}), flush=True)
             return 1
         if arguments.pid_files and not any(_alive(path) for path in arguments.pid_files):
             return 0
