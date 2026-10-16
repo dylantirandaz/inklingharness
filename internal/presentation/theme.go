@@ -141,6 +141,9 @@ var (
 
 	// chipColor is the faint tint behind chips and the user's prompts.
 	chipColor = shaded{dark: rgb{35, 35, 35}, light: rgb{245, 245, 245}}
+	// The diff tints are the brand green and red at a low share of the page.
+	addedTint   = shaded{dark: rgb{18, 46, 37}, light: rgb{226, 245, 236}}
+	removedTint = shaded{dark: rgb{58, 28, 25}, light: rgb{252, 230, 226}}
 	// The shapes of the mark keep their brand colors on both shades; only the
 	// blot follows the ink.
 	markGreen, markBlue, markRed = rgb{14, 153, 114}, rgb{1, 85, 191}, rgb{239, 64, 44}
@@ -157,6 +160,9 @@ type Theme struct {
 	// chip is the background sequence of chips; empty below 256 colors,
 	// where a tint cannot be expressed.
 	chip string
+	// added and removed tint diff lines; empty below 256 colors, where
+	// diff lines fall back to green and red text.
+	added, removed string
 }
 
 // NewTheme computes every sequence once.
@@ -172,6 +178,8 @@ func NewTheme(depth ColorDepth, shade Shade, accent Accent) Theme {
 	theme.sgr[roleAccent] = theme.foreground(model.color.on(shade), model.ansi16)
 	if depth >= ANSI256 {
 		theme.chip = theme.background(chipColor.on(shade))
+		theme.added = theme.background(addedTint.on(shade)) + theme.sgr[roleGreen]
+		theme.removed = theme.background(removedTint.on(shade)) + theme.sgr[roleRed]
 	}
 	return theme
 }
@@ -243,6 +251,21 @@ func (t Theme) Chip(text string) string {
 		return t.Ink(text)
 	}
 	return t.chip + t.sgr[roleInk] + text + reset
+}
+
+// Added and Removed color one diff line, on a faint tint when one exists.
+func (t Theme) Added(text string) string {
+	if t.added == "" || text == "" {
+		return t.Green(text)
+	}
+	return t.added + text + reset
+}
+
+func (t Theme) Removed(text string) string {
+	if t.removed == "" || text == "" {
+		return t.Red(text)
+	}
+	return t.removed + text + reset
 }
 
 // Code marks inline code: a chip when a tint exists, else the accent.

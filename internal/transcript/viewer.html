@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Inkling session</title>
+<style>
+:root {
+  --page: #141414; --raised: #1b1b1b; --chip: #232323; --ink: #e8e8e8; --graphite: #a0a0a0; --hairline: #2e2e2e;
+  --green: #2dbe90; --blue: #5b97f2; --red: #f2614c; --amber: #f7a224; --plum: #d07aae; --accent: var(--green);
+  --added: #122e25; --removed: #3a1c19;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+}
+:root[data-shade="light"] {
+  --page: #fbfbfa; --raised: #ffffff; --chip: #f2f2f1; --ink: #282828; --graphite: #676767; --hairline: #e2e2e2;
+  --green: #0e9972; --blue: #0155bf; --red: #d63a27; --amber: #b87410; --plum: #8f3f71;
+  --added: #e2f5ec; --removed: #fce6e2;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 72px; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 15px/1.6 var(--sans); }
+header { position: sticky; top: 0; z-index: 5; display: flex; gap: 14px; align-items: center; padding: 12px 24px;
+  background: color-mix(in srgb, var(--page) 86%, transparent); backdrop-filter: blur(12px); border-bottom: 1px solid var(--hairline); }
+.mark { display: grid; grid-template-columns: repeat(2, 9px); gap: 3px; }
+.mark i { width: 9px; height: 9px; border-radius: 2px; }
+.mark i:nth-child(1) { background: #0e9972; } .mark i:nth-child(2) { background: #0155bf; }
+.mark i:nth-child(3) { background: #ef402c; } .mark i:nth-child(4) { background: var(--ink); border-radius: 50%; }
+h1 { font-size: 15px; margin: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip { font: 12px var(--mono); background: var(--chip); color: var(--graphite); padding: 2px 8px; border-radius: 6px; white-space: nowrap; }
+.chip.model { color: var(--accent); }
+.spacer { flex: 1; }
+input[type=search] { width: 220px; background: var(--chip); border: 1px solid var(--hairline); color: var(--ink);
+  border-radius: 8px; padding: 6px 10px; font: 13px var(--sans); outline: none; }
+input[type=search]:focus { border-color: var(--accent); }
+button { background: var(--chip); color: var(--graphite); border: 1px solid var(--hairline); border-radius: 8px;
+  padding: 5px 10px; font: 13px var(--sans); cursor: pointer; }
+button:hover { color: var(--ink); }
+.layout { display: grid; grid-template-columns: 260px minmax(0, 1fr) 18px; gap: 28px; max-width: 1240px; margin: 0 auto; padding: 24px; }
+nav { position: sticky; top: 72px; align-self: start; max-height: calc(100vh - 96px); overflow: auto; font-size: 13px; }
+nav h2, .stats h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--graphite); margin: 0 0 8px; font-weight: 600; }
+nav a { display: block; color: var(--graphite); text-decoration: none; padding: 5px 10px; border-left: 2px solid var(--hairline);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+nav a:hover, nav a.on { color: var(--ink); border-left-color: var(--accent); }
+.stats { margin-bottom: 22px; }
+.bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--chip); margin: 6px 0 8px; }
+.bar span { display: block; }
+.legend { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font: 12px var(--mono); color: var(--graphite); }
+.legend b { color: var(--ink); font-weight: 500; text-align: right; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+main { min-width: 0; }
+.turn { content-visibility: auto; contain-intrinsic-size: auto 320px; margin-bottom: 18px; }
+.prompt { background: var(--chip); border-radius: 12px; padding: 12px 16px; white-space: pre-wrap; overflow-wrap: anywhere; position: relative; }
+.prompt .n { position: absolute; left: -44px; top: 12px; font: 12px var(--mono); color: var(--graphite); width: 32px; text-align: right; }
+.reply { padding: 4px 2px; overflow-wrap: anywhere; }
+.reply p { margin: .55em 0; }
+.reply h3 { font-size: 15px; margin: 1em 0 .3em; }
+.reply blockquote { margin: .5em 0; padding-left: 12px; border-left: 2px solid var(--hairline); color: var(--graphite); font-style: italic; }
+.reply ul { padding-left: 1.2em; } .reply li::marker { color: var(--accent); }
+code { font: 13px var(--mono); background: var(--chip); padding: 1px 5px; border-radius: 4px; }
+pre { font: 13px/1.55 var(--mono); background: var(--raised); border: 1px solid var(--hairline); border-radius: 10px; padding: 12px 14px; overflow: auto; margin: .6em 0; position: relative; }
+pre code { background: none; padding: 0; }
+pre .lang { position: absolute; right: 10px; top: 6px; font-size: 11px; color: var(--graphite); }
+.k { color: var(--blue); } .s { color: var(--green); } .num { color: var(--amber); } .c { color: var(--graphite); font-style: italic; }
+.f { color: var(--accent); } .add { background: var(--added); color: var(--green); display: block; } .del { background: var(--removed); color: var(--red); display: block; }
+details { border: 1px solid var(--hairline); border-radius: 10px; margin: 8px 0; background: var(--raised); }
+details > summary { cursor: pointer; list-style: none; padding: 8px 12px; display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--graphite); }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "▸"; color: var(--graphite); transition: transform .12s; }
+details[open] > summary::before { transform: rotate(90deg); }
+details .body { padding: 0 12px 10px; }
+details .body pre { margin: 6px 0; }
+.tool .name { font: 600 12px var(--mono); color: var(--ink); }
+.tool .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 12px; }
+.status { margin-left: auto; font: 12px var(--mono); }
+.status.ok { color: var(--green); } .status.err { color: var(--red); } .status.wait { color: var(--amber); }
+.thinking summary { font-style: italic; }
+.thinking .body { white-space: pre-wrap; color: var(--graphite); font-size: 14px; }
+img.attached { max-width: 100%; border-radius: 8px; border: 1px solid var(--hairline); margin: 6px 0; }
+mark { background: color-mix(in srgb, var(--amber) 40%, transparent); color: inherit; border-radius: 2px; }
+.hidden { display: none; }
+.minimap { position: sticky; top: 72px; height: calc(100vh - 96px); align-self: start; display: flex; flex-direction: column; gap: 2px; }
+.minimap a { flex: 1; min-height: 2px; border-radius: 2px; background: var(--hairline); }
+.minimap a.tools { background: color-mix(in srgb, var(--blue) 45%, var(--hairline)); }
+.minimap a.err { background: var(--red); } .minimap a.on { background: var(--accent); }
+.empty { color: var(--graphite); text-align: center; padding: 60px; }
+.keys { color: var(--graphite); font-size: 12px; margin-top: 18px; line-height: 1.9; }
+kbd { font: 11px var(--mono); background: var(--chip); border: 1px solid var(--hairline); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
+@media (max-width: 900px) { .layout { grid-template-columns: minmax(0, 1fr); } nav, .minimap { display: none; } .prompt .n { display: none; } }
+@media print { header, nav, .minimap { display: none; } .layout { display: block; } details { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+  <h1 id="title">Inkling session</h1>
+  <span class="chip model" id="model"></span>
+  <span class="chip" id="effort"></span>
+  <span class="spacer"></span>
+  <input type="search" id="search" placeholder="Search  /" aria-label="Search the session">
+  <button id="expand" title="Expand or collapse every tool call (e)">Tools</button>
+  <button id="shade" title="Switch light and dark">◐</button>
+</header>
+<div class="layout">
+  <nav>
+    <div class="stats" id="stats"></div>
+    <h2>Prompts</h2>
+    <div id="outline"></div>
+    <div class="keys"><kbd>/</kbd> search · <kbd>j</kbd> <kbd>k</kbd> prompts<br><kbd>e</kbd> tools · <kbd>t</kbd> thinking</div>
+  </nav>
+  <main id="turns"></main>
+  <div class="minimap" id="minimap" aria-hidden="true"></div>
+</div>
+<script id="session" type="application/json">/*SESSION_DATA*/</script>
+<script>
+"use strict";
+const data = JSON.parse(document.getElementById("session").textContent);
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+
+// Theme follows the terminal accents: plum for Inkling-Small, blue for Inkling.
+const root = document.documentElement;
+const savedShade = localStorage.getItem("inkling-shade");
+root.dataset.shade = savedShade || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+const model = data.model || "";
+if (/inkling-small/.test(model)) root.style.setProperty("--accent", "var(--plum)");
+else if (/^thinkingmachines\//.test(model)) root.style.setProperty("--accent", "var(--blue)");
+$("shade").onclick = () => { root.dataset.shade = root.dataset.shade === "light" ? "dark" : "light"; localStorage.setItem("inkling-shade", root.dataset.shade); };
+
+document.title = (data.title || "Inkling session") + " · " + model;
+$("title").textContent = data.title || "Session " + (data.id || "").slice(0, 8);
+$("model").textContent = model;
+$("effort").textContent = "effort " + (data.effort || "default");
+
+// --- syntax highlighting (mirrors the terminal palette) ---
+const KW = {
+  go: "break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var nil true false iota",
+  js: "async await break case catch class const continue default delete do else export extends finally for from function if import in instanceof let new of return static super switch this throw try typeof var void while yield null undefined true false type interface enum implements readonly as",
+  py: "and as assert async await break class continue def del elif else except finally for from global if import in is lambda match case nonlocal not or pass raise return try while with yield None True False self",
+  sh: "if then else elif fi for while until do done case esac in function return export local echo cd exit source sudo",
+  c: "auto break case char const continue default do double else enum extern float for if int long return short signed sizeof static struct switch typedef union unsigned void while bool true false class public private protected new this throw try catch fn let mut impl trait pub use mod match loop self Some None Ok Err",
+  json: "true false null",
+  sql: "select from where and or not insert into values update set delete create table join left right inner on group by order having limit as distinct null is in like",
+};
+const ALIAS = { golang: "go", javascript: "js", ts: "js", typescript: "js", tsx: "js", jsx: "js", python: "py", bash: "sh", zsh: "sh", shell: "sh", console: "sh",
+  rust: "c", rs: "c", cpp: "c", java: "c", swift: "c", kotlin: "c", yaml: "sh", yml: "sh", toml: "sh", patch: "diff", jsonc: "json" };
+const sets = {};
+function langOf(tag) { const t = (tag || "").toLowerCase(); return ALIAS[t] || t; }
+function highlight(code, tag) {
+  const lang = langOf(tag);
+  const frag = document.createDocumentFragment();
+  if (lang === "diff") {
+    for (const line of code.split("\n")) {
+      const cls = /^(\+\+\+|---)/.test(line) ? "c" : line[0] === "+" ? "add" : line[0] === "-" ? "del" : /^@@/.test(line) ? "k" : "";
+      frag.append(cls ? el("span", cls, line) : line, cls === "add" || cls === "del" ? "" : "\n");
+    }
+    return frag;
+  }
+  if (!KW[lang]) { frag.append(code); return frag; }
+  const words = sets[lang] || (sets[lang] = new Set(KW[lang].split(" ")));
+  const hash = lang === "py" || lang === "sh";
+  const re = hash
+    ? /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')|(\$\{?\w+\}?|\b\d[\w.]*)|([A-Za-z_]\w*)(?=\s*\()|([A-Za-z_]\w*)/g
+    : lang === "sql"
+    ? /(--[^\n]*)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')|(\b\d[\w.]*)|([A-Za-z_]\w*)(?=\s*\()|([A-Za-z_]\w*)/g
+    : /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`[^`]*`)|(\b\d[\w.]*)|([A-Za-z_]\w*)(?=\s*\()|([A-Za-z_]\w*)/g;
+  let last = 0, m;
+  while ((m = re.exec(code))) {
+    if (m.index > last) frag.append(code.slice(last, m.index));
+    const [text, comment, string, number, call, word] = m;
+    if (comment) frag.append(el("span", "c", text));
+    else if (string) frag.append(el("span", "s", text));
+    else if (number) frag.append(el("span", "num", text));
+    else if (words.has(lang === "sql" ? text.toLowerCase() : text)) frag.append(el("span", "k", text));
+    else if (call) frag.append(el("span", "f", text));
+    else frag.append(text);
+    last = re.lastIndex;
+  }
+  frag.append(code.slice(last));
+  return frag;
+}
+
+// --- markdown: small and safe: built from DOM nodes and text only ---
+function inline(text, parent) {
+  const re = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([^*]+)\*\*|\*([^*\s][^*]*)\*|\[([^\]]+)\]\(([^)\s]+)\)/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parent.append(text.slice(last, m.index));
+    if (m[1]) parent.append(el("code", null, m[2]));
+    else if (m[3]) parent.append(el("strong", null, m[3]));
+    else if (m[4]) parent.append(el("em", null, m[4]));
+    else {
+      const a = el("a", null, m[5]);
+      if (/^(https?:|mailto:)/i.test(m[6])) { a.href = m[6]; a.target = "_blank"; a.rel = "noopener noreferrer"; }
+      parent.append(a);
+    }
+    last = re.lastIndex;
+  }
+  parent.append(text.slice(last));
+}
+function markdown(text) {
+  const box = el("div");
+  const lines = text.split("\n");
+  let para = null, list = null;
+  const flush = () => { para = null; list = null; };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = /^\s{0,3}(`{3,}|~{3,})\s*([^\s`]*)/.exec(line);
+    if (fence) {
+      flush();
+      const body = [];
+      for (i++; i < lines.length && !lines[i].trimStart().startsWith(fence[1]); i++) body.push(lines[i]);
+      const pre = el("pre"); const code = el("code");
+      if (fence[2]) pre.append(el("span", "lang", fence[2]));
+      code.append(highlight(body.join("\n"), fence[2]));
+      pre.append(code); box.append(pre);
+      continue;
+    }
+    if (!line.trim()) { flush(); continue; }
+    const h = /^#{1,6}\s+(.*)/.exec(line);
+    if (h) { flush(); const n = el("h3"); inline(h[1], n); box.append(n); continue; }
+    if (line.startsWith("> ")) { flush(); const n = el("blockquote"); inline(line.slice(2), n); box.append(n); continue; }
+    const li = /^\s*(?:[-*+]|\d+[.)])\s+(.*)/.exec(line);
+    if (li) { para = null; if (!list) { list = el("ul"); box.append(list); } const n = el("li"); inline(li[1], n); list.append(n); continue; }
+    list = null;
+    if (!para) { para = el("p"); box.append(para); } else para.append(document.createElement("br"));
+    inline(line, para);
+  }
+  return box;
+}
+
+// --- conversation model ---
+const blocksOf = (message) => typeof message.content === "string" ? [{ type: "text", text: message.content }] : (message.content || []);
+const results = new Map();
+for (const message of data.messages) for (const block of blocksOf(message)) if (block.type === "tool_result") results.set(block.tool_use_id, block);
+const resultText = (block) => typeof block.content === "string" ? block.content : (block.content || []).map((b) => b.type === "text" ? b.text : "[" + b.type + "]").join("\n");
+
+function toolTitle(input) {
+  if (!input || typeof input !== "object") return "";
+  const value = input.command ?? input.path ?? input.file_path ?? input.pattern ?? input.url ?? input.query ?? Object.values(input).find((v) => typeof v === "string");
+  return typeof value === "string" ? value.split("\n")[0] : "";
+}
+function toolCard(block) {
+  const result = results.get(block.id);
+  const card = el("details", "tool");
+  const summary = el("summary");
+  summary.append(el("span", "name", block.name), el("span", "title", toolTitle(block.input)));
+  const status = el("span", "status " + (!result ? "wait" : result.is_error ? "err" : "ok"), !result ? "no result" : result.is_error ? "error" : "done");
+  summary.append(status);
+  card.append(summary);
+  const body = el("div", "body");
+  const input = block.input || {};
+  if (typeof input.old_string === "string" || typeof input.content === "string" && block.name === "write_file") {
+    const pre = el("pre"); const code = el("code");
+    const lines = [];
+    if (typeof input.old_string === "string") for (const l of input.old_string.split("\n")) lines.push("-" + l);
+    for (const l of (input.new_string ?? input.content ?? "").split("\n")) lines.push("+" + l);
+    code.append(highlight(lines.join("\n"), "diff")); pre.append(code); body.append(pre);
+  } else {
+    const pre = el("pre"); const code = el("code");
+    code.append(highlight(typeof input.command === "string" ? input.command : JSON.stringify(input, null, 2), typeof input.command === "string" ? "sh" : "json"));
+    pre.append(code); body.append(pre);
+  }
+  if (result) {
+    const text = resultText(result);
+    const pre = el("pre"); pre.append(el("code", null, text.length > 60000 ? text.slice(0, 60000) + "\n… " + (text.length - 60000) + " more characters" : text));
+    body.append(pre);
+    for (const b of Array.isArray(result.content) ? result.content : []) if (b.type === "image") body.append(image(b));
+  }
+  card.append(body);
+  card.dataset.error = result && result.is_error ? "1" : "";
+  return card;
+}
+function image(block) {
+  const source = block.source || {};
+  const img = el("img", "attached");
+  if (source.type === "base64" && /^image\/(png|jpeg|gif|webp)$/.test(source.media_type)) img.src = "data:" + source.media_type + ";base64," + source.data;
+  else if (source.type === "url" && /^https:/.test(source.url)) img.src = source.url;
+  img.alt = "attached image"; img.loading = "lazy";
+  return img;
+}
+
+// Group messages into turns: one user prompt and everything until the next.
+const turns = [];
+for (const message of data.messages) {
+  const blocks = blocksOf(message);
+  const prompt = message.role === "user" && blocks.some((b) => b.type === "text" || b.type === "image") && !blocks.some((b) => b.type === "tool_result");
+  if (prompt || !turns.length) turns.push({ prompt: prompt ? blocks : null, replies: [] });
+  if (!prompt) turns[turns.length - 1].replies.push(message);
+}
+
+const main = $("turns"), outline = $("outline"), minimap = $("minimap");
+if (!turns.length) main.append(el("div", "empty", "This session has no messages yet."));
+turns.forEach((turn, index) => {
+  const section = el("section", "turn"); section.id = "p" + (index + 1);
+  let tools = 0, errors = 0;
+  if (turn.prompt) {
+    const prompt = el("div", "prompt");
+    prompt.append(el("span", "n", String(index + 1)));
+    for (const b of turn.prompt) {
+      if (b.type === "text") prompt.append(b.text);
+      else if (b.type === "image") prompt.append(image(b));
+    }
+    section.append(prompt);
+    const first = turn.prompt.find((b) => b.type === "text");
+    const link = el("a", null, (first ? first.text : "image").replace(/\s+/g, " ").slice(0, 90));
+    link.href = "#" + section.id; outline.append(link);
+  }
+  for (const message of turn.replies) {
+    if (message.role !== "assistant") continue;
+    for (const block of blocksOf(message)) {
+      if (block.type === "text" && block.text.trim()) { const reply = el("div", "reply"); reply.append(markdown(block.text)); section.append(reply); }
+      else if (block.type === "thinking" && block.thinking) {
+        const d = el("details", "thinking"); d.append(el("summary", null, "Thinking · " + block.thinking.split(/\s+/).length + " words"), el("div", "body", block.thinking)); section.append(d);
+      } else if (block.type === "tool_use") {
+        const card = toolCard(block); tools++; if (card.dataset.error) errors++; section.append(card);
+      }
+    }
+  }
+  main.append(section);
+  const tick = el("a", errors ? "err" : tools ? "tools" : ""); tick.href = "#" + section.id; tick.title = "Prompt " + (index + 1) + " · " + tools + " tool calls";
+  minimap.append(tick);
+});
+
+// --- usage ---
+const u = data.usage || {};
+const parts = [["Cache read", u.cache_read_input_tokens || 0, "var(--green)"], ["Cache write", u.cache_creation_input_tokens || 0, "var(--blue)"],
+  ["Input", u.input_tokens || 0, "var(--graphite)"], ["Output", u.output_tokens || 0, "var(--amber)"]];
+const total = parts.reduce((s, p) => s + p[1], 0);
+const stats = $("stats");
+stats.append(el("h2", null, "Tokens · " + total.toLocaleString()));
+const bar = el("div", "bar");
+const legend = el("div", "legend");
+for (const [label, value, color] of parts) {
+  const seg = el("span"); seg.style.width = (total ? 100 * value / total : 0) + "%"; seg.style.background = color; seg.title = label; bar.append(seg);
+  const name = el("span"); const dot = el("i", "dot"); dot.style.background = color; name.append(dot, label);
+  legend.append(name, el("b", null, value.toLocaleString()));
+}
+stats.append(bar, legend);
+const when = el("div", "legend"); when.style.marginTop = "10px";
+when.append(el("span", null, "Turns"), el("b", null, String(turns.length)), el("span", null, "Directory"), el("b", null, (data.work_dir || "").split("/").slice(-2).join("/")),
+  el("span", null, "Updated"), el("b", null, data.updated_at ? new Date(data.updated_at).toLocaleString() : ""));
+stats.append(when);
+
+// --- active prompt tracking ---
+const sections = [...document.querySelectorAll(".turn")];
+const links = [...outline.children], ticks = [...minimap.children];
+let active = -1;
+const observer = new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting) {
+    const i = sections.indexOf(e.target);
+    if (i !== active) { links[active]?.classList.remove("on"); ticks[active]?.classList.remove("on"); active = i; links[i]?.classList.add("on"); ticks[i]?.classList.add("on"); }
+  }
+}, { rootMargin: "-72px 0px -70% 0px" });
+sections.forEach((s) => observer.observe(s));
+
+// --- search: hides turns without a match and marks hits ---
+const search = $("search");
+let timer = 0;
+function clearMarks() { for (const m of document.querySelectorAll("mark")) m.replaceWith(m.textContent); main.normalize(); }
+function runSearch() {
+  clearMarks();
+  const q = search.value.trim().toLowerCase();
+  for (const s of sections) {
+    if (!q) { s.classList.remove("hidden"); continue; }
+    const hit = s.textContent.toLowerCase().includes(q);
+    s.classList.toggle("hidden", !hit);
+    if (!hit) continue;
+    if (s.querySelector("details:not([open])") && [...s.querySelectorAll("details")].some((d) => d.textContent.toLowerCase().includes(q))) for (const d of s.querySelectorAll("details")) if (d.textContent.toLowerCase().includes(q)) d.open = true;
+    const walker = document.createTreeWalker(s, NodeFilter.SHOW_TEXT);
+    const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const lower = node.data.toLowerCase(); let at = lower.indexOf(q); if (at < 0) continue;
+      const frag = document.createDocumentFragment(); let last = 0;
+      while (at >= 0) { frag.append(node.data.slice(last, at), el("mark", null, node.data.slice(at, at + q.length))); last = at + q.length; at = lower.indexOf(q, last); }
+      frag.append(node.data.slice(last)); node.replaceWith(frag);
+    }
+  }
+  document.querySelector("mark")?.scrollIntoView({ block: "center" });
+}
+search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(runSearch, 160); });
+
+let expanded = false;
+const toggleTools = () => { expanded = !expanded; for (const d of document.querySelectorAll("details.tool")) d.open = expanded; };
+$("expand").onclick = toggleTools;
+addEventListener("keydown", (e) => {
+  if (e.target === search) { if (e.key === "Escape") { search.value = ""; runSearch(); search.blur(); } return; }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "/") { e.preventDefault(); search.focus(); }
+  else if (e.key === "j" || e.key === "k") { const next = Math.max(0, Math.min(sections.length - 1, active + (e.key === "j" ? 1 : -1))); sections[next]?.scrollIntoView(); }
+  else if (e.key === "e") toggleTools();
+  else if (e.key === "t") { const all = [...document.querySelectorAll("details.thinking")]; const open = !all.some((d) => d.open); all.forEach((d) => d.open = open); }
+});
+</script>
+</body>
+</html>

@@ -95,7 +95,7 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		}
 		view.Title = "Write " + brief(*args.Path)
 		if details {
-			view.Details = "Write or replace " + singleLine(*args.Path) + "\n" + diffLines(*args.Content, "+ ", theme.Green, theme)
+			view.Details = "Write or replace " + singleLine(*args.Path) + "\n" + diffLines(*args.Content, "+ ", theme.Added, theme)
 		}
 	case "edit_file":
 		if err := requiredText(args.Path, "path", false); err != nil {
@@ -110,7 +110,7 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		view.Title = "Edit " + brief(*args.Path)
 		if details {
 			view.Details = "Replace one exact occurrence in " + singleLine(*args.Path) + "\n" +
-				diffLines(*args.OldString, "- ", theme.Red, theme) + "\n" + diffLines(*args.NewString, "+ ", theme.Green, theme)
+				diffLines(*args.OldString, "- ", theme.Removed, theme) + "\n" + diffLines(*args.NewString, "+ ", theme.Added, theme)
 		}
 	case "glob", "grep":
 		path := "."
@@ -316,9 +316,9 @@ func approvalLines(view ToolView, theme Theme) []string {
 	for line := range strings.SplitSeq(details, "\n") {
 		switch {
 		case strings.HasPrefix(line, "+ "):
-			line = theme.Green(line)
+			line = theme.Added(line)
 		case strings.HasPrefix(line, "- "):
-			line = theme.Red(line)
+			line = theme.Removed(line)
 		}
 		lines = append(lines, line)
 	}

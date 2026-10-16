@@ -38,6 +38,7 @@ const chatHelp = `Commands:
   /clear            start a new session; keep the old session on disk
   /fork             continue in a copy of this session; keep the original
   /title [TEXT]     show or set the session title
+  /export [PATH]    write the session as an interactive HTML page
   /plan TASK        investigate with read-only tools and reply with a plan
   /goal [CMD|off]   keep working until CMD passes (at most 5 rounds); off clears it
   /context          show what fills the context window
@@ -794,6 +795,18 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				if configErr != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", configErr)
 				}
+				continue
+			case "/export":
+				if err := awaitBackground(); err != nil {
+					fmt.Fprintf(stderr, "inkling: %v\n", err)
+					return 1
+				}
+				path, exportErr := exportSession(current, argument, time.Now())
+				if exportErr != nil {
+					fmt.Fprintf(stderr, "inkling: %v\n", exportErr)
+					continue
+				}
+				fmt.Fprintf(stderr, "Exported %s\n", theme.Underline(presentation.Safe(path)))
 				continue
 			case "/title":
 				if argument == "" {

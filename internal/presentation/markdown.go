@@ -9,6 +9,7 @@ type Markdown struct {
 	theme       Theme
 	fence       byte
 	fenceLength int
+	code        codeState
 }
 
 func NewMarkdown(theme Theme) *Markdown {
@@ -35,11 +36,17 @@ func (m *Markdown) render(text string, commit bool) string {
 	if m.fence != 0 {
 		if marker == m.fence && length >= m.fenceLength && strings.TrimSpace(trimmed[length:]) == "" {
 			if commit {
-				m.fence, m.fenceLength = 0, 0
+				m.fence, m.fenceLength, m.code = 0, 0, codeState{}
 			}
 			return m.theme.Graphite(text)
 		}
-		return text
+		if !commit {
+			// A preview colors against a copy, so a partial line never
+			// leaves a comment or string open for the committed one.
+			state := m.code
+			return highlight(text, &state, m.theme)
+		}
+		return highlight(text, &m.code, m.theme)
 	}
 	if indent >= 4 || strings.HasPrefix(trimmed, "\t") {
 		return text
@@ -47,6 +54,7 @@ func (m *Markdown) render(text string, commit bool) string {
 	if length >= 3 && (marker != '`' || !strings.Contains(trimmed[length:], "`")) {
 		if commit {
 			m.fence, m.fenceLength = marker, length
+			m.code = codeState{lang: languageFor(trimmed[length:])}
 		}
 		return m.theme.Graphite(text)
 	}
