@@ -221,6 +221,30 @@ class ResponsesRouteTests(unittest.TestCase):
             self.assertIs(context.metadata["all_recorded_usage_complete"], True)
             audit_wire_providers(logs)
 
+    def test_failed_response_without_identity_is_a_failed_record_not_a_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            logs = Path(directory)
+            _write_responses_wire(logs, _routing("DeepInfra", "thinkingmachines/inkling-small-20260730"))
+            record = logs / "wire" / "0001"
+            failed = {"type": "response.failed", "response": {"status": "failed", "error": {"code": "server_error"}}}
+            (record / "0001.response.sse").write_text("data: " + json.dumps(failed) + "\n\n")
+            context = AgentContext()
+            populate_wire_context(logs, context)
+            self.assertIsNone(context.n_input_tokens)
+            assert context.metadata is not None
+            self.assertEqual(context.metadata["failed_or_incomplete_records"], 1)
+            self.assertIs(context.metadata["all_recorded_usage_complete"], False)
+
+    def test_wrong_model_in_failed_response_still_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            logs = Path(directory)
+            _write_responses_wire(logs, _routing("DeepInfra", "thinkingmachines/inkling-small-20260730"))
+            record = logs / "wire" / "0001"
+            failed = {"type": "response.failed", "response": {"id": "x", "model": "other/model", "status": "failed"}}
+            (record / "0001.response.sse").write_text("data: " + json.dumps(failed) + "\n\n")
+            with self.assertRaises(ValueError):
+                populate_wire_context(logs, AgentContext())
+
     def test_wrong_terminal_provider_does_not_enter_the_pending_audit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             logs = Path(directory)

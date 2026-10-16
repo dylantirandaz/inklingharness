@@ -379,6 +379,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
         response: dict[str, object] | None = None
         counters: dict[str, int] = {}
         stopped = False
+        upstream_failed = False
         routing: dict[str, object] | None = None
         for event in events:
             kind = event.get("type")
@@ -409,6 +410,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
                 if kind in ("response.completed", "response.incomplete", "response.failed"):
                     response = _object(event.get("response"))
                     stopped = True
+                    upstream_failed = kind == "response.failed"
                 elif event.get("object") == "response":
                     response = event
                     stopped = True
@@ -436,6 +438,12 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
                 failed += 1
         elif endpoint == "/api/v1/responses":
             if response is None or not stopped:
+                failed += 1
+                continue
+            if (upstream_failed or response.get("status") == "failed") and (response.get("model") is None or not isinstance(response.get("id"), str)):
+                # An upstream error mid-stream ends in response.failed without the
+                # response identity; count it like a broken Messages stream rather
+                # than failing the whole trial.
                 failed += 1
                 continue
             if response.get("model") != profile.model or not isinstance(response.get("id"), str):
