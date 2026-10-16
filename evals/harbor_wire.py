@@ -74,13 +74,14 @@ PROFILES = {
         "openai/gpt-6-luna", "openai/gpt-6-luna-20260922", "openai", "OpenAI", "max", 128000, 1050000, 0.1, 0.5, 0.01
     ),
     # DeepSeek's own Terminal-Bench 4.0 result (31.2%) used maximum effort.
-    # Inference goes through OpenRouter pinned to Novita fp8 (no training on
-    # prompts, caches repeated prefixes); sandboxes still run on Prime.
-    # DeepInfra is cheaper but rejects images inside tool results ("Input
-    # should be a valid string"), which harnesses send after reading a
-    # screenshot; Novita accepts images there and in user messages.
+    # Inference goes through OpenRouter pinned to StreamLake fp8: the cheapest
+    # full-precision route that caches repeated prefixes and accepts images
+    # inside tool results, in both the chat and messages formats. DeepInfra is
+    # cheaper but rejects those images ("Input should be a valid string"),
+    # which harnesses send after reading a screenshot. Novita also works but
+    # costs about a third more ($0.195/$0.78 vs $0.147/$0.588).
     "deepseek/deepseek-v4.1-flash": WireProfile(
-        "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-20260910", "novita/fp8", "Novita", "max", 128000, 1048576, 0.195, 0.78, 0.0039
+        "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-20260910", "streamlake/fp8", "StreamLake", "max", 128000, 1048576, 0.147, 0.588, 0.00294
     ),
     # The same model on Prime Intellect Inference, kept for comparison runs.
     # Prime ignores the effort field on every endpoint.
