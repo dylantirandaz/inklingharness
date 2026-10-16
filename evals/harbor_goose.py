@@ -27,6 +27,8 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from evals.harbor_wire import (
+    PROMPT_EXTRAS,
+    with_task_extras,
     MODEL,
     exec_wire,
     install_wire,
@@ -56,6 +58,8 @@ def _isolated_env(home: str) -> dict[str, str]:
 
 
 class GooseAgent(BaseInstalledAgent):
+    capabilities = PROMPT_EXTRAS
+
     """Stock Goose with isolated settings and native default extensions."""
 
     def __init__(
@@ -66,6 +70,7 @@ class GooseAgent(BaseInstalledAgent):
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
         skills_dir: str | None = None,
+        mcp_servers: list | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
     ) -> None:
@@ -79,6 +84,7 @@ class GooseAgent(BaseInstalledAgent):
             model_name=model_name,
             logger=logger,
             skills_dir=skills_dir,
+            mcp_servers=mcp_servers,
             extra_env=extra_env,
             version=_VERSION,
         )
@@ -127,6 +133,7 @@ class GooseAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        instruction = with_task_extras(self, instruction)
         env = _isolated_env(_HOME)
         env.update({
             "GOOSE_PROVIDER": "anthropic",

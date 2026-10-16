@@ -16,7 +16,7 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from evals.harbor_wire import exec_wire, install_wire, populate_wire_context, profile_for, validate_linux_binary
+from evals.harbor_wire import PROMPT_EXTRAS, with_task_extras, exec_wire, install_wire, populate_wire_context, profile_for, validate_linux_binary
 
 
 _BINARY = "/installed-agent/think"
@@ -24,6 +24,8 @@ _LOGS = "/logs/agent"
 
 
 class InklingAgent(BaseInstalledAgent):
+    capabilities = PROMPT_EXTRAS
+
     def __init__(
         self,
         logs_dir: Path,
@@ -33,6 +35,7 @@ class InklingAgent(BaseInstalledAgent):
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
         skills_dir: str | None = None,
+        mcp_servers: list | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
         compact_tokens: int | None = None,
@@ -52,6 +55,7 @@ class InklingAgent(BaseInstalledAgent):
             model_name=model_name,
             logger=logger,
             skills_dir=skills_dir,
+            mcp_servers=mcp_servers,
             extra_env=extra_env,
             version=version,
         )
@@ -72,6 +76,7 @@ class InklingAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        instruction = with_task_extras(self, instruction)
         arguments = [
             _BINARY,
             "run",

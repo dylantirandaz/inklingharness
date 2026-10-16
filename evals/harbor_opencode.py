@@ -28,6 +28,8 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from evals.harbor_wire import (
+    PROMPT_EXTRAS,
+    with_task_extras,
     MODEL,
     exec_wire,
     install_wire,
@@ -101,6 +103,8 @@ def _config_content() -> str:
 
 
 class OpenCodeAgent(BaseInstalledAgent):
+    capabilities = PROMPT_EXTRAS
+
     """Use the pinned native OpenCode CLI and recorder-owned token counts."""
 
     def __init__(
@@ -111,6 +115,7 @@ class OpenCodeAgent(BaseInstalledAgent):
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
         skills_dir: str | None = None,
+        mcp_servers: list | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
     ) -> None:
@@ -124,6 +129,7 @@ class OpenCodeAgent(BaseInstalledAgent):
             model_name=model_name,
             logger=logger,
             skills_dir=skills_dir,
+            mcp_servers=mcp_servers,
             extra_env=extra_env,
             version=_VERSION,
         )
@@ -164,6 +170,7 @@ class OpenCodeAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        instruction = with_task_extras(self, instruction)
         arguments = [
             _EXECUTABLE,
             "run",

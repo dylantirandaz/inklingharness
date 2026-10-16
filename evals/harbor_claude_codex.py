@@ -18,6 +18,8 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from evals.harbor_wire import (
+    PROMPT_EXTRAS,
+    with_task_extras,
     exec_wire,
     install_wire,
     populate_wire_context,
@@ -33,6 +35,8 @@ _PREFIX = f"{_ROOT}/npm"
 
 
 class _NativePeer(BaseInstalledAgent):
+    capabilities = PROMPT_EXTRAS
+
     PINNED_VERSION: ClassVar[str]
     # Other released versions a comparison may pin, for example to match a
     # public job.
@@ -48,6 +52,7 @@ class _NativePeer(BaseInstalledAgent):
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
         skills_dir: str | None = None,
+        mcp_servers: list | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
         effort: str | None = None,
@@ -62,6 +67,7 @@ class _NativePeer(BaseInstalledAgent):
             model_name=model_name,
             logger=logger,
             skills_dir=skills_dir,
+            mcp_servers=mcp_servers,
             extra_env=extra_env,
             version=self._package_version,
         )
@@ -133,6 +139,7 @@ class ClaudeCodeAgent(_NativePeer):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        instruction = with_task_extras(self, instruction)
         profile = self._profile
         model = profile.model
         env = {
@@ -213,6 +220,7 @@ class CodexAgent(_NativePeer):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        instruction = with_task_extras(self, instruction)
         arguments = [
             f"{_BIN}/codex-native", "exec",
             "--ignore-user-config",

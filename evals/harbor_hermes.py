@@ -42,6 +42,8 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from evals.harbor_wire import (
+    PROMPT_EXTRAS,
+    with_task_extras,
     MODEL,
     WireProfile,
     exec_wire,
@@ -150,6 +152,8 @@ def child_command(profile: WireProfile | None = None) -> str:
 
 
 class HermesAgent(BaseInstalledAgent):
+    capabilities = PROMPT_EXTRAS
+
     """Stock Hermes Agent one-shot mode with recorder-owned token counts."""
 
     def __init__(
@@ -160,6 +164,7 @@ class HermesAgent(BaseInstalledAgent):
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
         skills_dir: str | None = None,
+        mcp_servers: list | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
         effort: str | None = None,
@@ -173,6 +178,7 @@ class HermesAgent(BaseInstalledAgent):
             model_name=model_name,
             logger=logger,
             skills_dir=skills_dir,
+            mcp_servers=mcp_servers,
             extra_env=extra_env,
             version=_VERSION,
         )
@@ -203,6 +209,7 @@ class HermesAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        instruction = with_task_extras(self, instruction)
         env = {"HERMES_HOME": _HERMES_HOME}
         await self.exec_as_agent(
             environment,

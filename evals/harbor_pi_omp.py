@@ -14,6 +14,8 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from evals.harbor_wire import (
+    PROMPT_EXTRAS,
+    with_task_extras,
     MODEL,
     WireProfile,
     exec_wire,
@@ -65,6 +67,8 @@ def _launch_command(arguments: list[str], bin_dir: str, profile: WireProfile) ->
 
 
 class PiAgent(BaseInstalledAgent):
+    capabilities = PROMPT_EXTRAS
+
     """Stock Pi 0.87.1 with a per-trial Messages provider registration."""
 
     def __init__(
@@ -75,6 +79,7 @@ class PiAgent(BaseInstalledAgent):
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
         skills_dir: str | None = None,
+        mcp_servers: list | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
         effort: str | None = None,
@@ -88,6 +93,7 @@ class PiAgent(BaseInstalledAgent):
             model_name=model_name,
             logger=logger,
             skills_dir=skills_dir,
+            mcp_servers=mcp_servers,
             extra_env=extra_env,
             version=_PI_VERSION,
         )
@@ -130,6 +136,7 @@ class PiAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        instruction = with_task_extras(self, instruction)
         env = {**_isolated_env("pi"), **_route_env(self._profile)}
         await self.exec_as_agent(
             environment,
@@ -154,6 +161,8 @@ class PiAgent(BaseInstalledAgent):
 
 
 class OMPAgent(BaseInstalledAgent):
+    capabilities = PROMPT_EXTRAS
+
     """Stock OMP 18.6.1 on pinned Bun, including its native subagent loop."""
 
     def __init__(
@@ -164,6 +173,7 @@ class OMPAgent(BaseInstalledAgent):
         wire_binary_path: str | Path,
         logger: logging.Logger | None = None,
         skills_dir: str | None = None,
+        mcp_servers: list | None = None,
         extra_env: dict[str, str] | None = None,
         version: str | None = None,
     ) -> None:
@@ -177,6 +187,7 @@ class OMPAgent(BaseInstalledAgent):
             model_name=model_name,
             logger=logger,
             skills_dir=skills_dir,
+            mcp_servers=mcp_servers,
             extra_env=extra_env,
             version=_OMP_VERSION,
         )
@@ -214,6 +225,7 @@ class OMPAgent(BaseInstalledAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        instruction = with_task_extras(self, instruction)
         env = _isolated_env("omp")
         # Role selectors cover auxiliary native calls, not just task subagents.
         # Leave retry counts, stock tools, prompts, and compaction defaults alone.

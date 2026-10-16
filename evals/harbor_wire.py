@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from harbor.agents.capabilities import AgentCapabilities
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
@@ -88,6 +89,26 @@ PROFILES = {
     ),
 }
 
+
+
+# Every compared harness gets task skills and MCP servers the same way: named
+# in the prompt. Harbor refuses such tasks unless the agent declares these.
+PROMPT_EXTRAS = AgentCapabilities(skills=True, mcp_servers=True)
+
+
+def with_task_extras(agent: BaseInstalledAgent, instruction: str) -> str:
+    notes = []
+    if agent.skills_dir:
+        notes.append(
+            f"Skills for this task are in {agent.skills_dir}: each subdirectory holds a SKILL.md "
+            "describing when and how to use it. Read the relevant ones before starting."
+        )
+    for server in agent.mcp_servers:
+        where = server.url if server.url else " ".join([server.command or "", *server.args]).strip()
+        notes.append(f"An MCP server named {server.name!r} is available ({server.transport} transport): {where}")
+    if not notes:
+        return instruction
+    return instruction + "\n\n" + "\n".join(notes)
 
 def profile_for(model_name: str, effort: str | None = None) -> WireProfile:
     if model_name not in PROFILES:
