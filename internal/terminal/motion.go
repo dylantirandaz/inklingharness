@@ -13,7 +13,8 @@ type Style struct {
 	Depth  presentation.ColorDepth
 	Accent presentation.Accent
 	// Motion animates the banner, streamed text, activity mark, context
-	// count, and approval rule. Without it only elapsed seconds update.
+	// count, and approval rule. Pending text and elapsed seconds still update
+	// when motion is off.
 	Motion bool
 }
 
@@ -108,12 +109,25 @@ func (s *Screen) commitIntroLocked() {
 	s.writeLocked([]byte(frames[len(frames)-1] + "\n"))
 }
 
+// StreamReasoning keeps the latest partial line for the next frame. Formatting
+// and painting happen on that frame, not on each streamed chunk.
+func (s *Screen) StreamReasoning(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reasoningText = text
+	if !s.reasoningDirty {
+		s.reasoningDirty = true
+		s.wake.signal()
+	}
+}
+
 // StreamPreview shows the partial line of a streamed reply after prefix. Text
 // added since the last call starts pale and dries to ink. A body that does
 // not continue the last one is a new line, all of it fresh.
 func (s *Screen) StreamPreview(prefix, body string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reasoningText, s.reasoningDirty = "", false
 	if prefix == s.effects.previewPrefix && body == s.effects.previewBody && s.preview == "" {
 		return
 	}
@@ -213,6 +227,10 @@ func (s *Screen) breathLocked(now time.Time) float64 {
 func (s *Screen) SetContext(use presentation.ContextUse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.setContextLocked(use)
+}
+
+func (s *Screen) setContextLocked(use presentation.ContextUse) {
 	if s.effects.haveUse && use == s.effects.use {
 		return
 	}
@@ -226,6 +244,19 @@ func (s *Screen) SetContext(use presentation.ContextUse) {
 	s.layoutDirty = true
 	s.drawLocked()
 	s.wake.signal()
+}
+
+// SetContextTokens updates only the context estimate of the footer, for a
+// count that arrives between turns while the rest of the report stands.
+func (s *Screen) SetContextTokens(tokens int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.effects.haveUse {
+		return
+	}
+	use := s.effects.use
+	use.Tokens = tokens
+	s.setContextLocked(use)
 }
 
 // shownTokensLocked eases from the previous estimate to the current one.
@@ -246,23 +277,39 @@ func (s *Screen) gaugeMovingLocked(now time.Time) bool {
 	return !s.effects.gaugeAt.IsZero() && now.Sub(s.effects.gaugeAt) < gaugeDuration
 }
 
-// footerTextLocked is the context footer at now. The gauge breathes only
-// during a turn, when the screen already animates; an idle prompt must not
-// wake the process.
-func (s *Screen) footerTextLocked(now time.Time) string {
+// footerPartsLocked is the context footer at now, as the model that works
+// and the context that it uses. The gauge breathes only during a turn, when
+// the screen already animates; an idle prompt must not wake the process.
+func (s *Screen) footerPartsLocked(now time.Time) (model, usage string) {
 	if !s.effects.haveUse {
-		return ""
+		return "", ""
 	}
 	glow := 1.0
 	if s.mode == modeBusy && s.status != "" {
 		glow = s.breathLocked(now)
 	}
-	return presentation.Footer(s.effects.use, int(math.Round(s.shownTokensLocked(now))), glow, s.theme)
+	return presentation.FooterModel(s.effects.use, s.theme),
+		presentation.FooterUsage(s.effects.use, int(math.Round(s.shownTokensLocked(now))), glow, s.theme)
 }
 
-// frameIntervalLocked is the time between animation frames at now, or 0 when
-// nothing animates and the screen may sleep until input.
+// footerTextLocked is the two parts of the footer on one line.
+func (s *Screen) footerTextLocked(now time.Time) string {
+	model, usage := s.footerPartsLocked(now)
+	if model == "" {
+		return ""
+	}
+	return model + s.theme.Hairline(" · ") + usage
+}
+
+// frameIntervalLocked is the time between pending preview or animation frames,
+// or 0 when the screen may sleep until input.
 func (s *Screen) frameIntervalLocked(now time.Time) time.Duration {
+	if s.view != nil {
+		return 0
+	}
+	if s.reasoningDirty {
+		return smoothInterval
+	}
 	busy := s.mode == modeBusy && s.status != ""
 	if !s.effects.motion {
 		if busy {

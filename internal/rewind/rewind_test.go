@@ -415,6 +415,93 @@ func TestRestoreRejectsEmptySnapshot(t *testing.T) {
 	}
 }
 
+func TestDiffIncludesWorkingTreeWithoutChangingRepositoryState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := newRepository(t)
+	for name, text := range map[string]string{
+		"tracked.txt": "base\n",
+		"deleted.txt": "remove this\n",
+		".gitignore":  "ignored.txt\n",
+	} {
+		writeTestFile(t, root, name, []byte(text), 0o644)
+	}
+	runTestGit(t, root, "add", "-A")
+	runTestGit(t, root, "commit", "-qm", "base")
+	if diff, err := Diff(ctx, root); err != nil || diff != "" {
+		t.Fatalf("clean tree diff = %q, error = %v", diff, err)
+	}
+	writeTestFile(t, root, "tracked.txt", []byte("staged only\n"), 0o644)
+	runTestGit(t, root, "add", "tracked.txt")
+	writeTestFile(t, root, "tracked.txt", []byte("working version\n"), 0o644)
+	writeTestFile(t, root, "nested/new.txt", []byte("new content\n"), 0o644)
+	writeTestFile(t, root, "image.bin", []byte{0, 1, 2, 3}, 0o644)
+	writeTestFile(t, root, "ignored.txt", []byte("ignored content\n"), 0o644)
+	if err := os.Remove(filepath.Join(root, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	branch := strings.TrimSpace(runTestGit(t, root, "symbolic-ref", "HEAD"))
+	protected := make(map[string][]byte)
+	for _, name := range []string{"index", "HEAD", "config", branch} {
+		data, err := os.ReadFile(filepath.Join(root, ".git", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		protected[name] = data
+	}
+	diff, err := Diff(ctx, filepath.Join(root, "nested"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"+working version", "-remove this", "+new content", "GIT binary patch"} {
+		if !strings.Contains(diff, expected) {
+			t.Fatalf("diff does not contain %q: %s", expected, diff)
+		}
+	}
+	for _, excluded := range []string{"staged only", "ignored content", "ignored.txt"} {
+		if strings.Contains(diff, excluded) {
+			t.Fatalf("diff contains %q: %s", excluded, diff)
+		}
+	}
+	for name, before := range protected {
+		after, err := os.ReadFile(filepath.Join(root, ".git", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatalf("Diff changed .git/%s", name)
+		}
+	}
+	assertFile(t, root, "tracked.txt", []byte("working version\n"), 0o644)
+	assertFile(t, root, "nested/new.txt", []byte("new content\n"), 0o644)
+}
+
+func TestDiffBeforeFirstCommit(t *testing.T) {
+	t.Parallel()
+	for _, format := range []string{"sha1", "sha256"} {
+		t.Run(format, func(t *testing.T) {
+			root := t.TempDir()
+			runTestGit(t, root, "init", "-q", "--object-format="+format)
+			writeTestFile(t, root, "first.txt", []byte("first version\n"), 0o644)
+			diff, err := Diff(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(diff, "+first version") || !strings.Contains(diff, "new file mode") {
+				t.Fatalf("first file diff = %s", diff)
+			}
+			if _, err := os.Stat(filepath.Join(root, ".git", "index")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Diff created a real index: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, err := Diff(ctx, root); !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled Diff error = %v", err)
+			}
+		})
+	}
+}
+
 func TestOutsideRepository(t *testing.T) {
 	directory := t.TempDir()
 	// Git must not find a repository above the temporary directory.
@@ -423,6 +510,9 @@ func TestOutsideRepository(t *testing.T) {
 
 	if _, err := Take(ctx, directory); !errors.Is(err, ErrNotRepository) {
 		t.Fatalf("Take error = %v, want ErrNotRepository", err)
+	}
+	if _, err := Diff(ctx, directory); !errors.Is(err, ErrNotRepository) {
+		t.Fatalf("Diff error = %v, want ErrNotRepository", err)
 	}
 	emptyTree := Snapshot{Tree: "4b825dc642cb6eb9a060e54bf8d69288fbee4904"}
 	if _, err := Restore(ctx, directory, emptyTree); !errors.Is(err, ErrNotRepository) {

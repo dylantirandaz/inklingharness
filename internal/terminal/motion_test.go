@@ -69,9 +69,79 @@ func TestStreamedPreviewDries(t *testing.T) {
 	if len(s.effects.wet) != 1 || s.effects.wet[0].start != 0 {
 		t.Fatalf("a new line is not fresh as a whole: %v", s.effects.wet)
 	}
-	s.SetPreview("")
+	s.ClearPreview()
 	if s.previewLocked(time.Now()) != "" || len(s.effects.wet) != 0 {
 		t.Fatal("clearing the preview kept streamed text")
+	}
+}
+
+func TestReasoningPreviewBatchesBeforeFrame(t *testing.T) {
+	for _, motion := range []bool{false, true} {
+		s, take := renderScreen(t, modeBusy, 10, 80)
+		s.effects = effects{motion: motion, epoch: time.Now()}
+		s.theme = presentation.NewTheme(presentation.TrueColor, presentation.DarkBackground, presentation.AccentPlum)
+		wake, err := newWakePipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(wake.close)
+		s.wake = wake
+		s.drawLocked()
+		take()
+
+		s.StreamReasoning("old partial text")
+		s.StreamReasoning("latest \x1b[2J界e\u0301")
+		if got := take(); got != "" {
+			t.Fatalf("motion %t: a chunk painted before the frame: %q", motion, got)
+		}
+		if ready, err := inputReady(wake.read, 0); err != nil || !ready {
+			t.Fatalf("motion %t: pending text did not wake the reader: ready %t, %v", motion, ready, err)
+		}
+		interval := s.frameIntervalLocked(s.lastFrame)
+		if interval <= 0 || interval > smoothInterval {
+			t.Fatalf("motion %t: pending text has no timely frame: %v", motion, interval)
+		}
+		if wait := s.waitLocked(s.lastFrame.Add(interval), interval); wait != 0 {
+			t.Fatalf("motion %t: a due preview waits %v", motion, wait)
+		}
+
+		s.drawLocked()
+		got := take()
+		if !strings.Contains(presentation.Safe(got), "latest 界e\u0301") ||
+			strings.Contains(got, "old partial text") || strings.Contains(got, "\x1b[2J") {
+			t.Fatalf("motion %t: frame did not contain only the latest safe text: %q", motion, got)
+		}
+		if interval := s.frameIntervalLocked(time.Now()); interval != 0 {
+			t.Fatalf("motion %t: a painted reasoning preview still needs frames: %v", motion, interval)
+		}
+	}
+}
+
+func TestPendingReasoningCannotReturnAfterPreviewChanges(t *testing.T) {
+	for _, clear := range []bool{false, true} {
+		s, take := renderScreen(t, modeBusy, 10, 80)
+		s.StreamPreview("  ", "current reply")
+		take()
+		s.StreamReasoning("obsolete reasoning")
+		expected := "  current reply"
+		if clear {
+			s.ClearPreview()
+			expected = ""
+		} else {
+			// An unchanged reply must also cancel a queued reasoning frame.
+			s.StreamPreview("  ", "current reply")
+		}
+		take()
+		s.drawLocked()
+		if got := take(); strings.Contains(got, "obsolete reasoning") {
+			t.Fatalf("clear %t: canceled reasoning returned: %q", clear, got)
+		}
+		if got := s.previewLocked(time.Now()); got != expected {
+			t.Fatalf("clear %t: preview = %q, want %q", clear, got, expected)
+		}
+		if interval := s.frameIntervalLocked(time.Now()); interval != 0 {
+			t.Fatalf("clear %t: canceled reasoning still needs frames: %v", clear, interval)
+		}
 	}
 }
 

@@ -95,7 +95,7 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		}
 		view.Title = "Write " + brief(*args.Path)
 		if details {
-			view.Details = "Write or replace " + singleLine(*args.Path) + "\n" + diffLines(*args.Content, "+ ", theme.Added, theme)
+			view.Details = "Write or replace " + singleLine(*args.Path) + "\n" + diffLines(*args.Content, "+ ", theme.Added) + missingNewlineNotice(*args.Content, theme)
 		}
 	case "edit_file":
 		if err := requiredText(args.Path, "path", false); err != nil {
@@ -109,8 +109,9 @@ func describeTool(name string, input json.RawMessage, theme Theme, details bool)
 		}
 		view.Title = "Edit " + brief(*args.Path)
 		if details {
+			oldNotice, newNotice := replacementNotices(*args.OldString, *args.NewString, theme)
 			view.Details = "Replace one exact occurrence in " + singleLine(*args.Path) + "\n" +
-				diffLines(*args.OldString, "- ", theme.Removed, theme) + "\n" + diffLines(*args.NewString, "+ ", theme.Added, theme)
+				diffLines(*args.OldString, "- ", theme.Removed) + oldNotice + "\n" + diffLines(*args.NewString, "+ ", theme.Added) + newNotice
 		}
 	case "glob", "grep":
 		path := "."
@@ -312,6 +313,10 @@ func approvalLines(view ToolView, theme Theme) []string {
 	if first, rest, found := strings.Cut(details, "\n"); found && first == title {
 		details = rest
 	}
+	// A short command is the whole title, so the card does not say it twice.
+	if header, command, found := strings.Cut(details, "\n"); found && strings.HasPrefix(header, "Bash · ") && "Run "+command == title {
+		details = header
+	}
 	var lines []string
 	for line := range strings.SplitSeq(details, "\n") {
 		switch {
@@ -350,7 +355,8 @@ func positive(value *int, fallback int, name string) (int, error) {
 	return *value, nil
 }
 
-func diffLines(text, prefix string, style func(string) string, theme Theme) string {
+// diffLines shows text as changed lines, each with prefix and in style.
+func diffLines(text, prefix string, style func(string) string) string {
 	text = Safe(text)
 	if text == "" {
 		return style(prefix + "[empty content]")
@@ -362,9 +368,26 @@ func diffLines(text, prefix string, style func(string) string, theme Theme) stri
 		}
 		out.WriteString(style(prefix + line))
 	}
-	if !strings.HasSuffix(text, "\n") {
-		out.WriteString("\n")
-		out.WriteString(theme.Graphite("\\ No newline at end of content"))
-	}
 	return out.String()
+}
+
+// missingNewlineNotice is the line after text that does not end with a line
+// break, so an approval shows how the file will end. Empty text and text that
+// ends with a line break have no notice.
+func missingNewlineNotice(text string, theme Theme) string {
+	text = Safe(text)
+	if text == "" || strings.HasSuffix(text, "\n") {
+		return ""
+	}
+	return "\n" + theme.Graphite("\\ No newline at end of content")
+}
+
+// replacementNotices gives the notices of the two sides of a replacement. Two
+// sides that end alike keep the ending of the file as it was, so a notice
+// appears only when the replacement adds or removes the final line break.
+func replacementNotices(oldText, newText string, theme Theme) (oldNotice, newNotice string) {
+	if strings.HasSuffix(Safe(oldText), "\n") == strings.HasSuffix(Safe(newText), "\n") {
+		return "", ""
+	}
+	return missingNewlineNotice(oldText, theme), missingNewlineNotice(newText, theme)
 }

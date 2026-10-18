@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dylantirandaz/inklingharness/internal/presentation"
 )
 
 func renderScreen(t *testing.T, mode inputMode, rows, cols int) (*Screen, func() string) {
@@ -83,8 +85,10 @@ func TestBusyActivityKeepsPreview(t *testing.T) {
 	s.activitySince = time.Now()
 	s.drawLocked()
 	initial := take()
-	if len(s.live) != 4 {
-		t.Fatalf("busy view contains %d rows, want preview, activity, and footer rows", len(s.live))
+	for _, text := range []string{"first preview line", "second preview line", "working", "Input paused", "Ctrl-C"} {
+		if !strings.Contains(strings.Join(s.live, "\n"), text) {
+			t.Fatalf("busy view is missing %q: %q", text, s.live)
+		}
 	}
 	s.effects.epoch = s.effects.epoch.Add(-4 * expertTick)
 	s.drawLocked()
@@ -101,15 +105,19 @@ func TestDrawGrowthShrinkAndTranscript(t *testing.T) {
 	s, take := renderScreen(t, modeBusy, 8, 40)
 	s.drawLocked()
 	take()
-	s.SetPreview("one\ntwo\nthree")
-	if got := take(); strings.Count(got, "\r\n") != 3 {
-		t.Fatalf("growth did not create exactly three rows: %q", got)
+	initialRows := len(s.live)
+	s.StreamReasoning("one\ntwo\nthree")
+	s.drawLocked()
+	if got := take(); !strings.Contains(got, "\r\n") || len(s.live) <= initialRows {
+		t.Fatalf("growth did not add live rows: %q", got)
 	}
-	s.SetPreview("one")
+	grownRows := len(s.live)
+	s.StreamReasoning("one")
+	s.drawLocked()
 	if got := take(); !strings.Contains(got, "\x1b[J") || strings.Contains(got, "\r\n") {
 		t.Fatalf("shrink did not clear old rows in place: %q", got)
 	}
-	if len(s.live) != 2 || s.cursorRow != 1 {
+	if len(s.live) >= grownRows || s.cursorRow >= len(s.live) {
 		t.Fatalf("shrunken live state: rows=%d cursor=%d", len(s.live), s.cursorRow)
 	}
 	if _, err := s.Write([]byte("saved transcript\n")); err != nil {
@@ -187,9 +195,6 @@ func TestChoiceNarrowAndNoColor(t *testing.T) {
 			t.Fatal("choice view exceeds available rows")
 		}
 		body := strings.Join(s.live, "")
-		if s.cols < 8 {
-			continue
-		}
 		for _, key := range []string{"y", "a", "n"} {
 			if !strings.Contains(body, key) {
 				t.Fatalf("choice %q missing at %dx%d: %q", key, s.rows, s.cols, body)
@@ -198,24 +203,26 @@ func TestChoiceNarrowAndNoColor(t *testing.T) {
 	}
 }
 
-func TestPromptToBusyClearsComposer(t *testing.T) {
+func TestPromptToBusyKeepsInactiveComposer(t *testing.T) {
 	s, take := renderScreen(t, modePrompt, 8, 40)
 	s.insertLocked("finished input")
 	s.drawLocked()
 	take()
 	s.finishLocked(answer{text: "finished input"})
 	s.drawLocked()
-	if got := take(); !strings.Contains(got, "\x1b[J") {
-		t.Fatalf("mode change did not clear old composer rows: %q", got)
+	if got := take(); got == "" {
+		t.Fatal("mode change did not redraw the composer")
 	}
-	if len(s.live) != 1 || s.cursorVisible {
-		t.Fatal("busy view retained the composer or visible cursor")
+	frame := strings.Join(s.live, "\n")
+	if strings.Contains(frame, "finished input") || !strings.Contains(frame, "Input paused") ||
+		!strings.Contains(frame, "Ctrl-C") || s.cursorVisible || len(s.text) != 0 {
+		t.Fatalf("busy composer is not empty and inactive: %q", frame)
 	}
 }
 
 // An idle prompt must not wake the process: the loop blocks until a key, the
 // wake pipe, or a deadline that an animation or a lone Escape needs. Without
-// motion a turn wakes only once a second, for its elapsed seconds.
+// motion, a turn with no new text wakes once a second, for elapsed seconds.
 func TestReadLoopBlocksUnlessSomethingIsDue(t *testing.T) {
 	now := time.Now()
 	s := &Screen{mode: modePrompt, effects: effects{motion: true}}
@@ -406,6 +413,73 @@ func TestComposerCardAndApprovalCard(t *testing.T) {
 	}
 }
 
+// With a tint the approval request is an amber card: its title is the first
+// row, its choices follow, the key hint sits under it, and no row is wider
+// than the live width. A request that does not fit leaves only the choices.
+func TestSoftApprovalCard(t *testing.T) {
+	s, take := renderScreen(t, modeChoice, 14, 70)
+	s.theme = presentation.NewTheme(presentation.TrueColor, presentation.LightBackground, presentation.AccentPlum)
+	s.card, s.layoutDirty = "Run go test\ngo test ./...", true
+	s.drawLocked()
+	take()
+	frame := withoutStyles(strings.Join(s.live, "\n"))
+	for _, want := range []string{"Approval needed", "go test ./...", "allow once", "Enter / Esc deny"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("soft approval card is missing %q: %q", want, frame)
+		}
+	}
+	if strings.ContainsAny(frame, "╭╮╰╯") {
+		t.Fatalf("a soft approval card drew a border: %q", frame)
+	}
+	titleRow := -1
+	for index, row := range s.live {
+		if cellWidth(withoutStyles(row)) > s.cols-1 {
+			t.Fatalf("row of %d cells exceeds the live width: %q", cellWidth(withoutStyles(row)), withoutStyles(row))
+		}
+		if strings.Contains(withoutStyles(row), "Approval needed") {
+			titleRow = index
+		}
+	}
+	if titleRow != 1 {
+		t.Fatalf("the title is on row %d, the first row of the card is 1", titleRow)
+	}
+	if !s.CardFits("Run go test\ngo test ./...") {
+		t.Fatal("a short request does not fit")
+	}
+	s.card, s.layoutDirty = strings.Repeat("line\n", 20), true
+	s.drawLocked()
+	take()
+	if strings.Contains(withoutStyles(strings.Join(s.live, "\n")), "line") || len(s.live) > 14 {
+		t.Fatalf("a request that does not fit must leave only the choices: %q", s.live)
+	}
+}
+
+func TestCardFootHoldsKeysAndStatusBarEndsAtRightEdge(t *testing.T) {
+	s, take := renderScreen(t, modePrompt, 10, 60)
+	s.effects.use = presentation.ContextUse{Model: "thinkingmachines/inkling-small", Effort: "default", Tokens: 7900, CompactTokens: 200000, SessionTokens: 2600}
+	s.effects.haveUse = true
+	s.drawLocked()
+	take()
+	foot := withoutStyles(s.live[len(s.live)-2])
+	if !strings.HasPrefix(foot, "╰─ Enter send · Ctrl-J new line") || !strings.HasSuffix(foot, "╯") {
+		t.Fatalf("card foot = %q", foot)
+	}
+	bar := withoutStyles(s.live[len(s.live)-1])
+	if !strings.HasSuffix(bar, "2.6k used") || cellWidth(bar) != 59 || !strings.Contains(bar, "▪") {
+		t.Fatalf("status bar = %q", bar)
+	}
+	if strings.Contains(bar, "Enter") {
+		t.Fatal("keys repeated in the status bar")
+	}
+	s, take = renderScreen(t, modeBusy, 10, 18)
+	s.drawLocked()
+	take()
+	frame := withoutStyles(strings.Join(s.live, "\n"))
+	if !strings.Contains(frame, "^C cancel") || strings.Contains(s.live[len(s.live)-2], "cancel") {
+		t.Fatalf("narrow card did not move the key to the status bar: %q", s.live)
+	}
+}
+
 func TestWrapWords(t *testing.T) {
 	rows := WrapWords("the quick brown fox jumps", 10)
 	if strings.Join(rows, "|") != "the quick|brown fox|jumps" {
@@ -425,5 +499,136 @@ func TestWrapWords(t *testing.T) {
 	}
 	if got := withoutStyles(strings.Join(styled, " ")); got != "aa bold words here end" {
 		t.Fatalf("wrapping changed the text: %q", got)
+	}
+}
+
+// With a tint the composer is a card without a border: its rows fill the
+// live width, the key hint moves under the card, and the typed text sits
+// where the cursor says. Without a tint the border stays.
+func TestSoftComposerCardAndHintUnderIt(t *testing.T) {
+	s, _ := renderScreen(t, modePrompt, 14, 70)
+	s.theme = presentation.NewTheme(presentation.TrueColor, presentation.LightBackground, presentation.AccentPlum)
+	s.insertLocked("typed text")
+	s.layoutLocked()
+	if !s.soft {
+		t.Fatal("a tinted theme did not draw a soft card")
+	}
+	width := s.cols - 1
+	for _, row := range s.frame {
+		if cells := cellWidth(withoutStyles(row)); cells > width {
+			t.Fatalf("row of %d cells exceeds the live width %d: %q", cells, width, withoutStyles(row))
+		}
+	}
+	typed := withoutStyles(s.frame[s.frameRow])
+	if !strings.Contains(typed, "typed text") || strings.Contains(typed, "│") {
+		t.Fatalf("composer row = %q", typed)
+	}
+	if s.frameCol != 2+2+len("typed text") {
+		t.Fatalf("cursor column %d is not after the typed text", s.frameCol)
+	}
+	last := withoutStyles(s.frame[len(s.frame)-1])
+	if !strings.Contains(last, "Enter send") {
+		t.Fatalf("the key hint is not under the card: %q", last)
+	}
+	for _, row := range s.frame {
+		if strings.ContainsAny(withoutStyles(row), "╭╮╰╯") {
+			t.Fatalf("a soft card drew a border: %q", withoutStyles(row))
+		}
+	}
+
+	bordered, _ := renderScreen(t, modePrompt, 14, 70)
+	bordered.theme = presentation.NewTheme(presentation.ANSI16, presentation.LightBackground, presentation.AccentPlum)
+	bordered.layoutLocked()
+	if bordered.soft || !strings.Contains(withoutStyles(strings.Join(bordered.frame, "\n")), "╭") {
+		t.Fatal("a theme without a tint lost its border")
+	}
+}
+
+func softScreen(t *testing.T, mode inputMode, rows, cols int) *Screen {
+	t.Helper()
+	s, _ := renderScreen(t, mode, rows, cols)
+	s.theme = presentation.NewTheme(presentation.TrueColor, presentation.LightBackground, presentation.AccentPlum)
+	s.effects.use = presentation.ContextUse{Model: "thinkingmachines/inkling-small", Effort: "high", Tokens: 4600, CompactTokens: 200000, SessionTokens: 15800}
+	s.effects.haveUse = true
+	return s
+}
+
+// Under a soft card the footer has two rows in the margin of the card's text:
+// where the work happens and which model does it, then the keys and the
+// context use. Each side ends at its own margin and no row is wider than the
+// live width.
+func TestSoftFooterHasPlaceModelKeysAndUsage(t *testing.T) {
+	s := softScreen(t, modePrompt, 24, 100)
+	s.SetPlace("~/code/harbor", "main")
+	s.layoutLocked()
+	footer := s.frame[s.footerRow:]
+	if len(footer) != 2 {
+		t.Fatalf("footer has %d rows: %q", len(footer), footer)
+	}
+	first, second := withoutStyles(footer[0]), withoutStyles(footer[1])
+	for _, want := range []string{"~/code/harbor  main", "Inkling-Small · high"} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("first footer row is missing %q: %q", want, first)
+		}
+	}
+	for _, want := range []string{"Enter send", "4.6k / 200k", "15.8k used"} {
+		if !strings.Contains(second, want) {
+			t.Fatalf("second footer row is missing %q: %q", want, second)
+		}
+	}
+	for _, row := range []string{first, second} {
+		if !strings.HasPrefix(row, "  ") || !strings.HasSuffix(row, "high") && !strings.HasSuffix(row, "used") || cellWidth(row) != s.cols-1-cardPaddingCells {
+			t.Fatalf("footer row does not sit in the margins of the card: %q (%d cells)", row, cellWidth(row))
+		}
+	}
+}
+
+// A narrow footer gives up the branch, then the front of the folder, and never
+// the model; the keys stay and the usage moves to its own row when both
+// cannot share one.
+func TestSoftFooterDegradesOnNarrowScreens(t *testing.T) {
+	s := softScreen(t, modePrompt, 24, 52)
+	s.SetPlace("~/code/a-long-folder-name/harbor", "feature/a-very-long-branch")
+	s.layoutLocked()
+	frame := withoutStyles(strings.Join(s.frame, "\n"))
+	for _, want := range []string{"Inkling-Small", "Enter", "used"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("narrow footer lost %q:\n%s", want, frame)
+		}
+	}
+	if strings.Contains(frame, "a-very-long-branch") || !strings.Contains(frame, "…") {
+		t.Fatalf("narrow footer did not give up the branch and the front of the folder:\n%s", frame)
+	}
+	for _, row := range s.frame {
+		if cells := cellWidth(withoutStyles(row)); cells > s.cols-1 {
+			t.Fatalf("row of %d cells exceeds the live width: %q", cells, withoutStyles(row))
+		}
+	}
+}
+
+// On a short terminal the footer leaves out the row about the place, so the
+// composer keeps its room; the keys and the usage stay.
+func TestSoftFooterLeavesOutThePlaceOnShortScreens(t *testing.T) {
+	s := softScreen(t, modePrompt, softFooterRows-1, 100)
+	s.SetPlace("~/code/harbor", "main")
+	s.layoutLocked()
+	footer := withoutStyles(strings.Join(s.frame[s.footerRow:], "\n"))
+	if strings.Contains(footer, "~/code/harbor") || !strings.Contains(footer, "Enter send") || !strings.Contains(footer, "15.8k used") {
+		t.Fatalf("short footer = %q", footer)
+	}
+}
+
+// With a tint the working status rides on a hairline that fills the row.
+func TestWorkingStatusRidesOnAHairline(t *testing.T) {
+	s := softScreen(t, modeBusy, 24, 80)
+	s.status, s.activitySince = "Writing reply", time.Now().Add(-3*time.Second)
+	row := withoutStyles(s.activityLocked())
+	if !strings.HasPrefix(row, "── ") || !strings.Contains(row, "Writing reply · 3s") || !strings.HasSuffix(row, "──") || cellWidth(row) != s.cols-1 {
+		t.Fatalf("working row = %q (%d cells)", row, cellWidth(row))
+	}
+	plain, _ := renderScreen(t, modeBusy, 24, 80)
+	plain.status = "Writing reply"
+	if got := withoutStyles(plain.activityLocked()); strings.Contains(got, "──") {
+		t.Fatalf("a theme without a tint drew a rule: %q", got)
 	}
 }

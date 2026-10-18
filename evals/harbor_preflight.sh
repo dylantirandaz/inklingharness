@@ -5,9 +5,14 @@ fail() {
     exit 1
 }
 
-test "$#" -eq 2 || fail 'expected CPU cores and memory MiB'
-expected_cpus=$1
-expected_memory_mib=$2
+test "$#" -eq 3 || fail 'expected backend, CPU cores, and memory MiB'
+backend=$1
+expected_cpus=$2
+expected_memory_mib=$3
+case "$backend" in
+    modal|prime) ;;
+    *) fail 'expected modal or prime backend' ;;
+esac
 case "$expected_cpus:$expected_memory_mib" in
     *[!0-9:]*|:*|*:) fail 'resource values must be positive integers' ;;
 esac
@@ -16,7 +21,7 @@ test "$expected_memory_mib" -gt 0 || fail 'memory MiB must be positive'
 test "$(uname -s)" = Linux || fail 'expected Linux'
 test "$(uname -m)" = x86_64 || fail 'expected native x86_64'
 kernel=$(uname -r)
-printf 'backend=modal\nruntime=vm\nplatform=Linux x86_64\nsandbox_kernel=%s\nexpected_cpus=%s\nexpected_memory_mib=%s\n' "$kernel" "$expected_cpus" "$expected_memory_mib"
+printf 'backend=%s\nruntime=vm\nplatform=Linux x86_64\nsandbox_kernel=%s\nexpected_cpus=%s\nexpected_memory_mib=%s\n' "$backend" "$kernel" "$expected_cpus" "$expected_memory_mib"
 case "$kernel" in
     *gvisor*) fail 'expected a VM with its own Linux kernel' ;;
 esac

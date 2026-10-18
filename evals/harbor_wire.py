@@ -173,7 +173,7 @@ async def exec_wire(
             environment, command="exec /bin/bash /installed-agent/harbor-run.sh", env=env
         )
     except asyncio.CancelledError:
-        # Harbor cancels its RPC wait, but Modal leaves the remote process alive.
+        # Harbor cancels its wait, but a remote job can continue to run.
         stopped = await environment.exec(
             command=(
                 "set -eu; if test -r /logs/agent/wire/pid; then "
@@ -238,7 +238,7 @@ def _audit_request(directory: Path, endpoint: str, profile: WireProfile) -> None
         if "provider" in forwarded:
             raise ValueError(f"A route was forwarded to Prime in {directory}")
         expected.pop("provider", None)
-    else:
+    elif endpoint != "/api/v1/messages/count_tokens":
         if forwarded.get("provider") != profile.route():
             raise ValueError(f"Wrong provider profile in {directory}")
         expected["provider"] = profile.route()
@@ -256,7 +256,7 @@ def _audit_request(directory: Path, endpoint: str, profile: WireProfile) -> None
         if forwarded.get("max_output_tokens") != profile.max_tokens or _object(forwarded.get("reasoning")).get("effort") != profile.effort:
             raise ValueError(f"Wrong Responses profile in {directory}")
         expected["max_output_tokens"] = profile.max_tokens
-    else:
+    elif endpoint != "/api/v1/messages/count_tokens":
         raise ValueError(f"Unsupported recorded endpoint {endpoint!r}")
     if forwarded != expected:
         raise ValueError(f"The recorder changed a prompt, tool, history, or other non-profile field in {directory}")
@@ -347,6 +347,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
     complete = 0
     failed = 0
     warmups = 0
+    token_counts = 0
     inference = 0
     pending: list[dict[str, str]] = []
     records = sorted(path for path in wire.glob("[0-9]*") if path.is_dir())
@@ -364,6 +365,10 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
             continue
         if metadata.get("method") != "POST":
             raise ValueError(f"Unsupported recorded request method in {directory}")
+        if endpoint == "/api/v1/messages/count_tokens":
+            _audit_request(directory, endpoint, profile)
+            token_counts += 1
+            continue
         inference += 1
         if metadata.get("status_code") != 200:
             failed += 1
@@ -486,6 +491,7 @@ def populate_wire_context(logs_dir: Path, context: AgentContext) -> None:
         "provider_verified_records": verified,
         "inference_records": inference,
         "warmup_records": warmups,
+        "token_count_records": token_counts,
         "pending_provider_verification": pending,
         "all_recorded_usage_complete": all_complete,
         "observed_complete_usage": totals,

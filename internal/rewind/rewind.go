@@ -1,4 +1,4 @@
-// Package rewind takes snapshots of a git working tree and restores them.
+// Package rewind snapshots, compares, and restores a git working tree.
 //
 // A snapshot is a git tree object. Take writes it with a private, temporary
 // index file, so the index, HEAD, refs, stash, and config of the user stay
@@ -45,6 +45,40 @@ func Take(ctx context.Context, workDir string) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	return takeAt(ctx, top)
+}
+
+// Diff returns the full, uncolored diff of the current work tree against HEAD.
+// It includes tracked and untracked, not ignored, files. A repository without
+// commits is compared with an empty tree. Like Take, it uses a private index
+// and leaves the user's files, index, HEAD, refs, stash, and config unchanged.
+func Diff(ctx context.Context, workDir string) (string, error) {
+	top, err := topLevel(ctx, workDir)
+	if err != nil {
+		return "", err
+	}
+	base, err := runGit(ctx, top, nil, "rev-parse", "--verify", "--quiet", "HEAD")
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return "", err
+		}
+		// An unborn HEAD has no object. Empty stdin makes an empty tree in
+		// the repository's object format, including SHA-256 repositories.
+		base, err = runGit(ctx, top, nil, "hash-object", "-w", "-t", "tree", "--stdin")
+		if err != nil {
+			return "", err
+		}
+	}
+	current, err := takeAt(ctx, top)
+	if err != nil {
+		return "", err
+	}
+	output, err := runGit(ctx, top, nil, "diff", "--no-color", "--no-ext-diff",
+		"--no-textconv", "--binary", strings.TrimSuffix(string(base), "\n"), current.Tree, "--")
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
 }
 
 // Restore makes the files of the work tree that contains workDir equal to

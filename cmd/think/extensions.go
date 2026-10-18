@@ -19,6 +19,7 @@ import (
 	"github.com/dylantirandaz/inklingharness/internal/permission"
 	"github.com/dylantirandaz/inklingharness/internal/presentation"
 	"github.com/dylantirandaz/inklingharness/internal/rewind"
+	"github.com/dylantirandaz/inklingharness/internal/terminal"
 	"github.com/dylantirandaz/inklingharness/internal/tools"
 	"github.com/dylantirandaz/inklingharness/internal/web"
 )
@@ -279,8 +280,17 @@ func (p *pendingSnapshot) settled(ctx context.Context) error {
 }
 
 // chatCommands are the commands of chat itself. A user command cannot take
-// one of these names.
-var chatCommands = []string{"help", "status", "usage", "tools", "verbose", "model", "effort", "compact", "clear", "fork", "title", "goal", "context", "undo", "rewind", "quit", "exit"}
+// one of these names. plan is a built-in extension command, so it stays
+// available to the extension dispatch.
+var chatCommands = func() []string {
+	names := []string{"exit"}
+	for _, command := range chatCommandTable {
+		if command.Name != "plan" {
+			names = append(names, command.Name)
+		}
+	}
+	return names
+}()
 
 // customCommand finds the user or built-in command that a one-line
 // "/name arguments" input names.
@@ -296,17 +306,27 @@ func (e *extensions) customCommand(input string) (extend.Command, string, bool) 
 	return command, strings.TrimSpace(arguments), found
 }
 
-// commandHelp lists the user's commands for /help; plan is in the fixed text.
-func (e *extensions) commandHelp() string {
-	var out strings.Builder
+// userCommands lists the user's commands for the menu and /help; plan is in
+// the chat command table.
+func (e *extensions) userCommands() []terminal.Command {
+	var commands []terminal.Command
 	for _, command := range e.commands {
 		if command.Source == extend.BuiltinSource {
 			continue
 		}
-		if out.Len() == 0 {
+		commands = append(commands, terminal.Command{Name: command.Name, Usage: command.Name + " [TEXT]", Description: command.Description})
+	}
+	return commands
+}
+
+// commandHelp lists the user's commands and skills for /help.
+func (e *extensions) commandHelp() string {
+	var out strings.Builder
+	for index, command := range e.userCommands() {
+		if index == 0 {
 			out.WriteString("Your commands:\n")
 		}
-		fmt.Fprintf(&out, "  /%-16s %s\n", command.Name, command.Description)
+		fmt.Fprintf(&out, "  /%-17s %s\n", command.Usage, command.Description)
 	}
 	if len(e.skills) > 0 {
 		fmt.Fprintf(&out, "Skills: %d (the model reads one when a task needs it)\n", len(e.skills))

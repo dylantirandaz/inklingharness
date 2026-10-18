@@ -140,6 +140,35 @@ class MessagesRouteTests(unittest.TestCase):
             self.assertIs(context.metadata["all_recorded_usage_complete"], True)
             audit_wire_providers(logs)
 
+    def test_token_count_failure_does_not_change_inference_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            logs = Path(directory)
+            _write_wire(logs, _routing("DeepInfra", "thinkingmachines/inkling-small-20260730"), True)
+            wire = logs / "wire"
+            count_record = wire / "0002"
+            count_record.mkdir()
+            request = {"model": MODEL, "messages": [{"role": "user", "content": "Count this input."}]}
+            for name in ("incoming.json", "0001.request.json"):
+                (count_record / name).write_text(json.dumps(request))
+            (count_record / "metadata.json").write_text(json.dumps({
+                "path": "/api/v1/messages/count_tokens", "method": "POST",
+                "status_code": 404, "content_type": "application/json",
+                "content_encoding": "identity",
+            }))
+            (count_record / "0001.response.sse").write_text(json.dumps({"error": {"message": "Not found"}}))
+            (wire / "run.json").write_text(json.dumps({"requests": 2}))
+            context = AgentContext()
+            populate_wire_context(logs, context)
+            self.assertEqual(
+                (context.n_input_tokens, context.n_cache_tokens, context.n_output_tokens),
+                (3963, 512, 595),
+            )
+            assert context.metadata is not None
+            self.assertEqual(context.metadata["inference_records"], 1)
+            self.assertEqual(context.metadata["token_count_records"], 1)
+            self.assertIs(context.metadata["all_recorded_usage_complete"], True)
+            audit_wire_providers(logs)
+
     def test_invalid_route_retains_failure_without_fabricated_usage(self) -> None:
         valid = _routing("DeepInfra", "thinkingmachines/inkling-small-20260730")
         cases: list[tuple[str, dict[str, object] | None]] = [

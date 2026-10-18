@@ -232,15 +232,26 @@ func highlight(text string, state *codeState, theme Theme) string {
 	return out.String()
 }
 
+// DiffLine formats a visible part of a diff line. Text and prefix must already
+// have terminal controls removed. Prefix is the unwrapped line's start, so
+// wrapped parts keep the same diff style.
+func DiffLine(text, prefix string, theme Theme) string {
+	return highlightDiffPart(text, prefix, theme)
+}
+
 func highlightDiff(text string, theme Theme) string {
+	return highlightDiffPart(text, text, theme)
+}
+
+func highlightDiffPart(text, prefix string, theme Theme) string {
 	switch {
-	case strings.HasPrefix(text, "+++"), strings.HasPrefix(text, "---"), strings.HasPrefix(text, "diff "), strings.HasPrefix(text, "index "):
+	case strings.HasPrefix(prefix, "+++"), strings.HasPrefix(prefix, "---"), strings.HasPrefix(prefix, "diff "), strings.HasPrefix(prefix, "index "):
 		return theme.Bold(theme.Graphite(text))
-	case strings.HasPrefix(text, "@@"):
+	case strings.HasPrefix(prefix, "@@"):
 		return theme.Blue(text)
-	case text[0] == '+':
+	case strings.HasPrefix(prefix, "+"):
 		return theme.Added(text)
-	case text[0] == '-':
+	case strings.HasPrefix(prefix, "-"):
 		return theme.Removed(text)
 	}
 	return text

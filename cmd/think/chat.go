@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,32 +22,39 @@ import (
 	"github.com/dylantirandaz/inklingharness/internal/latency"
 	"github.com/dylantirandaz/inklingharness/internal/presentation"
 	"github.com/dylantirandaz/inklingharness/internal/project"
+	"github.com/dylantirandaz/inklingharness/internal/rewind"
 	"github.com/dylantirandaz/inklingharness/internal/session"
 	"github.com/dylantirandaz/inklingharness/internal/terminal"
 	"github.com/dylantirandaz/inklingharness/internal/tools"
 )
 
-const chatHelp = `Commands:
-  /help             show these commands
-  /status           show the session, model, directory, and context size
-  /usage            show total token use, including summaries and child tasks
-  /tools            show the full output of the latest tool batch
-  /verbose [on|off]  show or hide per-turn protocol details
-  /model [ID]       show or change the model
-  /effort [LEVEL]   show or change effort; default restores the model default
-  /compact          summarize older messages; keep the last message or tool pair
-  /clear            start a new session; keep the old session on disk
-  /fork             continue in a copy of this session; keep the original
-  /title [TEXT]     show or set the session title
-  /export [PATH]    write the session as an interactive HTML page
-  /plan TASK        investigate with read-only tools and reply with a plan
-  /goal [CMD|off]   keep working until CMD passes (at most 5 rounds); off clears it
-  /context          show what fills the context window
-  /tinker [MODEL]   fine-tune MODEL on your sessions with Tinker and switch to it; no MODEL shows progress
-  /undo             restore the files and conversation from before the last prompt
-  /rewind [N]       list prompts, or restore the state from before prompt N
-  /quit             save and exit
-Enter sends. Ctrl-J adds a line. Ctrl-U clears the input.
+// chatCommandTable lists the commands of chat itself for /help and the slash
+// menu. Usage names the arguments; the first word is the command name.
+var chatCommandTable = []terminal.Command{
+	{Name: "help", Usage: "help", Description: "show these commands"},
+	{Name: "status", Usage: "status", Description: "show the session, model, directory, and context size"},
+	{Name: "usage", Usage: "usage", Description: "show total token use, including summaries and child tasks"},
+	{Name: "tools", Usage: "tools [N]", Description: "open full output of this turn's tools; N selects a tab"},
+	{Name: "diff", Usage: "diff", Description: "view current Git changes against HEAD, one file per tab"},
+	{Name: "verbose", Usage: "verbose [on|off]", Description: "show or hide per-turn protocol details"},
+	{Name: "model", Usage: "model [ID]", Description: "show or change the model"},
+	{Name: "effort", Usage: "effort [LEVEL]", Description: "show or change effort; default restores the model default"},
+	{Name: "compact", Usage: "compact", Description: "summarize older messages; keep the last message or tool pair"},
+	{Name: "clear", Usage: "clear", Description: "start a new session; keep the old session on disk"},
+	{Name: "fork", Usage: "fork", Description: "continue in a copy of this session; keep the original"},
+	{Name: "title", Usage: "title [TEXT]", Description: "show or set the session title"},
+	{Name: "export", Usage: "export [PATH]", Description: "write the session as an interactive HTML page"},
+	{Name: "plan", Usage: "plan TASK", Description: "investigate with read-only tools and reply with a plan"},
+	{Name: "goal", Usage: "goal [CMD|off]", Description: "keep working until CMD passes (at most 5 rounds); off clears it"},
+	{Name: "context", Usage: "context", Description: "show what fills the context window"},
+	{Name: "tinker", Usage: "tinker [MODEL]", Description: "fine-tune MODEL on your sessions with Tinker and switch to it; no MODEL shows progress"},
+	{Name: "undo", Usage: "undo", Description: "restore the files and conversation from before the last prompt"},
+	{Name: "rewind", Usage: "rewind [N]", Description: "list prompts, or restore the state from before prompt N"},
+	{Name: "quit", Usage: "quit", Description: "save and exit"},
+}
+
+const chatKeys = `Enter sends. Ctrl-J adds a line. Ctrl-U clears the input.
+Typing / opens the command menu: Up/Down selects, Tab completes, Enter runs, Esc closes.
 Up/Down moves through input rows, then recalls history at the edges.
 Ctrl-P/Ctrl-N recalls history directly and restores the draft.
 Alt-Left/Right moves by word. Ctrl-W deletes the previous word.
@@ -54,7 +62,21 @@ Pasted text stays in the input area until you press Enter.
 Attach files with @path or @"path with spaces". Use @@ for a literal @.
 In plain mode, end a line with a backslash to enter more lines.
 Ctrl-C stops the active request or tool. At an idle prompt, Ctrl-C exits.
+In /tools and /diff views: arrows or j/k scroll, PgUp/PgDn page, Home/End or g/G jump,
+Left/Right, Tab, or a digit select a tab, and Esc, q, Enter, or Ctrl-C return to chat.
 `
+
+// chatHelp lists the chat commands, then the extension help, then the keys.
+func chatHelp(extensionHelp string) string {
+	var out strings.Builder
+	out.WriteString("Commands:\n")
+	for _, command := range chatCommandTable {
+		fmt.Fprintf(&out, "  /%-17s %s\n", command.Usage, command.Description)
+	}
+	out.WriteString(extensionHelp)
+	out.WriteString(chatKeys)
+	return out.String()
+}
 
 const promptPlaceholder = "Ask Inkling to work on a task"
 
@@ -394,6 +416,8 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		input = newLineInput(ctx, stdin)
 	}
 	if screen != nil {
+		screen.SetCommands(append(slices.Clone(chatCommandTable), ext.userCommands()...))
+		screen.SetPlace(homeRelative(projectContext.WorkDir), gitBranch(projectContext.WorkDir))
 		answerer = screenAsker(screen, progressOutput, theme)
 	} else {
 		answerer = lineAsker(input, progressOutput)
@@ -405,6 +429,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	}
 	observer := newConsoleObserver(displayOutput, progressOutput, screen, true, theme, o.showThinking, o.verbose)
 	observer.approval = approval
+	observer.model = o.model
 	saveOnStart := *resume != "last" || current.Model != o.model || current.Effort != o.effort
 	current.Model, current.Effort = o.model, o.effort
 	if saveOnStart {
@@ -413,22 +438,30 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			return 1
 		}
 	}
-	bannerWidth := 0
-	if screen != nil {
-		bannerWidth = screen.Width()
+	banner := presentation.BannerInfo{
+		Directory: projectContext.WorkDir,
+		Model:     presentation.ModelName(o.model),
+		Effort:    displayEffort(o.effort),
 	}
-	frames := presentation.BannerFrames(projectContext.WorkDir, bannerWidth, theme, bannerFrames)
+	if screen != nil {
+		banner.Width, banner.Height = screen.Width(), screen.Height()
+	}
+	frames := presentation.BannerFrames(banner, theme, bannerFrames)
 	if screen != nil && frames != nil {
 		screen.Intro(frames)
 	} else {
-		fmt.Fprintln(displayOutput, presentation.Banner(projectContext.WorkDir, bannerWidth, theme))
+		fmt.Fprintln(displayOutput, presentation.Banner(banner, theme))
 	}
 	if screen == nil {
 		fmt.Fprintf(displayOutput, "%s · %s effort\n", presentation.Safe(o.model), displayEffort(o.effort))
 	}
 	printPrivacyNotice(stderr, o.model)
 	if *resume != "" {
-		if err := printLastReply(displayOutput, current.Messages, theme); err != nil {
+		resumedWidth := 0
+		if screen != nil {
+			resumedWidth = screen.Width()
+		}
+		if err := printLastReply(displayOutput, current.Messages, theme, resumedWidth); err != nil {
 			fmt.Fprintf(stderr, "inkling: %v\n", err)
 			return 1
 		}
@@ -517,7 +550,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		if goalTurn {
 			line, queued = queued, ""
 		} else if screen != nil {
-			screen.SetContext(contextUse(o, current.Messages))
+			screen.SetContext(contextUse(o, current.Messages, &current.Usage))
 			signals.ready()
 			var start func() *backgroundCompaction
 			if compactOnTyping {
@@ -538,7 +571,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				if settleError = settleBackground(ctx); settleError != nil {
 					return settleError
 				}
-				screen.SetContext(contextUse(o, current.Messages))
+				screen.SetContext(contextUse(o, current.Messages, &current.Usage))
 				screen.SetBackgroundWork("")
 				return nil
 			})
@@ -566,7 +599,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			return 1
 		}
 		if model, switched := tinkerWatch.poll(stderr); switched {
-			o.model, current.Model = model, model
+			o.model, current.Model, observer.model = model, model, model
 		}
 		commandText := strings.TrimSpace(line)
 		if commandText == "" {
@@ -588,15 +621,22 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				}
 				return 0
 			case "/help":
-				fmt.Fprint(stderr, chatHelp+ext.commandHelp())
+				fmt.Fprint(stderr, chatHelp(ext.commandHelp()))
 			case "/status":
 				if err := awaitBackground(); err != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", err)
 					return 1
 				}
-				if screen == nil {
+				switch {
+				case screen == nil:
 					fmt.Fprintf(stderr, "session=%s\nmodel=%s effort=%s\nworkdir=%s\nmessages=%d context_estimate=%d tokens approve_all=%t\n", current.ID, o.model, displayEffort(o.effort), current.WorkDir, len(current.Messages), agent.EstimateTokens(current.Messages), approval.allowAll)
-				} else {
+				case cardFits(theme, screen.Width()):
+					printCard(progressOutput, theme, screen.Width(), statusCard(theme, screen.Width(), statusFacts{
+						model: o.model, effort: displayEffort(o.effort), directory: current.WorkDir, sessionID: current.ID,
+						autoApprove: approval.allowAll, messages: len(current.Messages),
+						estimate: agent.EstimateTokens(current.Messages), compactTokens: o.compactTokens,
+					}))
+				default:
 					fmt.Fprintf(progressOutput, "\n%s\n  %s  %s\n  %s  %s\n  %s  %s\n  %s  %s\n  %s  %d messages · about %d tokens\n  %s  %s\n\n",
 						presentation.Section("Session", theme),
 						theme.Graphite("ID          "), presentation.Safe(current.ID),
@@ -617,8 +657,64 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 					fmt.Fprintf(stderr, "inkling: %v\n", err)
 					return 1
 				}
-				if err := printLatestTools(progressOutput, current.Messages, theme); err != nil {
+				documents, err := latestToolDocuments(current.Messages)
+				if err != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", err)
+					continue
+				}
+				if len(documents) == 0 {
+					fmt.Fprintln(stderr, "No tool results are stored for the last prompt.")
+					continue
+				}
+				selected := 0
+				if argument != "" {
+					number, err := strconv.Atoi(argument)
+					if err != nil || number < 1 || number > len(documents) {
+						fmt.Fprintf(stderr, "Use /tools N with N between 1 and %d.\n", len(documents))
+						continue
+					}
+					selected = number - 1
+				}
+				if screen != nil {
+					if err := screen.View(ctx, "Turn tools", documents, selected); err != nil {
+						fmt.Fprintf(stderr, "inkling: %v\n", err)
+					}
+				} else {
+					if argument != "" {
+						documents = documents[selected : selected+1]
+					}
+					for _, document := range documents {
+						fmt.Fprintf(progressOutput, "\n%s\n%s\n", presentation.Safe(document.Title), presentation.Safe(document.Text))
+					}
+				}
+			case "/diff":
+				if argument != "" {
+					fmt.Fprintln(stderr, "Use /diff without arguments.")
+					continue
+				}
+				diffContext, finish := control.begin(ctx)
+				if screen != nil {
+					screen.SetStatus("Reading changes")
+				}
+				diff, err := rewind.Diff(diffContext, projectContext.WorkDir)
+				finish()
+				if screen != nil {
+					screen.SetStatus("")
+				}
+				if err != nil {
+					fmt.Fprintf(stderr, "inkling: %v\n", err)
+					continue
+				}
+				if diff == "" {
+					fmt.Fprintln(stderr, "No changes against HEAD.")
+					continue
+				}
+				if screen != nil {
+					if err := screen.View(ctx, "Changes against HEAD", diffDocuments(diff), 0); err != nil {
+						fmt.Fprintf(stderr, "inkling: %v\n", err)
+					}
+				} else {
+					fmt.Fprint(progressOutput, presentation.Safe(diff))
 				}
 			case "/verbose":
 				switch argument {
@@ -647,7 +743,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 					fmt.Fprintf(stderr, "inkling: %v\n", err)
 					return 1
 				}
-				o.model, current.Model = argument, argument
+				o.model, current.Model, observer.model = argument, argument, argument
 				printPrivacyNotice(stderr, o.model)
 				saveChanges = true
 			case "/effort":
@@ -790,7 +886,11 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			case "/context":
 				config, configErr := chatConfig(o, projectContext, ext, store)
 				if configErr == nil {
-					configErr = writeContext(stderr, config, toolSet, current.Messages, o.compactTokens)
+					if screen != nil && cardFits(theme, screen.Width()) {
+						configErr = writeContextCard(progressOutput, theme, screen.Width(), config, toolSet, current.Messages, o.compactTokens)
+					} else {
+						configErr = writeContext(stderr, config, toolSet, current.Messages, o.compactTokens)
+					}
 				}
 				if configErr != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", configErr)
@@ -967,6 +1067,19 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		if runErr != nil {
 			fmt.Fprintf(stderr, "inkling: %v\n", runErr)
 		}
+		if screen != nil && runErr == nil && outcome.Turns > 0 {
+			inputTokens := outcome.Usage.InputTokens + outcome.Usage.CacheReadInputTokens + outcome.Usage.CacheCreationInputTokens
+			if theme.Soft() {
+				summary := presentation.TurnSummaryText(time.Since(started), outcome.Turns, inputTokens, outcome.Usage.OutputTokens)
+				fmt.Fprintln(progressOutput, "\n"+theme.TurnRule(summary, screen.Width()-1))
+			} else {
+				fmt.Fprintln(progressOutput, "\n  "+presentation.TurnSummary(time.Since(started), outcome.Turns, inputTokens, outcome.Usage.OutputTokens, theme))
+			}
+		}
+		if screen != nil {
+			// A turn can switch branches, so the footer asks again.
+			screen.SetPlace(homeRelative(projectContext.WorkDir), gitBranch(projectContext.WorkDir))
+		}
 		signals.finished(time.Since(started), outcome.FinalText, runErr)
 		if activeGoal.active() {
 			switch {
@@ -1033,7 +1146,10 @@ func displayEffort(effort string) string {
 	return effort
 }
 
-func printLastReply(output io.Writer, messages []anthropic.EncodedMessage, theme presentation.Theme) error {
+// printLastReply shows the end of the saved conversation on resume. A width
+// above zero is the width of the screen: prose wraps to it and code sits on a
+// card, as in a live reply.
+func printLastReply(output io.Writer, messages []anthropic.EncodedMessage, theme presentation.Theme, screenWidth int) error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -1048,11 +1164,23 @@ func printLastReply(output io.Writer, messages []anthropic.EncodedMessage, theme
 	markdown := presentation.NewMarkdown(theme)
 	fmt.Fprintln(output, "\n"+presentation.Section("previous reply", theme))
 	for _, block := range last.Content {
-		if text, ok := block.(anthropic.TextBlock); ok {
-			for _, line := range strings.Split(text.Text, "\n") {
-				fmt.Fprintln(output, "  "+markdown.Line(line))
+		text, ok := block.(anthropic.TextBlock)
+		if !ok {
+			continue
+		}
+		for _, line := range strings.Split(text.Text, "\n") {
+			rendered := markdown.Block(line)
+			if screenWidth <= 0 {
+				fmt.Fprintln(output, "  "+rendered.Text)
+				continue
+			}
+			for _, row := range blockRows(theme, rendered, max(screenWidth-3, 1)) {
+				fmt.Fprintln(output, "  "+row)
 			}
 		}
+	}
+	if markdown.InCode() && screenWidth > 0 && theme.Soft() {
+		fmt.Fprintln(output, "  "+theme.CardBottom(max(screenWidth-3, 1)))
 	}
 	return nil
 }

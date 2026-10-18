@@ -1,0 +1,113 @@
+package presentation
+
+import (
+	"hash/fnv"
+	"path/filepath"
+	"strings"
+)
+
+// wordmark uses the site's letter spacing without claiming its identity.
+const wordmark = "I N K L I N G"
+
+// BannerInfo is what the opening screen shows.
+type BannerInfo struct {
+	// Directory is the workspace. Its name is the title, and it picks the
+	// picture, so a project keeps its artwork.
+	Directory string
+	// Model and Effort are the display names that the subtitle shows.
+	Model, Effort string
+	// Width and Height are the terminal size in cells; 0 for no terminal.
+	Width, Height int
+}
+
+// The hero needs this much of the terminal: the page's 12 rows of artwork
+// need 6 rows of text and margins, and the composer needs the rest.
+const (
+	bannerMinimumWidth = 64
+	bannerArtMaxRows   = 12
+	bannerArtMaxWidth  = 48
+	bannerArtReserved  = 18
+	bannerArtMinRows   = 5
+)
+
+// Banner is the opening screen without animation.
+func Banner(info BannerInfo, theme Theme) string {
+	if picture := info.picture(theme); picture != nil {
+		return heroAt(picture, info, theme, 1)
+	}
+	return "\n  " + strings.Join(bannerText(info, theme), "\n\n  ") + "\n"
+}
+
+// BannerFrames reveals the artwork and the workspace without moving the
+// composer. It is nil when the terminal has no room or color support for the
+// artwork.
+func BannerFrames(info BannerInfo, theme Theme, count int) []string {
+	picture := info.picture(theme)
+	if picture == nil || count < 2 {
+		return nil
+	}
+	frames := make([]string, count)
+	for index := range frames {
+		frames[index] = heroAt(picture, info, theme, float64(index)/float64(count-1))
+	}
+	return frames
+}
+
+// bannerSeed picks one of the page's seeds from the workspace path.
+func bannerSeed(directory string) uint32 {
+	hash := fnv.New32a()
+	hash.Write([]byte(directory))
+	return BlotSeeds[int(hash.Sum32()%uint32(len(BlotSeeds)))]
+}
+
+func (info BannerInfo) picture(theme Theme) *BlotPicture {
+	if theme.depth < ANSI256 || info.Width < bannerMinimumWidth {
+		return nil
+	}
+	rows := min(bannerArtMaxRows, info.Height-bannerArtReserved)
+	if rows < bannerArtMinRows {
+		return nil
+	}
+	return NewBlotPicture(NewBlot(bannerSeed(info.Directory)), min(bannerArtMaxWidth, info.Width-8), rows)
+}
+
+func bannerText(info BannerInfo, theme Theme) []string {
+	return []string{
+		theme.Graphite(wordmark),
+		theme.Bold(theme.Ink(singleLine(filepath.Base(info.Directory)))),
+		theme.Graphite("/help commands") + theme.Hairline(" · ") + theme.Graphite("/status session"),
+	}
+}
+
+// heroAt draws the opening screen at a progress from 0 to 1, centered like
+// the hero of the page: the artwork, the wordmark, the workspace name, and
+// the model. Every progress has the same number of rows, so the composer
+// below stays in place.
+func heroAt(picture *BlotPicture, info BannerInfo, theme Theme, progress float64) string {
+	width := max(info.Width-1, 1)
+	center := func(plain, styled string) string {
+		return strings.Repeat(" ", max((width-CellWidth(plain))/2, 0)) + styled
+	}
+	var rows []string
+	rows = append(rows, "")
+	artPad := strings.Repeat(" ", max((width-picture.Columns)/2, 0))
+	for _, row := range picture.Draw(theme, min(progress/0.85, 1)) {
+		rows = append(rows, artPad+row)
+	}
+	rows = append(rows, "")
+	// The wordmark is typed, then the name and the model appear.
+	typed := int(float64(len(wordmark)) * min(max((progress-0.45)/0.35, 0), 1))
+	rows = append(rows, center(wordmark, theme.Graphite(wordmark[:typed])), "")
+	title := clipCells(singleLine(filepath.Base(info.Directory)), width-4)
+	subtitle := clipCells(singleLine(info.Model+" · "+info.Effort+" effort"), width-4)
+	switch {
+	case progress >= 0.85:
+		rows = append(rows, center(title, theme.Bold(theme.Ink(title))), center(subtitle, theme.Graphite(subtitle)))
+	case progress >= 0.7:
+		rows = append(rows, center(title, theme.Bold(theme.Ink(title))), "")
+	default:
+		rows = append(rows, "", "")
+	}
+	rows = append(rows, "")
+	return strings.Join(rows, "\n")
+}

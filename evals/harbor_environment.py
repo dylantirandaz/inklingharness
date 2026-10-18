@@ -20,7 +20,7 @@ class NativeModalEnvironment(ModalEnvironment):
         await super().start(force_build)
         script = Path(__file__).with_name("harbor_preflight.sh").read_text()
         result = await self.exec(
-            shlex.join(["bash", "-c", script, "native-preflight", str(self.task_env_config.cpus), str(self.task_env_config.memory_mb)]),
+            shlex.join(["bash", "-c", script, "native-preflight", "modal", str(self.task_env_config.cpus), str(self.task_env_config.memory_mb)]),
             timeout_sec=30,
         )
         record = {

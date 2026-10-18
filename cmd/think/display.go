@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,7 +26,10 @@ func (writer safeWriter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-type pendingTool struct{ name, title string }
+type pendingTool struct {
+	name, title string
+	input       json.RawMessage
+}
 
 type consoleObserver struct {
 	stdout, stderr                io.Writer
@@ -42,9 +46,17 @@ type consoleObserver struct {
 	plainEnded bool
 	pending    []pendingTool
 	nextTool   int
+	// toolCount numbers the cards of one turn across its requests, so a
+	// badge matches the tab that /tools N opens.
+	toolCount int
+	// afterTools is true once tool cards were shown and no reply text has
+	// followed them yet; the next text starts a new block.
+	afterTools bool
 	// approval reports how long the user took to answer, which a tool's
 	// elapsed time includes but its own work does not.
 	approval *approvals
+	// model names the endpoint in the wait status; empty names no model.
+	model string
 }
 
 func newConsoleObserver(stdout, stderr io.Writer, screen *terminal.Screen, chat bool, theme presentation.Theme, showThinking, verbose bool) *consoleObserver {
@@ -56,9 +68,19 @@ func (c *consoleObserver) Begin() {
 	c.line.Reset()
 	c.thinking.Reset()
 	c.bodyStarted, c.reasoningStarted, c.leadShown, c.plainEnded = false, false, false, true
+	c.afterTools = false
 	c.pending = c.pending[:0]
-	c.nextTool = 0
-	c.activity("Thinking")
+	c.nextTool, c.toolCount = 0, 0
+	c.activity(c.waitingLabel())
+}
+
+// waitingLabel names the wait for the first streamed token. The model is
+// not thinking yet: the request is queued at the provider or in flight.
+func (c *consoleObserver) waitingLabel() string {
+	if c.model == "" {
+		return "Waiting for the model"
+	}
+	return "Waiting for " + presentation.ModelName(c.model)
 }
 
 func (c *consoleObserver) activity(message string) {
@@ -67,22 +89,18 @@ func (c *consoleObserver) activity(message string) {
 	}
 }
 
-// replyPrefix starts the first reply line with the assistant sigil and
-// indents the others under it.
-func (c *consoleObserver) replyPrefix() string {
-	if c.leadShown {
-		return "  "
-	}
-	return presentation.AssistantLead(c.theme)
-}
+// replyIndent is the margin of reply text on a screen. Prose, code, and tool
+// cards share it, so the transcript has one left edge and no marker before
+// the reply.
+const replyIndent = "  "
 
 func (c *consoleObserver) Text(delta string) {
 	c.flushThinking()
-	if !c.bodyStarted {
+	if !c.bodyStarted || c.afterTools {
 		if c.chat {
 			fmt.Fprintln(c.stdout)
 		}
-		c.bodyStarted = true
+		c.bodyStarted, c.afterTools = true, false
 	}
 	c.activity("Writing reply")
 	if c.screen == nil {
@@ -116,12 +134,12 @@ func (c *consoleObserver) Text(delta string) {
 		delta = rest
 	}
 	if completeLines.Len() > 0 {
-		c.screen.SetPreview("")
+		c.screen.ClearPreview()
 		io.WriteString(c.stdout, completeLines.String())
 	}
 	if c.line.Len() > 0 {
 		// Show tokens immediately; parse Markdown only when the line commits.
-		c.screen.StreamPreview(c.replyPrefix(), presentation.Safe(c.line.String()))
+		c.screen.StreamPreview(replyIndent, presentation.Safe(c.line.String()))
 	}
 }
 
@@ -139,7 +157,7 @@ func (c *consoleObserver) Thinking(delta string) {
 		c.thinking.WriteString(part)
 		if !complete {
 			if c.screen != nil {
-				c.screen.SetPreview("  " + c.theme.Graphite(c.theme.Italic(presentation.Safe(c.thinking.String()))))
+				c.screen.StreamReasoning(c.thinking.String())
 			}
 			break
 		}
@@ -152,22 +170,49 @@ func (c *consoleObserver) flushThinking() {
 	if c.thinking.Len() == 0 {
 		return
 	}
-	if c.screen != nil {
-		c.screen.SetPreview("")
-	}
-	fmt.Fprintln(c.stderr, "  "+c.theme.Graphite(c.theme.Italic(presentation.Safe(c.thinking.String()))))
+	text := presentation.Safe(c.thinking.String())
 	c.thinking.Reset()
+	if c.screen == nil {
+		fmt.Fprintln(c.stderr, "  "+c.theme.Graphite(c.theme.Italic(text)))
+		return
+	}
+	c.screen.ClearPreview()
+	// Reasoning wraps under its margin, as a reply does.
+	for _, row := range terminal.WrapWords(text, max(c.screen.Width()-3, 1)) {
+		fmt.Fprintln(c.stderr, "  "+c.theme.Graphite(c.theme.Italic(row)))
+	}
 }
 
-// commitLine renders one complete reply line and wraps it at words, so its
-// continuation rows align under the text after the assistant sigil.
-func (c *consoleObserver) commitLine(out *strings.Builder, line string) {
-	for index, row := range terminal.WrapWords(c.markdown.Line(line), max(c.screen.Width()-3, 1)) {
-		if index > 0 {
-			out.WriteString("  ")
-		} else {
-			out.WriteString(c.replyPrefix())
+// blockRows sets one rendered reply line on a screen where the text has width
+// cells. Prose wraps at words. On a terminal with a tint, code sits on a card
+// instead of between rules.
+func blockRows(theme presentation.Theme, block presentation.Block, width int) []string {
+	switch {
+	case !theme.Soft() || block.Kind == presentation.ProseLine:
+		return terminal.WrapWords(block.Text, width)
+	case block.Kind == presentation.CodeStart:
+		rows := []string{theme.CardTop(width)}
+		if block.Info != "" {
+			rows = append(rows, theme.CardRow(theme.Graphite(block.Info), width))
 		}
+		return rows
+	case block.Kind == presentation.CodeLine:
+		var rows []string
+		for _, row := range terminal.WrapWords(block.Text, max(width-2*presentation.CardInset, 1)) {
+			rows = append(rows, theme.CardRow(row, width))
+		}
+		return rows
+	case block.Kind == presentation.CodeEnd:
+		return []string{theme.CardBottom(width)}
+	}
+	panic(fmt.Sprintf("think: unknown block kind %d", block.Kind))
+}
+
+// commitLine renders one complete reply line; its continuation rows keep the
+// same margin.
+func (c *consoleObserver) commitLine(out *strings.Builder, line string) {
+	for _, row := range blockRows(c.theme, c.markdown.Block(line), max(c.screen.Width()-3, 1)) {
+		out.WriteString(replyIndent)
 		out.WriteString(row)
 		out.WriteByte('\n')
 	}
@@ -182,13 +227,20 @@ func (c *consoleObserver) flushText() {
 		}
 		return
 	}
-	c.screen.SetPreview("")
+	c.screen.ClearPreview()
+	var rows strings.Builder
 	if c.line.Len() > 0 {
-		var line strings.Builder
-		c.commitLine(&line, c.line.String())
-		io.WriteString(c.stdout, line.String())
+		c.commitLine(&rows, c.line.String())
 		c.line.Reset()
 	}
+	// A reply that ends inside a fence still closes its card.
+	if c.markdown.InCode() {
+		c.markdown.EndCode()
+		if c.theme.Soft() {
+			rows.WriteString("  " + c.theme.CardBottom(max(c.screen.Width()-3, 1)) + "\n")
+		}
+	}
+	io.WriteString(c.stdout, rows.String())
 }
 
 func (c *consoleObserver) ToolCallStart(name string) {
@@ -213,7 +265,7 @@ func (c *consoleObserver) ToolCall(name string, input json.RawMessage) {
 	if err != nil {
 		title = presentation.Safe(name) + " (invalid or unknown arguments)"
 	}
-	c.pending = append(c.pending, pendingTool{name: name, title: title})
+	c.pending = append(c.pending, pendingTool{name: name, title: title, input: input})
 	if c.screen != nil {
 		c.screen.SetToolStatus(title)
 	}
@@ -222,11 +274,23 @@ func (c *consoleObserver) ToolCall(name string, input json.RawMessage) {
 	}
 }
 
+// ToolResult records a finished tool. On a terminal with a tint it is a card
+// of its own, as presentation.ToolCard draws it. Elsewhere it is a row with
+// its preview lines on a rail, and a closing corner that names the route to
+// the full result.
 func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed time.Duration) {
 	c.flushText()
+	if c.chat && !c.afterTools {
+		fmt.Fprintln(c.stderr)
+		c.bodyStarted = true
+	}
 	title := presentation.Safe(name)
+	var input json.RawMessage
+	number := 0
 	if c.nextTool < len(c.pending) && c.pending[c.nextTool].name == name {
-		title = c.pending[c.nextTool].title
+		title, input = c.pending[c.nextTool].title, c.pending[c.nextTool].input
+		c.toolCount++
+		number = c.toolCount
 		c.pending[c.nextTool] = pendingTool{}
 		c.nextTool++
 		if c.nextTool == len(c.pending) {
@@ -234,36 +298,22 @@ func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed t
 			c.nextTool = 0
 		}
 	}
-	var completion string
-	if c.chat {
-		if c.approval != nil {
-			elapsed = max(elapsed-c.approval.takeWait(), 0)
-		}
-		completion = presentation.ToolRow(title, result.IsError, elapsed, c.theme)
-	} else {
-		completion = presentation.ToolCompletion(title, result.IsError, c.theme)
+	// A reply after tool cards starts a new block.
+	c.leadShown, c.afterTools = false, true
+	if c.chat && c.approval != nil {
+		elapsed = max(elapsed-c.approval.takeWait(), 0)
 	}
-	fmt.Fprintln(c.stderr, "  "+completion)
-	if c.chat || result.IsError || name == "bash" || name == "task" || c.verbose {
-		var preview string
-		if c.chat && !c.verbose {
-			budget := 3
-			if result.IsError {
-				budget = 6
-			}
-			preview = presentation.ResultPreview(result.Content, result.IsError, budget, c.theme)
-		} else {
-			preview = presentation.Safe(result.Content)
+	step := presentation.ToolStep{Name: name, Title: title, Input: input, Content: result.Content, Failed: result.IsError, Elapsed: elapsed, Number: number}
+	var card []string
+	if c.chat && c.screen != nil && !c.verbose {
+		card = c.theme.ToolCard(step, max(c.screen.Width()-3, 1))
+	}
+	if card != nil {
+		for _, row := range card {
+			fmt.Fprintln(c.stderr, "  "+row)
 		}
-		if preview != "" || !c.chat {
-			lead := "    " + c.theme.Hairline("│") + " "
-			for line := range strings.SplitSeq(preview, "\n") {
-				if c.chat && !result.IsError {
-					line = c.theme.Graphite(line)
-				}
-				fmt.Fprintln(c.stderr, lead+line)
-			}
-		}
+	} else {
+		c.printToolRail(step, result)
 	}
 	if c.verbose {
 		fmt.Fprintf(c.stderr, "[tool elapsed %s]\n", elapsed.Round(time.Millisecond))
@@ -271,13 +321,65 @@ func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed t
 	if len(c.pending) > 0 {
 		c.activity("Running tools")
 	} else {
-		c.activity("Thinking")
+		c.activity(c.waitingLabel())
+	}
+}
+
+// printToolRail records a finished tool as a row with its preview lines on a
+// rail: for a terminal without a tint, a plain stream, and the verbose view
+// that shows the whole result.
+func (c *consoleObserver) printToolRail(step presentation.ToolStep, result tools.Result) {
+	route, badge := "/tools", ""
+	if step.Number > 0 {
+		route += " " + strconv.Itoa(step.Number)
+		if c.screen != nil {
+			badge = "  " + c.theme.Key(strconv.Itoa(step.Number))
+		}
+	}
+	var completion string
+	if c.chat {
+		completion = presentation.ToolRow(step.Title, result.IsError, step.Elapsed, c.theme)
+	} else {
+		completion = presentation.ToolCompletion(step.Title, result.IsError, c.theme)
+	}
+	fmt.Fprintln(c.stderr, "  "+completion+badge)
+	if !c.chat && !result.IsError && step.Name != "bash" && step.Name != "task" && !c.verbose {
+		return
+	}
+	var preview string
+	if c.chat && !c.verbose {
+		budget := 3
+		if result.IsError {
+			budget = 6
+		}
+		preview = presentation.ResultPreview(result.Content, result.IsError, budget, route, c.theme)
+	} else {
+		preview = presentation.Safe(result.Content)
+	}
+	if preview == "" && c.chat {
+		return
+	}
+	lines := strings.Split(preview, "\n")
+	for index, line := range lines {
+		rail := "│"
+		if index == len(lines)-1 {
+			rail = "╰"
+		}
+		if c.chat && !result.IsError {
+			line = c.theme.Graphite(line)
+		}
+		fmt.Fprintln(c.stderr, "  "+c.theme.Hairline(rail)+" "+line)
 	}
 }
 
 func (c *consoleObserver) TurnDone(turn int, usage anthropic.Usage, stop anthropic.StopReason, elapsed time.Duration) {
 	if stop == anthropic.StopToolUse {
 		c.activity("Running tools")
+	}
+	if c.screen != nil {
+		// The request's input is the context that the model just read, so
+		// the gauge follows each request instead of waiting for the turn.
+		c.screen.SetContextTokens(usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens + usage.OutputTokens)
 	}
 	if c.verbose {
 		c.flushThinking()
@@ -305,21 +407,42 @@ func (c *consoleObserver) Finish() {
 	c.activity("")
 }
 
-// printUser wraps the prompt at words when the terminal width is known, so
-// its rows continue under the prompt marker.
+// printUser echoes a sent prompt. On a tinted screen it is a card, wrapped at
+// words with the time at the right edge of its first row. Otherwise it is a
+// tinted band, with its rows under the prompt marker when the terminal
+// width is known.
 func printUser(output io.Writer, prompt string, width int, theme presentation.Theme) {
+	stamp, pad := "", -1
 	if width > 0 {
 		var rows []string
+		textWidth := max(width-3, 1)
+		if theme.Soft() {
+			// The card takes four cells for its margins and two for the marker.
+			textWidth = max(width-1-4-2, 1)
+		}
 		for line := range strings.SplitSeq(presentation.Safe(prompt), "\n") {
-			rows = append(rows, terminal.WrapWords(line, max(width-3, 1))...)
+			rows = append(rows, terminal.WrapWords(line, textWidth)...)
+		}
+		stamp = time.Now().Format("15:04")
+		if card := theme.UserCard(rows, stamp, width-1); card != nil {
+			fmt.Fprintln(output, "\n"+strings.Join(card, "\n"))
+			return
 		}
 		prompt = strings.Join(rows, "\n")
+		pad = width - 4 - presentation.CellWidth(rows[0]) - len(stamp)
+		if pad < 2 {
+			stamp, pad = "", -1
+		}
 	}
-	fmt.Fprintln(output, "\n"+presentation.UserTurn(prompt, theme))
+	fmt.Fprintln(output, "\n"+presentation.UserTurn(prompt, stamp, pad, theme))
 }
 
-func contextUse(o *options, messages []anthropic.EncodedMessage) presentation.ContextUse {
-	return presentation.ContextUse{Model: o.model, Effort: displayEffort(o.effort), Tokens: agent.EstimateTokens(messages), CompactTokens: o.compactTokens}
+func contextUse(o *options, messages []anthropic.EncodedMessage, usage *anthropic.Usage) presentation.ContextUse {
+	return presentation.ContextUse{
+		Model: o.model, Effort: displayEffort(o.effort),
+		Tokens: agent.EstimateTokens(messages), CompactTokens: o.compactTokens,
+		SessionTokens: usage.InputTokens + usage.CacheReadInputTokens + usage.CacheCreationInputTokens + usage.OutputTokens,
+	}
 }
 
 // motionVariable turns the terminal animations off with the value "off".
@@ -396,49 +519,114 @@ func firstLine(text string) string {
 	return "done"
 }
 
-// printLatestTools uses saved tool messages, not a second in-memory transcript.
-// Only user messages carry tool results, so it decodes no assistant message
-// except the one that holds the shown calls.
-func printLatestTools(output io.Writer, messages []anthropic.EncodedMessage, theme presentation.Theme) error {
-	for end := len(messages); end > 1; end-- {
-		if messages[end-1].Role() != anthropic.RoleUser {
+// latestToolDocuments reads saved messages only when the user opens tool
+// output: every tool result since the last prompt, in the order of the cards.
+// The live cards do not keep another copy of the transcript or full results.
+func latestToolDocuments(messages []anthropic.EncodedMessage) ([]terminal.Document, error) {
+	// The turn starts after the last user message that carries no tool
+	// result: the prompt. Later user messages hold only tool results.
+	start := 0
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role() != anthropic.RoleUser {
 			continue
 		}
-		message, err := messages[end-1].Decode()
+		message, err := messages[index].Decode()
 		if err != nil {
-			return fmt.Errorf("show tools: %w", err)
+			return nil, fmt.Errorf("show tools: %w", err)
 		}
-		var results []anthropic.ToolResultBlock
-		for _, block := range message.Content {
-			if result, ok := block.(anthropic.ToolResultBlock); ok {
-				results = append(results, result)
-			}
+		if !hasToolResult(message) {
+			start = index + 1
+			break
 		}
-		if len(results) == 0 {
-			continue
-		}
-		calls, err := messages[end-2].Decode()
-		if err != nil {
-			return fmt.Errorf("show tools: %w", err)
-		}
-		for _, result := range results {
-			var call *anthropic.ToolUseBlock
-			for _, block := range calls.Content {
-				if candidate, ok := block.(anthropic.ToolUseBlock); ok && candidate.ID == result.ToolUseID {
-					call = &candidate
-					break
-				}
-			}
-			if call == nil {
-				fmt.Fprintf(output, "Missing saved call for result %s\n%s\n", presentation.Safe(result.ToolUseID), presentation.ToolCompletion("Result", result.IsError, theme))
-				fmt.Fprintln(output, presentation.Safe(result.Content))
-				continue
-			}
-			view := describeTool(call.Name, call.Input, theme)
-			fmt.Fprintf(output, "\n%s\n%s\n\n%s\n", presentation.ToolCompletion(view.Title, result.IsError, theme), view.Details, presentation.Safe(result.Content))
-		}
-		return nil
 	}
-	fmt.Fprintln(output, "No tool results are stored in this session yet.")
-	return nil
+	calls := make(map[string]anthropic.ToolUseBlock)
+	var documents []terminal.Document
+	for _, encoded := range messages[start:] {
+		message, err := encoded.Decode()
+		if err != nil {
+			return nil, fmt.Errorf("show tools: %w", err)
+		}
+		for _, block := range message.Content {
+			switch typed := block.(type) {
+			case anthropic.ToolUseBlock:
+				calls[typed.ID] = typed
+			case anthropic.ToolResultBlock:
+				view := presentation.ToolView{
+					Title:   "Result",
+					Details: "Missing saved call for result " + typed.ToolUseID,
+				}
+				if call, found := calls[typed.ToolUseID]; found {
+					view = describeTool(call.Name, call.Input, presentation.Theme{})
+				}
+				documents = append(documents, terminal.Document{
+					Title:  presentation.ToolCompletion(view.Title, typed.IsError, presentation.Theme{}),
+					Text:   view.Details + "\n\nResult\n" + typed.Content,
+					Format: terminal.PlainDocument,
+				})
+			}
+		}
+	}
+	return documents, nil
+}
+
+func hasToolResult(message anthropic.Message) bool {
+	for _, block := range message.Content {
+		if _, ok := block.(anthropic.ToolResultBlock); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// diffDocuments splits a unified patch into one document per file, titled
+// with the path, its change kind, and the counts of added and removed lines.
+// A patch that does not start with a file header stays one document.
+func diffDocuments(patch string) []terminal.Document {
+	var documents []terminal.Document
+	start := 0
+	for start < len(patch) {
+		end := len(patch)
+		if next := strings.Index(patch[start+1:], "\ndiff --git "); next >= 0 {
+			end = start + 1 + next + 1
+		}
+		file := patch[start:end]
+		documents = append(documents, terminal.Document{Title: diffTitle(file), Text: file, Format: terminal.DiffDocument})
+		start = end
+	}
+	return documents
+}
+
+func diffTitle(file string) string {
+	path, kind := "Changes", ""
+	added, removed := 0, 0
+	for line := range strings.SplitSeq(file, "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git a/"):
+			path = line[len("diff --git a/"):]
+			if _, after, found := strings.Cut(path, " b/"); found {
+				path = after
+			}
+		case strings.HasPrefix(line, "new file mode"):
+			kind = "new"
+		case strings.HasPrefix(line, "deleted file mode"):
+			kind = "deleted"
+		case strings.HasPrefix(line, "rename to "):
+			kind = "renamed"
+		case strings.HasPrefix(line, "Binary files"):
+			kind = "binary"
+		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+		case strings.HasPrefix(line, "+"):
+			added++
+		case strings.HasPrefix(line, "-"):
+			removed++
+		}
+	}
+	title := path
+	if kind != "" {
+		title += " · " + kind
+	}
+	if added > 0 || removed > 0 {
+		title += fmt.Sprintf(" · +%d −%d", added, removed)
+	}
+	return title
 }

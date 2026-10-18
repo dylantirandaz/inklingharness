@@ -2,6 +2,7 @@ package presentation
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -88,18 +89,19 @@ func TestMarkdownFenceStateAndPreview(t *testing.T) {
 }
 
 func TestMarkdownInlineAndIncomplete(t *testing.T) {
-	tests := []struct{ input, want string }{
-		{"# Heading", "Heading"},
-		{"- item", "▪ item"},
-		{"**bold** and *emphasis*", "bold and emphasis"},
-		{"snake_case_identifier", "snake_case_identifier"},
-		{"`a*b _c_ [x](y)`", "`a*b _c_ [x](y)`"},
-		{"``a ` b *c*``", "``a ` b *c*``"},
-		{"*a `*` b*", "a `*` b"},
-		{"[guide](https://example.test/a(b))", "guide (https://example.test/a(b))"},
-		{"**unfinished", "**unfinished"},
-		{"`unfinished *literal*", "`unfinished *literal*"},
-		{"[unfinished](url", "[unfinished](url"},
+	// wantColored is the result with color, where color replaces the backticks.
+	tests := []struct{ input, want, wantColored string }{
+		{"# Heading", "Heading", ""},
+		{"- item", "• item", ""},
+		{"**bold** and *emphasis*", "bold and emphasis", ""},
+		{"snake_case_identifier", "snake_case_identifier", ""},
+		{"`a*b _c_ [x](y)`", "`a*b _c_ [x](y)`", "a*b _c_ [x](y)"},
+		{"``a ` b *c*``", "``a ` b *c*``", "a ` b *c*"},
+		{"*a `*` b*", "a `*` b", "a * b"},
+		{"[guide](https://example.test/a(b))", "guide (https://example.test/a(b))", ""},
+		{"**unfinished", "**unfinished", ""},
+		{"`unfinished *literal*", "`unfinished *literal*", ""},
+		{"[unfinished](url", "[unfinished](url", ""},
 	}
 	for _, test := range tests {
 		for _, theme := range themes {
@@ -108,8 +110,12 @@ func TestMarkdownInlineAndIncomplete(t *testing.T) {
 			if !theme.Colored() && strings.Contains(got, "\x1b") {
 				t.Fatalf("plain renderer emitted ANSI: %q", got)
 			}
-			if Safe(got) != test.want {
-				t.Fatalf("render(%q, %d) = %q; want %q", test.input, theme.depth, got, test.want)
+			want := test.want
+			if theme.Colored() && test.wantColored != "" {
+				want = test.wantColored
+			}
+			if Safe(got) != want {
+				t.Fatalf("render(%q, %d) = %q; want %q", test.input, theme.depth, got, want)
 			}
 		}
 	}
@@ -157,6 +163,38 @@ func TestFullApprovalContent(t *testing.T) {
 	}
 	if !strings.Contains(view.Details, "printf start\nprintf end\n# final command") || !strings.Contains(view.Details, "42") {
 		t.Fatalf("incomplete Bash approval: %q", view.Details)
+	}
+}
+
+// A notice about the end of the content helps only when the approval changes
+// that end. A replacement whose two sides end alike keeps the end of the file,
+// so it has no notice.
+func TestApprovalNotesFinalNewlineOnlyWhenItChanges(t *testing.T) {
+	tests := []struct {
+		name, tool, input string
+		notices           int
+		after             string
+	}{
+		{"write without final newline", "write_file", `{"path":"a.go","content":"x"}`, 1, "+ x"},
+		{"write with final newline", "write_file", `{"path":"a.go","content":"x\n"}`, 0, ""},
+		{"edit that keeps the ending", "edit_file", `{"path":"a.go","old_string":"x","new_string":"y"}`, 0, ""},
+		{"edit that keeps a final newline", "edit_file", `{"path":"a.go","old_string":"x\n","new_string":"y\n"}`, 0, ""},
+		{"edit that removes the final newline", "edit_file", `{"path":"a.go","old_string":"x\n","new_string":"y"}`, 1, "+ y"},
+		{"edit that adds a final newline", "edit_file", `{"path":"a.go","old_string":"x","new_string":"y\n"}`, 1, "- x"},
+		{"edit that deletes a fragment", "edit_file", `{"path":"a.go","old_string":"x","new_string":""}`, 0, ""},
+	}
+	for _, test := range tests {
+		view, err := DescribeTool(test.tool, json.RawMessage(test.input), Theme{})
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		plain := Safe(view.Details)
+		if got := strings.Count(plain, "No newline"); got != test.notices {
+			t.Fatalf("%s: %d notices in %q, want %d", test.name, got, plain, test.notices)
+		}
+		if test.after != "" && !strings.Contains(plain, test.after+"\n\\ No newline") {
+			t.Fatalf("%s: the notice does not follow %q in %q", test.name, test.after, plain)
+		}
 	}
 }
 
@@ -224,7 +262,7 @@ func TestToolViewsAndBannerSanitize(t *testing.T) {
 	if err != nil || view.Title != `word_count {"path":"sum.go"}` || !strings.Contains(view.Details, `"path": "sum.go"`) {
 		t.Fatalf("custom view = %+v, %v", view, err)
 	}
-	banner := Banner("folder\x1b[2J\nspoof", 80, Theme{})
+	banner := Banner(BannerInfo{Directory: "folder\x1b[2J\nspoof", Width: 80}, Theme{})
 	if strings.Contains(banner, "\x1b") {
 		t.Fatalf("unsafe banner: %q", banner)
 	}
@@ -234,11 +272,11 @@ func TestResultPreviewBudgetAndDisclosure(t *testing.T) {
 	content := "first\nsecond\nthird\nlast failure\n"
 	for _, failure := range []bool{false, true} {
 		for budget := 1; budget <= 4; budget++ {
-			got := ResultPreview(content, failure, budget, Theme{})
+			got := ResultPreview(content, failure, budget, "/tools 2", Theme{})
 			if len(strings.Split(got, "\n")) > budget {
 				t.Fatalf("preview exceeded %d lines: %q", budget, got)
 			}
-			if budget < 4 && (!strings.Contains(got, "omitted") || !strings.Contains(got, "/tools")) {
+			if budget < 4 && (!strings.Contains(got, "more lines") || !strings.Contains(got, "/tools 2")) {
 				t.Fatalf("missing truncation disclosure: %q", got)
 			}
 			if failure && budget > 1 && !strings.Contains(got, "last failure") {
@@ -246,17 +284,17 @@ func TestResultPreviewBudgetAndDisclosure(t *testing.T) {
 			}
 		}
 	}
-	if got := ResultPreview(content, false, 0, Theme{}); got != "" {
+	if got := ResultPreview(content, false, 0, "/tools", Theme{}); got != "" {
 		t.Fatalf("zero budget returned %q", got)
 	}
-	if got := ResultPreview("a\x1b[2Jb", false, 3, Theme{}); got != "ab" {
+	if got := ResultPreview("a\x1b[2Jb", false, 3, "/tools", Theme{}); got != "ab" {
 		t.Fatalf("unsafe result: %q", got)
 	}
 }
 
 func TestResultPreviewLongUnicodeLine(t *testing.T) {
 	content := strings.Repeat("界", 161)
-	got := ResultPreview(content, false, 3, Theme{})
+	got := ResultPreview(content, false, 3, "/tools", Theme{})
 	if !utf8.ValidString(got) || !strings.HasPrefix(got, strings.Repeat("界", 160)+"…\n") {
 		t.Fatalf("preview split or lost Unicode text: %q", got)
 	}
@@ -264,10 +302,10 @@ func TestResultPreviewLongUnicodeLine(t *testing.T) {
 		t.Fatalf("long line has no compact preview and disclosure: %q", got)
 	}
 	boundary := strings.Repeat("界", 160)
-	if got := ResultPreview(boundary, false, 3, Theme{}); got != boundary {
+	if got := ResultPreview(boundary, false, 3, "/tools", Theme{}); got != boundary {
 		t.Fatalf("line at limit changed: %q", got)
 	}
-	if got := ResultPreview(content, true, 3, Theme{}); got != content {
+	if got := ResultPreview(content, true, 3, "/tools", Theme{}); got != content {
 		t.Fatalf("single error line was shortened: %q", got)
 	}
 }
@@ -280,7 +318,7 @@ func TestResultPreviewKeepsSourceLimitsAndErrorContext(t *testing.T) {
 		content := "initial error\n" + strings.Repeat("output\n", 8) + notice + "\n" +
 			strings.Repeat("output\n", 8) + "final error\n[exit code 1]\n\n"
 		for _, failed := range []bool{false, true} {
-			got := ResultPreview(content, failed, 6, Theme{})
+			got := ResultPreview(content, failed, 6, "/tools", Theme{})
 			if !strings.Contains(got, notice) || !strings.Contains(got, "/tools") {
 				t.Fatalf("source limit or full-output route missing: %q", got)
 			}
@@ -342,8 +380,9 @@ func TestCompactViewsRemainSafeWithoutColor(t *testing.T) {
 			Section(unsafe, theme),
 			ToolCompletion(unsafe, false, theme),
 			ToolCompletion(unsafe, true, theme),
-			Banner(unsafe, 40, theme),
-			UserTurn(unsafe, theme),
+			Banner(BannerInfo{Directory: unsafe, Width: 40}, theme),
+			Banner(BannerInfo{Directory: unsafe, Model: unsafe, Effort: unsafe, Width: 100, Height: 40}, theme),
+			UserTurn(unsafe, unsafe, 2, theme),
 		} {
 			if strings.Contains(view, "\x1b[2J") || (!theme.Colored() && strings.Contains(view, "\x1b")) {
 				t.Fatalf("unsafe compact view: %q", view)
@@ -422,30 +461,38 @@ func TestSquaresShowStateWithoutColor(t *testing.T) {
 	}
 }
 
-// The opening animation starts empty and ends exactly on the banner.
+// The opening animation starts empty and ends exactly on the banner, and no
+// frame moves the composer below it.
 func TestBannerFramesEndOnTheBanner(t *testing.T) {
 	theme := NewTheme(TrueColor, LightBackground, AccentPlum)
-	frames := BannerFrames("/work", 100, theme, 24)
+	info := BannerInfo{Directory: "/work", Model: "Inkling-Small", Effort: "default", Width: 100, Height: 40}
+	frames := BannerFrames(info, theme, 24)
 	if len(frames) != 24 {
 		t.Fatalf("%d frames", len(frames))
 	}
-	if frames[23] != Banner("/work", 100, theme) {
+	if frames[23] != Banner(info, theme) {
 		t.Fatal("the last frame is not the banner")
 	}
 	if strings.TrimSpace(Safe(frames[0])) != "" {
 		t.Fatalf("the first frame is not empty: %q", Safe(frames[0]))
 	}
-	shown := 0
-	for _, frame := range frames {
-		ink := strings.Count(Safe(frame), "▀") + strings.Count(Safe(frame), "▄") + strings.Count(Safe(frame), "█")
-		if ink < shown {
-			t.Fatal("the mark shrinks during the reveal")
+	for index, frame := range frames {
+		if got, want := strings.Count(frame, "\n"), strings.Count(frames[0], "\n"); got != want {
+			t.Fatalf("frame %d has %d rows, the first has %d", index, got, want)
 		}
-		shown = ink
 	}
-	if BannerFrames("/work", 100, NewTheme(ANSI16, DarkBackground, AccentBlue), 24) != nil ||
-		BannerFrames("/work", 30, theme, 24) != nil {
-		t.Fatal("frames without a mark to animate")
+	for _, small := range []struct {
+		name  string
+		info  BannerInfo
+		theme Theme
+	}{
+		{"16 colors", info, NewTheme(ANSI16, DarkBackground, AccentBlue)},
+		{"narrow", BannerInfo{Directory: "/work", Width: 30, Height: 40}, theme},
+		{"short", BannerInfo{Directory: "/work", Width: 100, Height: 20}, theme},
+	} {
+		if BannerFrames(small.info, small.theme, 24) != nil {
+			t.Fatalf("%s: frames without artwork to animate", small.name)
+		}
 	}
 }
 
@@ -485,23 +532,35 @@ func TestShadeAndAccentSelection(t *testing.T) {
 	}
 }
 
-// The mark is six rows of MarkWidth cells, and only exists with 256 or more
-// colors.
-func TestMarkGeometry(t *testing.T) {
+// A picture has the rows and cells that it reports, fits the box it was
+// asked for, and only exists with 256 or more colors. A finished picture
+// shows the ink and all three shapes of the page.
+func TestBlotPictureGeometry(t *testing.T) {
 	for _, theme := range themes {
-		mark := theme.Mark()
+		picture := NewBlotPicture(NewBlot(BlotSeeds[4]), 44, 12)
+		rows := picture.Draw(theme, 1)
 		if theme.depth < ANSI256 {
-			if mark != nil {
-				t.Fatalf("depth %d drew a mark", theme.depth)
+			if rows != nil {
+				t.Fatalf("depth %d drew a picture", theme.depth)
 			}
 			continue
 		}
-		if len(mark) != 6 {
-			t.Fatalf("mark has %d rows", len(mark))
+		if picture.Columns > 44 || picture.Rows > 12 || len(rows) != picture.Rows {
+			t.Fatalf("picture is %dx%d with %d rows", picture.Columns, picture.Rows, len(rows))
 		}
-		for _, row := range mark {
-			if got := utf8.RuneCountInString(Safe(row)); got != MarkWidth {
-				t.Fatalf("mark row has %d cells: %q", got, Safe(row))
+		for _, row := range rows {
+			if got := utf8.RuneCountInString(Safe(row)); got != picture.Columns {
+				t.Fatalf("row has %d cells, want %d: %q", got, picture.Columns, Safe(row))
+			}
+		}
+		if theme.depth != TrueColor {
+			continue
+		}
+		all := strings.Join(rows, "")
+		for layer := uint8(1); layer <= blotLayers; layer++ {
+			color := theme.blotColor(layer, picture.colors)
+			if !strings.Contains(all, fmt.Sprintf(";%d;%d;%dm", color.r, color.g, color.b)) {
+				t.Fatalf("finished picture has no layer %d", layer)
 			}
 		}
 	}
@@ -511,9 +570,16 @@ func TestMarkGeometry(t *testing.T) {
 // no reset may come before the erase on any row.
 func TestUserTurnBandKeepsTint(t *testing.T) {
 	theme := NewTheme(TrueColor, LightBackground, AccentBlue)
-	got := UserTurn("first\nsecond\x1b[2J", theme)
+	got := UserTurn("first\nsecond\x1b[2J", "", -1, theme)
 	if Safe(got) != "› first\n  second" {
 		t.Fatalf("visible prompt = %q", Safe(got))
+	}
+	stamped := UserTurn("first\nsecond", "14:32\x1b[2J", 3, theme)
+	if Safe(stamped) != "› first   14:32\n  second" || !strings.Contains(stamped, "\x1b[K") {
+		t.Fatalf("stamped prompt = %q", Safe(stamped))
+	}
+	if plain := UserTurn("first", "14:32", 3, Theme{}); plain != "› first   14:32" {
+		t.Fatalf("plain stamped prompt = %q", plain)
 	}
 	for _, row := range strings.Split(got, "\n") {
 		erase := strings.Index(row, "\x1b[K")

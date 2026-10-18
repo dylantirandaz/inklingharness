@@ -116,6 +116,9 @@ func requestBody(body []byte, path string, policy messagesPolicy, fixed wireProf
 	if profile.Model != fixed.Model {
 		return nil, fmt.Errorf("expected model %q, got %q", fixed.Model, profile.Model)
 	}
+	if path == "/api/v1/messages/count_tokens" {
+		return upstreamBody(body, fixed)
+	}
 	maxTokens := json.RawMessage(strconv.Itoa(fixed.MaxTokens))
 	effort, err := json.Marshal(fixed.Effort)
 	if err != nil {
@@ -228,7 +231,7 @@ func (p *proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 	rootWarmup := request.Method == http.MethodHead && (request.URL.Path == "/api" || request.URL.Path == "/api/v1")
-	if !rootWarmup && request.URL.Path != "/api/v1/messages" && request.URL.Path != "/api/v1/responses" {
+	if !rootWarmup && request.URL.Path != "/api/v1/messages" && request.URL.Path != "/api/v1/responses" && request.URL.Path != "/api/v1/messages/count_tokens" {
 		reject(fmt.Errorf("unsupported endpoint %q", request.URL.Path), http.StatusNotFound, true)
 		return
 	}

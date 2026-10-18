@@ -1,8 +1,8 @@
 {
-  "job_name": "tb4-dsv41flash-max-claude-code",
+  "job_name": "tb4-dsv41flash-max-claude-code-prime-streamlake",
   "jobs_dir": "out/terminal-bench/jobs",
   "n_attempts": 3,
-  "n_concurrent_trials": 8,
+  "n_concurrent_trials": 2,
   "timeout_multiplier": 1.0,
   "retry": {
     "max_retries": 3,
@@ -16,7 +16,7 @@
     ]
   },
   "environment": {
-    "type": "prime",
+    "import_path": "evals.harbor_prime_environment:NativePrimeEnvironment",
     "cpu_enforcement_policy": "auto",
     "memory_enforcement_policy": "auto"
   },
@@ -38,7 +38,9 @@
       "name": "terminal-bench/terminal-bench",
       "ref": "sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732",
       "exclude_task_names": [
-        "jax-speedrun-gpu"
+        "terminal-bench/jax-speedrun-gpu",
+        "terminal-bench/fp8-rmsnorm-gemm",
+        "terminal-bench/math-eval-grader"
       ]
     }
   ]

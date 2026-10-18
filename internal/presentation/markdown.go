@@ -16,15 +16,53 @@ func NewMarkdown(theme Theme) *Markdown {
 	return &Markdown{theme: theme}
 }
 
+// BlockKind says how a screen sets a rendered line.
+type BlockKind uint8
+
+const (
+	// ProseLine is ordinary text, a heading, a quote, or a list item.
+	ProseLine BlockKind = iota
+	// CodeStart is the fence that opens a code block.
+	CodeStart
+	// CodeLine is one line of code, already colored.
+	CodeLine
+	// CodeEnd is the fence that closes a code block.
+	CodeEnd
+)
+
+// Block is a rendered line and what it is.
+type Block struct {
+	Kind BlockKind
+	// Text is the line as Line returns it.
+	Text string
+	// Info is what an opening fence names after its marks, such as the
+	// language; it is plain text.
+	Info string
+}
+
 func (m *Markdown) Line(text string) string {
-	return m.render(Safe(text), true)
+	return m.render(Safe(text), true).Text
 }
 
 func (m *Markdown) Preview(text string) string {
-	return m.render(Safe(text), false)
+	return m.render(Safe(text), false).Text
 }
 
-func (m *Markdown) render(text string, commit bool) string {
+// Block renders a complete line like Line and says what kind of line it is,
+// so that a screen can set code on a card instead of between rules.
+func (m *Markdown) Block(text string) Block {
+	return m.render(Safe(text), true)
+}
+
+// InCode reports whether a code fence is open.
+func (m *Markdown) InCode() bool { return m.fence != 0 }
+
+// EndCode closes an open fence, as the end of a reply does.
+func (m *Markdown) EndCode() {
+	m.fence, m.fenceLength, m.code = 0, 0, codeState{}
+}
+
+func (m *Markdown) render(text string, commit bool) Block {
 	trimmed := strings.TrimLeft(text, " ")
 	indent := len(text) - len(trimmed)
 	var marker byte
@@ -36,41 +74,47 @@ func (m *Markdown) render(text string, commit bool) string {
 	if m.fence != 0 {
 		if marker == m.fence && length >= m.fenceLength && strings.TrimSpace(trimmed[length:]) == "" {
 			if commit {
-				m.fence, m.fenceLength, m.code = 0, 0, codeState{}
+				m.EndCode()
 			}
-			return m.theme.Graphite(text)
+			return Block{Kind: CodeEnd, Text: m.theme.Hairline("────")}
 		}
 		if !commit {
 			// A preview colors against a copy, so a partial line never
 			// leaves a comment or string open for the committed one.
 			state := m.code
-			return highlight(text, &state, m.theme)
+			return Block{Kind: CodeLine, Text: highlight(text, &state, m.theme)}
 		}
-		return highlight(text, &m.code, m.theme)
+		return Block{Kind: CodeLine, Text: highlight(text, &m.code, m.theme)}
 	}
 	if indent >= 4 || strings.HasPrefix(trimmed, "\t") {
-		return text
+		return Block{Text: text}
 	}
 	if length >= 3 && (marker != '`' || !strings.Contains(trimmed[length:], "`")) {
 		if commit {
 			m.fence, m.fenceLength = marker, length
 			m.code = codeState{lang: languageFor(trimmed[length:])}
 		}
-		return m.theme.Graphite(text)
+		// The fence shows as a rule with the language, not as backticks.
+		rule := m.theme.Hairline("────")
+		info := strings.TrimSpace(trimmed[length:])
+		if info != "" {
+			rule += " " + m.theme.Graphite(info)
+		}
+		return Block{Kind: CodeStart, Text: rule, Info: info}
 	}
 	if indent <= 3 && strings.HasPrefix(trimmed, "#") {
 		count := markerRun(trimmed, 0, '#')
 		if count <= 6 && count < len(trimmed) && trimmed[count] == ' ' {
-			return m.theme.Bold(m.theme.Ink(inline(strings.TrimLeft(trimmed[count:], " "), m.theme, 0)))
+			return Block{Text: m.theme.Bold(m.theme.Ink(inline(strings.TrimLeft(trimmed[count:], " "), m.theme, 0)))}
 		}
 	}
 	if strings.HasPrefix(trimmed, "> ") {
-		return text[:indent] + m.theme.Hairline("│ ") + m.theme.Italic(inline(trimmed[2:], m.theme, 0))
+		return Block{Text: text[:indent] + m.theme.Hairline("│ ") + m.theme.Italic(inline(trimmed[2:], m.theme, 0))}
 	}
 	if len(trimmed) >= 2 && (trimmed[0] == '-' || trimmed[0] == '*' || trimmed[0] == '+') && trimmed[1] == ' ' {
-		return text[:indent] + m.theme.Accent("▪ ") + inline(trimmed[2:], m.theme, 0)
+		return Block{Text: text[:indent] + m.theme.Accent("• ") + inline(trimmed[2:], m.theme, 0)}
 	}
-	return inline(text, m.theme, 0)
+	return Block{Text: inline(text, m.theme, 0)}
 }
 
 func markerRun(text string, start int, marker byte) int {
@@ -152,8 +196,13 @@ func inline(text string, theme Theme, depth int) string {
 			run := markerRun(text, index, '`')
 			end := codeEnd(text, index+run, run)
 			if end >= 0 {
-				// Keep delimiters even without color so code remains distinct.
-				out.WriteString(theme.Code(text[index : end+run]))
+				// Color marks the code, so the backticks go. Without color they
+				// stay, so code remains distinct in plain text.
+				if theme.Colored() {
+					out.WriteString(theme.Code(text[index+run : end]))
+				} else {
+					out.WriteString(theme.Code(text[index : end+run]))
+				}
 				index = end + run
 				continue
 			}

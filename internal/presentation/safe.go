@@ -3,8 +3,6 @@ package presentation
 
 import (
 	"fmt"
-	"math"
-	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -108,72 +106,6 @@ func brief(text string) string {
 	return text
 }
 
-// wordmark uses the site's letter spacing without claiming its identity.
-const wordmark = "I N K L I N G"
-
-// Banner identifies the workspace. Current model, effort, and context use
-// belong in the footer; full session details remain available through /status.
-func Banner(directory string, width int, theme Theme) string {
-	if !bannerHasMark(width, theme) {
-		text := bannerText(directory, theme)
-		return "\n  " + strings.Join(text, "\n\n  ") + "\n"
-	}
-	return bannerAt(1, directory, theme)
-}
-
-// BannerFrames reveals the mark and workspace without moving the composer.
-// It is nil when the terminal has no room or color support for the mark.
-func BannerFrames(directory string, width int, theme Theme, count int) []string {
-	if !bannerHasMark(width, theme) || count < 2 {
-		return nil
-	}
-	frames := make([]string, count)
-	for index := range frames {
-		frames[index] = bannerAt(float64(index)/float64(count-1), directory, theme)
-	}
-	return frames
-}
-
-func bannerHasMark(width int, theme Theme) bool {
-	return theme.depth >= ANSI256 && width >= 64
-}
-
-func bannerText(directory string, theme Theme) []string {
-	return []string{
-		theme.Graphite(wordmark),
-		theme.Bold(theme.Ink(singleLine(filepath.Base(directory)))),
-		theme.Graphite("/help commands") + theme.Hairline(" · ") + theme.Graphite("/status session"),
-	}
-}
-
-// Keep all frames the same height so the prompt stays in place.
-func bannerAt(progress float64, directory string, theme Theme) string {
-	text := bannerText(directory, theme)
-	if progress < 1 {
-		typed := int(math.Round(float64(len(wordmark)) * min(max((progress-0.25)/0.5, 0), 1)))
-		text[0] = theme.Graphite(wordmark[:typed])
-		if progress < 0.8 {
-			text[1], text[2] = "", ""
-		}
-	}
-	// Separate the workspace name from command hints beside the small mark.
-	beside := []string{"", text[0], "", text[1], text[2]}
-	var out strings.Builder
-	out.WriteByte('\n')
-	for index, row := range theme.MarkReveal(progress) {
-		if index > 0 {
-			out.WriteByte('\n')
-		}
-		out.WriteString("  ")
-		out.WriteString(row)
-		if index < len(beside) && beside[index] != "" {
-			out.WriteString("   " + beside[index])
-		}
-	}
-	out.WriteByte('\n')
-	return out.String()
-}
-
 // ModelName is the display name of a model: the part after the provider,
 // with the words of an Inkling name capitalized as on the model cards.
 func ModelName(model string) string {
@@ -205,10 +137,11 @@ func AssistantLead(theme Theme) string {
 }
 
 // UserTurn echoes a submitted prompt as a tinted band, like a site chip, so
-// the user's words stand apart from the reply in scrollback. Erase-to-end
-// extends the tint to the right edge without padding that a resize would
-// wrap. Without a tint the accent marker carries the distinction.
-func UserTurn(prompt string, theme Theme) string {
+// the user's words stand apart from the reply in scrollback. A stamp, such as
+// the time, ends the first line after pad spaces when pad is not negative.
+// Erase-to-end extends the tint to the right edge without padding that a
+// resize would wrap. Without a tint the accent marker carries the distinction.
+func UserTurn(prompt, stamp string, pad int, theme Theme) string {
 	lines := strings.Split(Safe(prompt), "\n")
 	var out strings.Builder
 	for index, line := range lines {
@@ -216,14 +149,21 @@ func UserTurn(prompt string, theme Theme) string {
 			out.WriteByte('\n')
 		}
 		marker := "  "
+		tail := ""
 		if index == 0 {
 			marker = "› "
+			if stamp != "" && pad >= 0 {
+				tail = strings.Repeat(" ", pad) + theme.Graphite(singleLine(stamp))
+			}
 		}
 		if theme.chip == "" {
-			out.WriteString(theme.Accent(marker) + line)
+			out.WriteString(theme.Accent(marker) + line + tail)
 			continue
 		}
-		out.WriteString(theme.chip + theme.sgr[roleAccent] + marker + theme.sgr[roleInk] + line + "\x1b[K" + reset)
+		if tail != "" {
+			tail = strings.Repeat(" ", pad) + theme.sgr[roleGraphite] + singleLine(stamp)
+		}
+		out.WriteString(theme.chip + theme.sgr[roleAccent] + marker + theme.sgr[roleInk] + line + tail + "\x1b[K" + reset)
 	}
 	return out.String()
 }
@@ -244,17 +184,42 @@ func ToolCompletion(title string, failed bool, theme Theme) string {
 	return line
 }
 
-// ResultPreview limits ordinary output lines and adds a disclosure when text
-// is omitted. Failure previews keep the start and end. Source truncation
-// notices are always shown in full, even when they exceed the line budget.
+// ResultLine is one line of a result preview. A notice says what the preview
+// left out, so a screen can set it in a quieter color.
+type ResultLine struct {
+	Text   string
+	Notice bool
+}
+
+// ResultPreview limits ordinary output lines and ends with a disclosure that
+// names the route to the full result, such as "/tools 2", when text is
+// omitted. Failure previews keep the start and end. Source truncation notices
+// are always shown in full, even when they exceed the line budget.
 // Nonpositive budgets display nothing.
-func ResultPreview(content string, isError bool, maxLines int, theme Theme) string {
+func ResultPreview(content string, isError bool, maxLines int, route string, theme Theme) string {
+	var out strings.Builder
+	for index, line := range ResultLines(content, isError, maxLines, route) {
+		if index > 0 {
+			out.WriteByte('\n')
+		}
+		if line.Notice {
+			out.WriteString(theme.Graphite(line.Text))
+		} else {
+			out.WriteString(line.Text)
+		}
+	}
+	return out.String()
+}
+
+// ResultLines is ResultPreview as plain lines, so that a caller can fit,
+// color, and indent each one itself.
+func ResultLines(content string, isError bool, maxLines int, route string) []ResultLine {
 	if maxLines <= 0 {
-		return ""
+		return nil
 	}
 	text := strings.TrimRight(Safe(content), "\n")
 	if text == "" {
-		return ""
+		return nil
 	}
 	lines := strings.Split(text, "\n")
 	shortened := false
@@ -274,8 +239,15 @@ func ResultPreview(content string, isError bool, maxLines int, theme Theme) stri
 			}
 		}
 	}
+	plain := func(texts []string) []ResultLine {
+		out := make([]ResultLine, 0, len(texts))
+		for _, text := range texts {
+			out = append(out, ResultLine{Text: text})
+		}
+		return out
+	}
 	if len(lines) <= maxLines && !shortened {
-		return text
+		return plain(lines)
 	}
 	kept := min(maxLines-1, len(lines))
 	// Retain the initial error context as well as the final error summary.
@@ -287,34 +259,22 @@ func ResultPreview(content string, isError bool, maxLines int, theme Theme) stri
 		}
 	}
 	tail := kept - head
-	var out strings.Builder
-	appendLine := func(line string) {
-		if out.Len() > 0 {
-			out.WriteByte('\n')
-		}
-		out.WriteString(line)
-	}
-	for _, line := range lines[:head] {
-		appendLine(line)
-	}
+	out := plain(lines[:head])
 	omitted := len(lines) - kept
 	for _, line := range lines[head : len(lines)-tail] {
 		if resultNotice(line) {
-			appendLine(line)
+			out = append(out, ResultLine{Text: line})
 			omitted--
 		}
 	}
-	notice := fmt.Sprintf("[%d lines omitted; /tools shows the full result]", omitted)
+	notice := fmt.Sprintf("%d more lines · %s", omitted, route)
 	if shortened {
-		notice = fmt.Sprintf("[%d lines omitted; long lines shortened; /tools shows the full result]", omitted)
+		notice = fmt.Sprintf("%d more lines · long lines shortened · %s", omitted, route)
 	}
 	if omitted > 0 || shortened {
-		appendLine(theme.Graphite(notice))
+		out = append(out, ResultLine{Text: notice, Notice: true})
 	}
-	for _, line := range lines[len(lines)-tail:] {
-		appendLine(line)
-	}
-	return out.String()
+	return append(out, plain(lines[len(lines)-tail:])...)
 }
 
 // These notices come from tool output limits, not the preview limit.
@@ -322,38 +282,42 @@ func resultNotice(line string) bool {
 	return strings.HasPrefix(line, "[output truncated:") || strings.HasPrefix(line, "[truncated:")
 }
 
-// ContextUse is what the footer reports: the model, the effort, and the
-// context estimate against the compaction threshold. CompactTokens 0 means
+// ContextUse is what the footer reports: model, effort, context against the
+// compaction threshold, and total session token use. CompactTokens 0 means
 // that automatic compaction is off.
 type ContextUse struct {
 	Model, Effort string
 	Tokens        int
 	CompactTokens int
+	SessionTokens int
 }
 
-// Footer keeps the model and current context visible after the header leaves
-// scrollback. Show the gauge only near the compaction threshold, where it
-// gives useful warning instead of adding an empty row of marks.
-func Footer(use ContextUse, shownTokens int, glow float64, theme Theme) string {
+// FooterModel names the model and the effort that the next request uses. The
+// footer keeps them and the context use visible after the header leaves
+// scrollback.
+func FooterModel(use ContextUse, theme Theme) string {
+	return theme.Ink(ModelName(use.Model)) + theme.Hairline(" · ") + theme.Graphite(singleLine(use.Effort))
+}
+
+// FooterUsage is the context against the compaction threshold, with its
+// four-cell gauge, and the total session use.
+func FooterUsage(use ContextUse, shownTokens int, glow float64, theme Theme) string {
 	separator := theme.Hairline(" · ")
 	var out strings.Builder
-	out.WriteString(theme.Graphite(ModelName(use.Model)))
-	out.WriteString(separator)
-	out.WriteString(theme.Graphite(singleLine(use.Effort)))
-	out.WriteString(separator)
 	if use.CompactTokens > 0 {
-		if shownTokens >= use.CompactTokens-use.CompactTokens/4 {
-			out.WriteString(theme.Gauge(shownTokens, use.CompactTokens, 4, glow))
-			out.WriteByte(' ')
-		}
-		out.WriteString(theme.Graphite(shortTokens(shownTokens) + " / " + shortTokens(use.CompactTokens) + " context"))
+		out.WriteString(theme.Gauge(shownTokens, use.CompactTokens, 4, glow))
+		out.WriteByte(' ')
+		out.WriteString(theme.Graphite(ShortTokens(shownTokens) + " / " + ShortTokens(use.CompactTokens)))
 	} else {
-		out.WriteString(theme.Graphite("context ~" + shortTokens(shownTokens)))
+		out.WriteString(theme.Graphite("context ~" + ShortTokens(shownTokens)))
 	}
+	out.WriteString(separator)
+	out.WriteString(theme.Graphite(ShortTokens(use.SessionTokens) + " used"))
 	return out.String()
 }
 
-func shortTokens(count int) string {
+// ShortTokens writes a token count with at most two decimals: 950, 7.9k, 200k.
+func ShortTokens(count int) string {
 	switch {
 	case count < 1000:
 		return fmt.Sprintf("%d", count)
@@ -362,6 +326,21 @@ func shortTokens(count int) string {
 	default:
 		return fmt.Sprintf("%dk", (count+500)/1000)
 	}
+}
+
+// TurnSummary closes a finished turn with its wall time, request count, and
+// token use, so a long turn's cost stays visible in scrollback.
+func TurnSummary(elapsed time.Duration, requests, inputTokens, outputTokens int, theme Theme) string {
+	return theme.Graphite(TurnSummaryText(elapsed, requests, inputTokens, outputTokens))
+}
+
+// TurnSummaryText is the summary of a turn as plain text.
+func TurnSummaryText(elapsed time.Duration, requests, inputTokens, outputTokens int) string {
+	summary := "✓ " + ShortDuration(elapsed)
+	if requests > 1 {
+		summary += fmt.Sprintf(" · %d requests", requests)
+	}
+	return summary + " · " + ShortTokens(inputTokens) + " in · " + ShortTokens(outputTokens) + " out"
 }
 
 // pastTense names the first word of each tool title once the tool is done.

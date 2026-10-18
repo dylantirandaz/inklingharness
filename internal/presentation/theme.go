@@ -108,6 +108,7 @@ const (
 	roleBlue
 	roleRed
 	roleAmber
+	roleCode
 	roleAccent
 	roleCount
 )
@@ -126,11 +127,13 @@ var (
 	palette = [roleAccent]swatch{
 		roleInk:      {shaded{dark: rgb{232, 232, 232}, light: rgb{40, 40, 40}}, "39"},
 		roleGraphite: {shaded{dark: rgb{160, 160, 160}, light: rgb{103, 103, 103}}, "90"},
-		roleHairline: {shaded{dark: rgb{64, 64, 64}, light: rgb{226, 226, 226}}, "90"},
+		roleHairline: {shaded{dark: rgb{74, 74, 74}, light: rgb{208, 208, 206}}, "90"},
 		roleGreen:    {green, "32"},
 		roleBlue:     {blue, "34"},
 		roleRed:      {shaded{dark: rgb{242, 97, 76}, light: rgb{214, 58, 39}}, "31"},
 		roleAmber:    {shaded{dark: rgb{247, 162, 36}, light: rgb{184, 116, 16}}, "33"},
+		// Inline code and paths: the brand azure, a little deeper on paper.
+		roleCode: {shaded{dark: rgb{97, 175, 239}, light: rgb{2, 112, 189}}, "36"},
 	}
 
 	accents = [...]swatch{
@@ -268,13 +271,9 @@ func (t Theme) Removed(text string) string {
 	return t.removed + text + reset
 }
 
-// Code marks inline code: a chip when a tint exists, else the accent.
-func (t Theme) Code(text string) string {
-	if t.chip == "" {
-		return t.Accent(text)
-	}
-	return t.Chip(text)
-}
+// Code marks inline code and file paths: the brand azure, with no tint, so a
+// word of code does not break the line into boxes.
+func (t Theme) Code(text string) string { return t.paint(roleCode, text) }
 
 // Key labels a key to press: a chip when a tint exists, bold accent with
 // only ANSI 16 colors, and brackets without color.
@@ -385,132 +384,6 @@ func (t Theme) Gauge(used, limit, cells int, glow float64) string {
 	}
 	color := blend(palette[roleHairline].color.on(t.shade), palette[fill].color.on(t.shade), 0.5+0.5*max(glow, 0))
 	return t.foreground(color, "") + strings.Repeat("▪", filled) + reset + t.Hairline(strings.Repeat("▪", cells-filled))
-}
-
-// inklingMark is the Inkling mark at 16 by 12 pixels, sampled from the logo
-// on thinkingmachines.ai/inkling: the ink blot (K) with its green shape (G)
-// and its hole, the blue dot (B), and the red pill (R).
-var inklingMark = [...]string{
-	"..........KKKKK.",
-	"...KKK..GGGGGKKK",
-	"...KKK.GGGGGGKK.",
-	"..KKKKKGGGGGGKKK",
-	"..KKKKKKGGGGKKKK",
-	"...KKKKKGGGKKKKK",
-	"...KKKKKKKKK.KK.",
-	"....KKKKKKKKKR..",
-	".BB..KKKKKKRRRR.",
-	"BBBB..KK..RRRRR.",
-	"BBBB......RRR...",
-	".BB.......RRR...",
-}
-
-// MarkWidth is the number of cells of each Mark row.
-const MarkWidth = 16
-
-// markDrying is the share of the reveal over which a new pixel dries.
-const markDrying = 0.2
-
-// Mark draws the Inkling mark in six rows with half blocks: each cell holds
-// two pixels, the top one as foreground and the bottom one as background.
-// The blot takes the ink color, so it inverts with the shade. Below 256
-// colors the mark cannot be drawn and Mark returns nil.
-func (t Theme) Mark() []string { return t.MarkReveal(1) }
-
-// MarkReveal draws the mark as ink that bleeds from one drop: at progress 0
-// nothing shows; the blot spreads from its center, then the green shape, the
-// blue dot, and the red pill appear; each new pixel starts pale and dries.
-// At progress 1 the result equals Mark.
-func (t Theme) MarkReveal(progress float64) []string {
-	if t.depth < ANSI256 {
-		return nil
-	}
-	reveal := markRevealTimes()
-	pale := palette[roleHairline].color.on(t.shade)
-	pixel := func(x, y int) (rgb, bool) {
-		code := inklingMark[y][x]
-		if code == '.' || progress < reveal[y][x] {
-			return rgb{}, false
-		}
-		var color rgb
-		switch code {
-		case 'K':
-			color = palette[roleInk].color.on(t.shade)
-		case 'G':
-			color = markGreen
-		case 'B':
-			color = markBlue
-		case 'R':
-			color = markRed
-		default:
-			panic(fmt.Sprintf("presentation: unknown mark pixel %q", code))
-		}
-		wetness := 1 - min((progress-reveal[y][x])/markDrying, 1)
-		return blend(color, pale, 0.7*wetness), true
-	}
-	rows := make([]string, 0, len(inklingMark)/2)
-	for y := 0; y < len(inklingMark); y += 2 {
-		var out strings.Builder
-		for x := range MarkWidth {
-			top, topSet := pixel(x, y)
-			bottom, bottomSet := pixel(x, y+1)
-			switch {
-			case !topSet && !bottomSet:
-				out.WriteString(reset + " ")
-			case topSet && !bottomSet:
-				out.WriteString(reset + t.foreground(top, "") + "▀")
-			case !topSet && bottomSet:
-				out.WriteString(reset + t.foreground(bottom, "") + "▄")
-			case top == bottom:
-				out.WriteString(reset + t.foreground(top, "") + "█")
-			default:
-				out.WriteString(t.foreground(top, "") + t.background(bottom) + "▀")
-			}
-		}
-		out.WriteString(reset)
-		rows = append(rows, out.String())
-	}
-	return rows
-}
-
-// markRevealTimes gives each pixel the progress at which it appears. The blot
-// spreads by distance from its centroid with a little hashed jitter, so the
-// edge looks like bleeding ink rather than a circle; each shape follows in
-// turn. Every pixel appears by 1-markDrying, so it is dry at progress 1.
-func markRevealTimes() [len(inklingMark)][MarkWidth]float64 {
-	type window struct{ start, span float64 }
-	windows := map[byte]window{'K': {0, 0.45}, 'G': {0.4, 0.15}, 'B': {0.5, 0.15}, 'R': {0.6, 0.15}}
-	var times [len(inklingMark)][MarkWidth]float64
-	for code, slot := range windows {
-		var sumX, sumY, count float64
-		for y, row := range inklingMark {
-			for x := range MarkWidth {
-				if row[x] == code {
-					sumX, sumY, count = sumX+float64(x), sumY+float64(y), count+1
-				}
-			}
-		}
-		centerX, centerY := sumX/count, sumY/count
-		farthest := 0.0
-		for y, row := range inklingMark {
-			for x := range MarkWidth {
-				if row[x] == code {
-					farthest = max(farthest, math.Hypot(float64(x)-centerX, float64(y)-centerY))
-				}
-			}
-		}
-		for y, row := range inklingMark {
-			for x := range MarkWidth {
-				if row[x] != code {
-					continue
-				}
-				distance := math.Hypot(float64(x)-centerX, float64(y)-centerY) / max(farthest, 1)
-				jitter := float64(mix(uint64(y*MarkWidth+x))%1000)/1000*0.25 - 0.125
-				times[y][x] = slot.start + slot.span*min(max(distance+jitter, 0), 1)
-			}
-		}
-	}
-	return times
 }
 
 func blend(from, to rgb, share float64) rgb {

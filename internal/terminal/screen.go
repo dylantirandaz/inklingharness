@@ -39,6 +39,7 @@ const (
 	modeBusy inputMode = iota
 	modePrompt
 	modeChoice
+	modeView
 )
 
 type answer struct {
@@ -51,12 +52,17 @@ type answer struct {
 // Call Close before using either descriptor outside the screen again.
 type Screen struct {
 	mu sync.Mutex
+	// place is what the footer says about where the work happens.
+	place struct{ folder, branch string }
 	// card is the approval request shown inside the choice box; empty when
 	// it went to the scrollback because the box could not hold it.
 	card string
 	// box is true while the live area draws its input inside a card; the
 	// input then wraps four cells narrower.
-	box           bool
+	box bool
+	// soft is true while the card is a tint without a border, which leaves
+	// the key hints to the status bar under it.
+	soft          bool
 	input, output *os.File
 	wake          wakePipe
 	state         syscall.Termios
@@ -87,6 +93,8 @@ type Screen struct {
 	cursorRow, cursorCol     int
 	pending                  bytes.Buffer
 	preview, status          string
+	reasoningText            string
+	reasoningDirty           bool
 	background               string
 	title                    string
 	rule                     cachedRule
@@ -94,6 +102,7 @@ type Screen struct {
 	effects                  effects
 	mode                     inputMode
 	result                   chan answer
+	view                     *documentView
 	placeholder              string
 	text                     []rune
 	position, inputBytes     int
@@ -106,6 +115,12 @@ type Screen struct {
 	inputTop, inputRows      int
 	activityRows, footerRows int
 	parser                   parser
+	// commands feed the slash menu; menuIndex is its selection and
+	// menuDismissed hides it until the input changes.
+	commands      []Command
+	menuMatches   []Command
+	menuIndex     int
+	menuDismissed bool
 	// typing closes at the next prompt key other than Enter; see ArmTyping.
 	typing chan struct{}
 }
@@ -378,25 +393,34 @@ func (s *Screen) composerRuleLocked(width int) string {
 // boxWidth is the narrowest live area that draws the composer as a card.
 const boxWidth = 12
 
+// cardPaddingCells is the width of the margin inside a card, on each side.
+const cardPaddingCells = 2
+
 // boxed draws rows inside a rounded card of width cells. The title sits in
-// the top border. Rows must already fit width-4 cells.
-func (s *Screen) boxed(rows []string, width int, border func(string) string, title string) []string {
+// the top border and foot in the bottom one. Rows must already fit width-4
+// cells.
+func (s *Screen) boxed(rows []string, width int, border func(string) string, title, foot string) []string {
 	inner := width - 4
-	top := border("╭─")
-	used := 2
-	if plain := withoutStyles(title); plain != "" && cellWidth(plain)+4 <= inner {
-		top += " " + title + " "
-		used += cellWidth(plain) + 2
-	}
-	top += border(strings.Repeat("─", max(width-1-used, 0)) + "╮")
 	out := make([]string, 0, len(rows)+2)
-	out = append(out, top)
+	out = append(out, s.borderRow("╭", "╮", title, inner, width, border))
 	left, right := border("│")+" ", " "+border("│")
 	for _, row := range rows {
 		pad := max(inner-cellWidth(withoutStyles(row)), 0)
 		out = append(out, left+row+strings.Repeat(" ", pad)+right)
 	}
-	return append(out, border("╰"+strings.Repeat("─", max(width-2, 0))+"╯"))
+	return append(out, s.borderRow("╰", "╯", foot, inner, width, border))
+}
+
+// borderRow draws one horizontal card edge with an optional label after the
+// first dash. A label that does not leave two dashes on each side is omitted.
+func (s *Screen) borderRow(open, close, label string, inner, width int, border func(string) string) string {
+	row := border(open + "─")
+	used := 2
+	if plain := withoutStyles(label); plain != "" && cellWidth(plain)+4 <= inner {
+		row += " " + label + " "
+		used += cellWidth(plain) + 2
+	}
+	return row + border(strings.Repeat("─", max(width-1-used, 0))+close)
 }
 
 func (s *Screen) inputWidthLocked() int {
@@ -509,19 +533,29 @@ func (s *Screen) layoutLocked() {
 		s.frame = append(s.frame, intro...)
 		rows -= len(intro)
 	}
-	marker := s.mode == modePrompt && width >= 4
+	marker := s.mode != modeChoice && width >= 4
 	var bodyRows []string
 	var choiceBar string
 	editRow, editCol, start := 0, 0, 0
-	footer := styledRows(s.footerLocked(), width, s.theme.Colored())
-	maxFooter := max(1, min(3, rows-1))
-	footer = visibleRows(footer, maxFooter, width)
 	// The composer and the approval sit in a rounded card when there is room
-	// for its two borders; otherwise a hairline or nothing separates them.
-	box := s.mode != modeBusy && width >= boxWidth && rows >= len(footer)+3
+	// for its two borders and the status bar; otherwise a hairline or nothing
+	// separates them. The card decides the footer, so it comes first.
+	box := width >= boxWidth && rows >= 4
 	s.box = box
+	s.soft = box && s.theme.Soft()
+	footer := styledRows(s.footerLocked(), width, s.theme.Colored())
+	minimumBody := 1
+	if s.mode == modeChoice {
+		minimumBody = min(rows, len(styledRows("y a n", width, false)))
+	}
+	maxFooter := max(0, min(3, rows-minimumBody))
+	if maxFooter == 0 {
+		footer = nil
+	} else {
+		footer = visibleRows(footer, maxFooter, width)
+	}
 	inner := s.inputWidthLocked()
-	rule := !box && s.mode == modePrompt && rows >= len(footer)+2 && width >= boxWidth
+	rule := !box && s.mode != modeChoice && rows >= len(footer)+2 && width >= boxWidth
 	maxBody := max(1, rows-len(footer))
 	if rule {
 		maxBody--
@@ -566,14 +600,39 @@ func (s *Screen) layoutLocked() {
 		if len(bodyRows) > choiceRows {
 			bodyRows = styledRows("y a n", choiceWidth, false)
 		}
+		if len(bodyRows) > choiceRows {
+			bodyRows = styledRows("yan", choiceWidth, false)
+		}
 		if box && s.card != "" {
 			card := styledRows(s.card, choiceWidth, s.theme.Colored())
 			if len(card)+1+len(bodyRows) <= choiceRows {
 				bodyRows = append(append(card, ""), bodyRows...)
 			}
 		}
+		// A card has no border to hold its title, so the title is its first row.
+		if s.soft && len(bodyRows) < choiceRows {
+			bodyRows = append([]string{s.theme.Bold(s.theme.Amber("Approval needed"))}, bodyRows...)
+		}
 		bodyRows = visibleRows(bodyRows, choiceRows, choiceWidth)
 	case modeBusy:
+		inactive := "Input paused"
+		if rows == 1 {
+			inactive = "Paused · ^C cancel"
+			if cellWidth(inactive) > inner {
+				inactive = "^C cancel"
+			}
+			if cellWidth(inactive) > inner {
+				inactive = "^C"
+			}
+		}
+		bodyRows = visibleRows(styledRows(inactive, inner, false), maxBody, inner)
+		if len(bodyRows) == 1 && maxBody >= 2 {
+			bodyRows = append(bodyRows, "")
+		}
+	case modeView:
+		panic("terminal: document view reached composer layout")
+	default:
+		panic(fmt.Sprintf("terminal: unknown input mode %d", s.mode))
 	}
 	activity := s.mode == modeBusy && s.status != ""
 	room := rows - len(bodyRows) - len(footer)
@@ -592,8 +651,20 @@ func (s *Screen) layoutLocked() {
 	if padding {
 		room -= 2
 	}
+	room -= min(menuRowLimit, len(s.menuLocked()))
 	if preview := s.previewLocked(now); preview != "" && room > 0 {
-		previewRows := styledRows(preview, width, s.theme.Colored())
+		// The preview wraps like a committed line: at words, with later rows
+		// under the text after the sigil, so a streamed paragraph does not
+		// break inside words and then jump when it commits.
+		var previewRows []string
+		for line := range strings.SplitSeq(preview, "\n") {
+			for index, row := range WrapWords(line, max(width-2, 1)) {
+				if index > 0 {
+					row = "  " + row
+				}
+				previewRows = append(previewRows, row)
+			}
+		}
 		s.frame = append(s.frame, previewRows[max(0, len(previewRows)-room):]...)
 	}
 	if len(activityLines) > 0 {
@@ -612,13 +683,17 @@ func (s *Screen) layoutLocked() {
 	}
 	live := make([]string, 0, len(bodyRows))
 	for i, row := range bodyRows {
-		if s.mode == modePrompt && len(s.text) == 0 {
+		if s.mode == modeBusy || s.mode == modePrompt && len(s.text) == 0 {
 			row = s.theme.Graphite(row)
 		}
 		if marker {
 			prefix := "  "
 			if start+i == 0 {
-				prefix = s.theme.Bold(s.theme.Accent("›")) + " "
+				if s.mode == modeBusy {
+					prefix = s.theme.Graphite("›") + " "
+				} else {
+					prefix = s.theme.Bold(s.theme.Accent("›")) + " "
+				}
 			}
 			if i == 0 && start > 0 {
 				prefix = s.theme.Graphite("↑") + " "
@@ -629,18 +704,29 @@ func (s *Screen) layoutLocked() {
 		}
 		live = append(live, choiceBar+row)
 	}
+	foot, fits := s.cardFootLocked()
+	if !fits {
+		foot = ""
+	}
 	switch {
+	case box && s.soft && s.mode == modeChoice:
+		s.frame = append(s.frame, s.theme.ToneCard(live, width, presentation.ToneNotice, s.breathLocked(now))...)
 	case box && s.mode == modeChoice:
 		glow := 0.3 + 0.2*s.breathLocked(now)
 		border := func(text string) string { return s.theme.Glow(text, glow) }
-		s.frame = append(s.frame, s.boxed(live, width, border, s.theme.Amber("Approval needed"))...)
+		s.frame = append(s.frame, s.boxed(live, width, border, s.theme.Amber("Approval needed"), s.theme.Graphite(foot))...)
+	case box && s.soft:
+		s.frame = append(s.frame, s.theme.Card(live, width)...)
 	case box:
-		s.frame = append(s.frame, s.boxed(live, width, s.theme.Hairline, "")...)
+		s.frame = append(s.frame, s.boxed(live, width, s.theme.Hairline, "", s.theme.Graphite(foot))...)
 	default:
 		s.frame = append(s.frame, live...)
 	}
 	if padding {
 		s.frame = append(s.frame, "")
+	}
+	if menu := s.menuLocked(); len(menu) > 0 {
+		s.frame = append(s.frame, s.menuRowsLocked(menu, width, min(menuRowLimit, s.rows-len(s.frame)-len(footer)))...)
 	}
 	if len(s.frame) < s.rows {
 		footer = visibleRows(footer, s.rows-len(s.frame), width)
@@ -674,63 +760,103 @@ func visibleRows(rows []string, limit, width int) []string {
 	return rows
 }
 
-// activityLocked keeps the status ahead of the small activity mark.
+// spinnerFrames is the activity mark while the agent works.
+var spinnerFrames = [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// activityLocked keeps the status ahead of the activity mark: a spinner in
+// the model color while the agent works, amber while a tool runs. With a tint
+// a hairline carries the row, so that working looks like part of the frame
+// that holds the composer, and not a line of text above it.
 func (s *Screen) activityLocked() string {
 	now := time.Now()
 	if s.status == "" {
 		return s.theme.Graphite("·")
 	}
 	mark := "·"
-	if s.effects.motion && (s.tickLocked(now)/4)%2 != 0 {
-		mark = "•"
+	if s.effects.motion {
+		mark = spinnerFrames[(s.tickLocked(now)/2)%len(spinnerFrames)]
 	}
 	if s.effects.toolRunning {
-		mark = s.theme.Accent(mark)
+		mark = s.theme.Amber(mark)
 	} else {
-		mark = s.theme.Graphite(mark)
+		mark = s.theme.Accent(mark)
 	}
 	row := mark + " " + s.theme.Ink(s.status)
 	if !s.activitySince.IsZero() {
 		row += s.theme.Graphite(" · " + strconv.Itoa(int(now.Sub(s.activitySince).Seconds())) + "s")
 	}
-	return row
+	if !s.theme.Soft() {
+		return row
+	}
+	used := 3 + cellWidth(withoutStyles(row)) + 1
+	return s.theme.Hairline("── ") + row + " " + s.theme.Hairline(strings.Repeat("─", max(max(s.cols-1, 2)-used, 0)))
 }
 
-// footerLocked gives safety keys priority over optional context details.
-func (s *Screen) footerLocked() string {
-	now := time.Now()
-	width := max(s.cols-1, 2)
+// hintLocked names the keys of the current mode in the widest form that fits
+// room cells. The safety key of each mode survives down to a few cells.
+func (s *Screen) hintLocked(room int) string {
 	hint := ""
 	switch s.mode {
 	case modePrompt:
+		if len(s.menuLocked()) > 0 {
+			hint = "↑↓ select · Tab complete · Enter run · Esc close"
+			if room < cellWidth(hint) {
+				hint = "↑↓ Tab Enter · Esc close"
+			}
+			if room < cellWidth(hint) {
+				hint = "Tab · Esc"
+			}
+			return hint
+		}
 		hint = "Enter send · Ctrl-J new line"
-		if width < cellWidth(hint) {
+		if room < cellWidth(hint) {
 			hint = "Enter send · ^J line"
 		}
-		if width < cellWidth(hint) {
+		if room < cellWidth(hint) {
 			hint = "Enter send / ^J"
 		}
-		if width < cellWidth(hint) {
+		if room < cellWidth(hint) {
 			hint = "Enter / ^J"
 		}
-		if width < cellWidth(hint) {
-			hint = "Enter\n^J line"
+		if room < cellWidth(hint) {
+			hint = "Enter"
+		}
+		if commands := " · /tools · /diff · /help"; cellWidth(hint)+cellWidth(commands) <= room {
+			hint += commands
 		}
 	case modeChoice:
 		hint = "Enter / Esc deny"
-		if width < cellWidth(hint) {
+		if room < cellWidth(hint) {
 			hint = "Enter/Esc deny"
 		}
-		if width < cellWidth(hint) {
+		if room < cellWidth(hint) {
 			hint = "^M/Esc n"
 		}
 	case modeBusy:
 		hint = "Ctrl-C cancel"
-		if width < cellWidth(hint) {
+		if room < cellWidth(hint) {
 			hint = "^C cancel"
 		}
+	case modeView:
+		panic("terminal: document view reached composer hints")
 	}
-	line := s.theme.Graphite(hint)
+	return hint
+}
+
+// cardFootLocked is the key hint of the card's bottom border and whether the
+// border has room for it; otherwise the status bar shows it.
+func (s *Screen) cardFootLocked() (string, bool) {
+	inner := s.inputWidthLocked()
+	hint := s.hintLocked(inner - 4)
+	return hint, cellWidth(hint)+4 <= inner
+}
+
+// footerLocked is the status bar under the composer. Inside a card the keys
+// sit in the card's bottom border, so the bar holds only the session details,
+// ending under the card's right edge. Without a card the keys come first.
+func (s *Screen) footerLocked() string {
+	now := time.Now()
+	width := max(s.cols-1, 2)
 	extra := s.footerTextLocked(now)
 	if s.mode == modePrompt && s.background != "" {
 		if extra != "" {
@@ -738,12 +864,38 @@ func (s *Screen) footerLocked() string {
 		}
 		extra += s.theme.Graphite(s.background)
 	}
+	if s.box && s.soft {
+		if s.rows >= softFooterRows {
+			return s.softFooterLocked(now, width)
+		}
+		hint := s.hintLocked(width - cardPaddingCells)
+		lead := strings.Repeat(" ", cardPaddingCells) + s.theme.Graphite(hint)
+		if extra == "" {
+			return lead
+		}
+		if gap := width - cardPaddingCells - cellWidth(hint) - cellWidth(withoutStyles(extra)); gap >= 3 {
+			return lead + strings.Repeat(" ", gap) + extra
+		}
+		return lead + "\n" + strings.Repeat(" ", max(width-cellWidth(withoutStyles(extra)), 0)) + extra
+	}
+	if s.box {
+		foot, fits := s.cardFootLocked()
+		if fits {
+			if gap := width - cellWidth(withoutStyles(extra)); extra != "" && gap >= 2 {
+				return strings.Repeat(" ", gap) + extra
+			}
+			return extra
+		}
+		line := s.theme.Graphite(foot)
+		if extra != "" {
+			line += "\n" + extra
+		}
+		return line
+	}
+	hint := s.hintLocked(width)
+	line := s.theme.Graphite(hint)
 	if extra != "" {
-		// Under the composer card, keys sit under its text on the left and
-		// the session details end under its right edge.
-		if gap := width - 4 - cellWidth(withoutStyles(extra)) - cellWidth(hint); width >= boxWidth && gap >= 3 && !strings.Contains(hint, "\n") {
-			line = "  " + line + strings.Repeat(" ", gap) + extra
-		} else if cellWidth(withoutStyles(extra))+cellWidth(hint)+3 <= width {
+		if cellWidth(withoutStyles(extra))+cellWidth(hint)+3 <= width {
 			line += "   " + extra
 		} else {
 			line += "\n" + extra
@@ -752,11 +904,93 @@ func (s *Screen) footerLocked() string {
 	return line
 }
 
+// softFooterRows is the least terminal height that has room for the two-row
+// footer of a soft card; a shorter terminal keeps one row.
+const softFooterRows = 16
+
+// softFooterLocked is the status area under a soft card, in the margin of the
+// card's text. The first row says where the work happens, the folder and the
+// branch, and which model does it. The second holds the keys and the context
+// use. A row that cannot hold both of its sides gives up the keys, or the
+// branch, before the model or the context.
+func (s *Screen) softFooterLocked(now time.Time, width int) string {
+	inner := width - 2*cardPaddingCells
+	margin := strings.Repeat(" ", cardPaddingCells)
+	model, usage := s.footerPartsLocked(now)
+	if s.mode == modePrompt && s.background != "" {
+		if usage != "" {
+			usage += s.theme.Graphite(" · ")
+		}
+		usage += s.theme.Graphite(s.background)
+	}
+	var rows []string
+	if place := s.placeLocked(inner - cellWidth(withoutStyles(model)) - 3); place != "" || model != "" {
+		row, _ := spread(place, model, inner)
+		rows = append(rows, margin+row)
+	}
+	hint := s.hintLocked(inner - cellWidth(withoutStyles(usage)) - 3)
+	if row, fits := spread(s.theme.Graphite(hint), usage, inner); fits {
+		rows = append(rows, margin+row)
+	} else {
+		// The keys are the safety of the mode, so they stay; the usage moves down.
+		rows = append(rows, margin+s.theme.Graphite(s.hintLocked(inner)))
+		row, _ := spread("", usage, inner)
+		rows = append(rows, margin+row)
+	}
+	return strings.Join(rows, "\n")
+}
+
+// spread puts left at the start of a row of inner cells and right at its end.
+// It reports whether both fit with at least three cells between them; when
+// either side is empty the other takes its place and it always fits.
+func spread(left, right string, inner int) (string, bool) {
+	leftWidth, rightWidth := cellWidth(withoutStyles(left)), cellWidth(withoutStyles(right))
+	switch {
+	case right == "":
+		return left, true
+	case left == "":
+		return strings.Repeat(" ", max(inner-rightWidth, 0)) + right, true
+	}
+	gap := inner - leftWidth - rightWidth
+	if gap < 3 {
+		return "", false
+	}
+	return left + strings.Repeat(" ", gap) + right, true
+}
+
+// SetPlace names the folder and the branch that the footer shows. The folder
+// is text that fits a path, such as "~/code/harbor"; an empty branch shows no
+// branch.
+func (s *Screen) SetPlace(folder, branch string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if folder == s.place.folder && branch == s.place.branch {
+		return
+	}
+	s.place.folder, s.place.branch = folder, branch
+	s.layoutDirty = true
+	s.drawLocked()
+}
+
+// placeLocked is the folder and branch in room cells, or the empty string when
+// there is no folder or the room is too small to say anything. The branch goes
+// first when room is short, and then the front of the folder.
+func (s *Screen) placeLocked(room int) string {
+	folder, branch := presentation.Safe(s.place.folder), presentation.Safe(s.place.branch)
+	if folder == "" || room < 6 {
+		return ""
+	}
+	if branch != "" && cellWidth(folder)+2+cellWidth(branch) <= room {
+		return s.theme.Graphite(folder) + "  " + s.theme.Accent(branch)
+	}
+	return s.theme.Graphite(presentation.EllipsizeStart(folder, room))
+}
+
 func (s *Screen) drawLocked() {
 	if s.closed || s.fault != nil {
 		return
 	}
-	if s.introDoneLocked(time.Now()) {
+	if s.view == nil && s.introDoneLocked(time.Now()) {
 		s.commitIntroLocked()
 		return
 	}
@@ -770,19 +1004,32 @@ func (s *Screen) drawLocked() {
 // counts as an animation frame: streamed tokens then replace frames instead
 // of adding to them.
 func (s *Screen) renderLocked() {
-	if s.layoutDirty || len(s.frame) == 0 {
-		s.layoutLocked()
-		s.lastFrame = time.Now()
-	}
-	if s.activityRow >= 0 {
-		rows := visibleRows(styledRows(s.activityLocked(), max(s.cols-1, 2), s.theme.Colored()), s.activityRows, max(s.cols-1, 2))
-		clear(s.frame[s.activityRow : s.activityRow+s.activityRows])
-		copy(s.frame[s.activityRow:s.activityRow+s.activityRows], rows)
-	}
-	if s.footerRow >= 0 {
-		rows := visibleRows(styledRows(s.footerLocked(), max(s.cols-1, 2), s.theme.Colored()), s.footerRows, max(s.cols-1, 2))
-		clear(s.frame[s.footerRow : s.footerRow+s.footerRows])
-		copy(s.frame[s.footerRow:s.footerRow+s.footerRows], rows)
+	if s.view != nil {
+		if s.layoutDirty || len(s.frame) == 0 {
+			s.layoutViewLocked()
+		}
+	} else {
+		if s.reasoningDirty {
+			s.preview = "  " + s.theme.Graphite(s.theme.Italic(presentation.Safe(s.reasoningText)))
+			s.reasoningText, s.reasoningDirty = "", false
+			s.effects.previewPrefix, s.effects.previewBody = "", ""
+			s.effects.wet = s.effects.wet[:0]
+			s.layoutDirty = true
+		}
+		if s.layoutDirty || len(s.frame) == 0 {
+			s.layoutLocked()
+			s.lastFrame = time.Now()
+		}
+		if s.activityRow >= 0 {
+			rows := visibleRows(styledRows(s.activityLocked(), max(s.cols-1, 2), s.theme.Colored()), s.activityRows, max(s.cols-1, 2))
+			clear(s.frame[s.activityRow : s.activityRow+s.activityRows])
+			copy(s.frame[s.activityRow:s.activityRow+s.activityRows], rows)
+		}
+		if s.footerRow >= 0 {
+			rows := visibleRows(styledRows(s.footerLocked(), max(s.cols-1, 2), s.theme.Colored()), s.footerRows, max(s.cols-1, 2))
+			clear(s.frame[s.footerRow : s.footerRow+s.footerRows])
+			copy(s.frame[s.footerRow:s.footerRow+s.footerRows], rows)
+		}
 	}
 	visible := s.mode == modePrompt
 	dirty := len(s.frame) != len(s.live)
@@ -858,6 +1105,9 @@ func (s *Screen) Write(data []byte) (int, error) {
 
 func (s *Screen) writeLocked(data []byte) {
 	s.pending.Write(data)
+	if s.view != nil {
+		return
+	}
 	if end := bytes.LastIndexByte(s.pending.Bytes(), '\n'); end >= 0 {
 		s.beginPaint()
 		s.eraseIntoPaintLocked()
@@ -877,6 +1127,13 @@ func (s *Screen) Width() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cols
+}
+
+// Height is the terminal height in rows.
+func (s *Screen) Height() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rows
 }
 
 // oscText makes text safe inside an operating system command: no controls,
@@ -964,15 +1221,15 @@ func (s *Screen) SetBackgroundWork(text string) {
 	s.wake.signal()
 }
 
-// SetPreview shows a line that is not streamed, such as reasoning text, or
-// clears the preview with empty text.
-func (s *Screen) SetPreview(text string) {
+// ClearPreview removes visible and pending previews before text is committed.
+func (s *Screen) ClearPreview() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if text == s.preview && s.effects.previewBody == "" {
+	s.reasoningText, s.reasoningDirty = "", false
+	if s.preview == "" && s.effects.previewBody == "" {
 		return
 	}
-	s.preview = text
+	s.preview = ""
 	s.effects.previewPrefix, s.effects.previewBody = "", ""
 	s.effects.wet = s.effects.wet[:0]
 	s.layoutDirty = true
@@ -980,15 +1237,25 @@ func (s *Screen) SetPreview(text string) {
 }
 
 func (s *Screen) finishLocked(value answer) {
-	if s.result != nil {
-		s.result <- value
-		s.result = nil
-	}
+	result := s.result
+	s.result = nil
 	s.mode = modeBusy
 	s.text = nil
 	s.position, s.inputBytes = 0, 0
 	s.placeholder = ""
 	s.layoutDirty = true
+	if s.view != nil {
+		s.leaveViewLocked()
+		if !s.closed && s.fault == nil {
+			s.writeLocked(nil)
+		}
+	}
+	if result != nil {
+		if s.fault != nil {
+			value.err = errors.Join(value.err, s.fault)
+		}
+		result <- value
+	}
 	s.wake.signal()
 }
 
@@ -1028,7 +1295,7 @@ func (s *Screen) drainLocked() error {
 	return errors.New("terminal queued input exceeds 1 MiB")
 }
 
-func (s *Screen) await(ctx context.Context, mode inputMode, placeholder string) (answer, error) {
+func (s *Screen) await(ctx context.Context, mode inputMode, placeholder string, view *documentView) (answer, error) {
 	if err := ctx.Err(); err != nil {
 		return answer{}, err
 	}
@@ -1057,15 +1324,27 @@ func (s *Screen) await(ctx context.Context, mode inputMode, placeholder string) 
 		s.mu.Unlock()
 		return answer{}, err
 	}
+	if view != nil {
+		s.commitIntroLocked()
+		if s.fault != nil {
+			err := s.fault
+			s.mu.Unlock()
+			return answer{}, err
+		}
+	}
 	result := make(chan answer, 1)
 	s.result, s.mode, s.placeholder = result, mode, placeholder
 	s.text = nil
 	s.position, s.inputBytes = 0, 0
+	s.menuIndex, s.menuDismissed = 0, false
 	s.historyPosition = len(s.history)
 	s.draft = ""
 	s.draftPosition, s.verticalColumn = 0, 0
 	s.verticalMove = false
 	s.layoutDirty = true
+	if view != nil {
+		s.enterViewLocked(view)
+	}
 	s.drawLocked()
 	// The new mode may animate, such as the breathing approval bar; the read
 	// loop must leave a wait that it began without a deadline.
@@ -1094,12 +1373,12 @@ func (s *Screen) await(ctx context.Context, mode inputMode, placeholder string) 
 }
 
 func (s *Screen) Prompt(ctx context.Context, placeholder string) (string, error) {
-	value, err := s.await(ctx, modePrompt, placeholder)
+	value, err := s.await(ctx, modePrompt, placeholder, nil)
 	return value.text, err
 }
 
 func (s *Screen) Choose(ctx context.Context) (Choice, error) {
-	value, err := s.await(ctx, modeChoice, "")
+	value, err := s.await(ctx, modeChoice, "", nil)
 	return value.choice, err
 }
 
@@ -1113,8 +1392,13 @@ func (s *Screen) CardFits(card string) bool {
 	if width < 52 || card == "" {
 		return false
 	}
-	// Borders, a gap, the choice row, and up to two footer rows.
-	return len(styledRows(card, width-4, false))+6 <= s.rows
+	// Borders, a gap, the choice row, and up to two footer rows. A card with
+	// a tint also holds its title as a row.
+	reserved := 6
+	if s.theme.Soft() {
+		reserved++
+	}
+	return len(styledRows(card, width-4, false))+reserved <= s.rows
 }
 
 // ChooseCard asks for an approval with card shown above the choices. The
@@ -1163,11 +1447,19 @@ func (s *Screen) insertLocked(text string) {
 
 func (s *Screen) keyLocked(k key) bool {
 	if k.kind == keyInterrupt && !k.paste {
+		if s.view != nil {
+			s.finishLocked(answer{})
+			return false
+		}
 		s.mode = modeBusy
 		s.layoutDirty = true
 		return true
 	}
 	if s.mode == modeBusy || k.stale {
+		return false
+	}
+	if s.view != nil {
+		s.viewKeyLocked(k)
 		return false
 	}
 	if s.mode == modeChoice {
@@ -1196,6 +1488,18 @@ func (s *Screen) keyLocked(k key) bool {
 	if k.kind != keyUp && k.kind != keyDown {
 		s.verticalMove = false
 	}
+	before := string(s.text)
+	if matches := s.menuLocked(); len(matches) > 0 && s.menuKeyLocked(k, matches) {
+		if string(s.text) != before {
+			s.menuDismissed = false
+		}
+		return false
+	}
+	defer func() {
+		if string(s.text) != before {
+			s.menuIndex, s.menuDismissed = 0, false
+		}
+	}()
 	switch k.kind {
 	case keyText:
 		s.insertLocked(k.text)
@@ -1245,7 +1549,7 @@ func (s *Screen) keyLocked(k key) bool {
 		if !s.moveVerticalLocked(k.kind == keyDown) {
 			s.recallLocked(k.kind == keyDown)
 		}
-	case keyEscape, keyInterrupt:
+	case keyEscape, keyInterrupt, keyPageUp, keyPageDown:
 	default:
 		panic(fmt.Sprintf("terminal: unknown key kind %d", k.kind))
 	}
@@ -1257,15 +1561,20 @@ func (s *Screen) resizeLocked(rows, cols int) {
 		return
 	}
 	s.verticalMove = false
-	// Explicit live rows can wrap again when the terminal narrows. Their
-	// previous row coordinates are no longer suitable for a dirty-row diff.
-	up := 0
-	for i := range min(s.cursorRow, len(s.live)) {
-		up += len(styledRows(s.live[i], cols, false))
+	if s.view != nil {
+		s.rows, s.cols = rows, cols
+		s.beginPaint()
+		s.paint.WriteString("\x1b[H\x1b[2J")
+		s.paintMulti = true
+		clear(s.live)
+		s.live = s.live[:0]
+		s.cursorRow, s.cursorCol = 0, 0
+		s.layoutDirty = true
+		s.renderLocked()
+		s.flushPaintLocked()
+		return
 	}
-	up += s.cursorCol / cols
-	s.cursorRow = min(up, rows-1)
-	s.cursorCol %= cols
+	s.reflowCursorLocked(rows, cols)
 	s.beginPaint()
 	s.eraseIntoPaintLocked()
 	s.rows, s.cols = rows, cols
@@ -1276,8 +1585,20 @@ func (s *Screen) resizeLocked(rows, cols int) {
 	s.flushPaintLocked()
 }
 
+func (s *Screen) reflowCursorLocked(rows, cols int) {
+	// Explicit live rows can wrap again when the terminal narrows. Their
+	// previous row coordinates are no longer suitable for a dirty-row diff.
+	up := 0
+	for i := range min(s.cursorRow, len(s.live)) {
+		up += len(styledRows(s.live[i], cols, false))
+	}
+	up += s.cursorCol / cols
+	s.cursorRow = min(up, rows-1)
+	s.cursorCol %= cols
+}
+
 // waitLocked returns how long the read loop may block: until the next
-// animation frame at interval, until a lone Escape becomes a key, or without
+// frame at interval, until a lone Escape becomes a key, or without
 // a limit. A negative duration means no limit; the wake pipe ends the wait
 // early.
 func (s *Screen) waitLocked(now time.Time, interval time.Duration) time.Duration {

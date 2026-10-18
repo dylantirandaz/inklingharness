@@ -5,6 +5,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/dylantirandaz/inklingharness/internal/presentation"
 )
 
 const maxInputBytes = 1 << 20
@@ -22,6 +24,8 @@ const (
 	keyUp
 	keyDown
 	keyHome
+	keyPageUp
+	keyPageDown
 	keyEnd
 	keyDelete
 	keyBackspace
@@ -109,6 +113,10 @@ func (p *parser) feed(data []byte, now time.Time) []key {
 					kind = keyHome
 				case "\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~":
 					kind = keyEnd
+				case "\x1b[5~":
+					kind = keyPageUp
+				case "\x1b[6~":
+					kind = keyPageDown
 				case "\x1b[3~":
 					kind = keyDelete
 				default:
@@ -233,25 +241,8 @@ func (p *parser) escapeDeadline() (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// RuneWidth treats combining marks and joiners as zero cells. Wide East Asian
-// characters and emoji use two cells, matching ordinary modern terminals.
-func runeWidth(r rune) int {
-	if unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || r == 0x200d || r == 0xfe0f || r == 0xfe0e {
-		return 0
-	}
-	if r < 32 || r == 127 {
-		return 0
-	}
-	if r >= 0x1100 && (r <= 0x115f || r == 0x2329 || r == 0x232a ||
-		(r >= 0x2e80 && r <= 0xa4cf && r != 0x303f) ||
-		(r >= 0xac00 && r <= 0xd7a3) || (r >= 0xf900 && r <= 0xfaff) ||
-		(r >= 0xfe10 && r <= 0xfe19) || (r >= 0xfe30 && r <= 0xfe6f) ||
-		(r >= 0xff00 && r <= 0xff60) || (r >= 0xffe0 && r <= 0xffe6) ||
-		(r >= 0x1f000 && r <= 0x1faff) || (r >= 0x20000 && r <= 0x3fffd)) {
-		return 2
-	}
-	return 1
-}
+// runeWidth is the width of one rune in cells; see presentation.RuneWidth.
+func runeWidth(r rune) int { return presentation.RuneWidth(r) }
 
 func previousCluster(text []rune, pos int) int {
 	if pos == 0 {
@@ -391,13 +382,7 @@ func styledRows(text string, width int, color bool) []string {
 	return append(rows, row.String())
 }
 
-func cellWidth(text string) int {
-	width := 0
-	for _, r := range text {
-		width += runeWidth(r)
-	}
-	return width
-}
+func cellWidth(text string) int { return presentation.CellWidth(text) }
 
 func withoutStyles(text string) string {
 	var b strings.Builder

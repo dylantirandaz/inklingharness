@@ -1,18 +1,22 @@
 """Stop benchmark runs once their real spend reaches a dollar limit.
 
-Spend is measured, not estimated: OpenRouter key usage (inference) plus the
-drop in the Prime wallet balance (sandboxes and images) since the guard
-started, plus --already for money spent before it. At the limit the guard
-sends SIGTERM to the process group of every PID file it watches.
+Spend uses OpenRouter key usage and decreases in the Prime wallet balance.
+The --already amount carries earlier spend forward. Wallet top-ups do not
+reduce recorded spend. The guard stops the watched process groups at the
+limit, on a balance read failure, or when too many owned sandboxes remain.
 
 With --backend docker the trials run in local Docker: there is no wallet to
 read, and the guard instead removes unused Terminal-Bench images when free
 disk falls below --min-disk-gb, and removes trial containers when it stops.
 
-  python out/terminal-bench/with_key.py evals.budget_guard --limit 400 --already 1.73 out/terminal-bench/tb4-*.pid
+With --backend modal the trials run in Modal VMs: there is no wallet to read
+and no local state to clean, so the guard watches inference spend and credits.
+
+  python out/terminal-bench/with_key.py evals.budget_guard --limit 395 --already 107.23 --max-sandboxes 10 --job-dir JOB_DIR PID_FILE
 """
 
 import argparse
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -93,26 +97,47 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--already", type=float, default=0.0, help="Dollars spent before the guard started")
     parser.add_argument("--min-credits", type=float, default=2.0, help="Stop when OpenRouter credits or the Prime wallet fall below this")
     parser.add_argument("--interval", type=float, default=120.0)
-    parser.add_argument("--backend", choices=["prime", "docker"], default="prime")
+    parser.add_argument("--backend", choices=["prime", "docker", "modal"], default="prime")
     parser.add_argument("--min-disk-gb", type=float, default=15.0, help="Docker backend: prune unused task images below this much free disk")
     parser.add_argument("--once", action="store_true", help="Print the current spend and exit")
+    parser.add_argument("--job-dir", action="append", type=Path, default=[], help="Prime job directory; repeat for each watched job")
+    parser.add_argument("--max-sandboxes", type=int, help="Stop if owned Prime sandboxes exceed this count")
     parser.add_argument("pid_files", nargs="*", type=Path)
     arguments = parser.parse_args(argv)
-    started = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-    docker = arguments.backend == "docker"
-    read_balance = (lambda: 0.0) if docker else prime_balance
-    start_usage, start_balance = _retry(openrouter_usage), _retry(read_balance)
+    prime, docker = arguments.backend == "prime", arguments.backend == "docker"
+    read_balance = prime_balance if prime else (lambda: 0.0)
+    if prime and not arguments.once:
+        if not arguments.job_dir or not arguments.pid_files or arguments.max_sandboxes is None or arguments.max_sandboxes < 1:
+            parser.error("Prime requires --job-dir, --max-sandboxes, and PID files")
+    try:
+        start_usage, start_balance = _retry(openrouter_usage), _retry(read_balance)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        stop(arguments.pid_files)
+        if prime and arguments.job_dir:
+            time.sleep(60)
+            delete_sandboxes(arguments.job_dir)
+        elif docker:
+            remove_tb_containers()
+        raise
+    previous_balance = start_balance
+    sandboxes = 0.0
     while True:
         try:
             inference = openrouter_usage() - start_usage
             balance = read_balance()
-            sandboxes = start_balance - balance
+            sandboxes += max(0.0, previous_balance - balance)
+            previous_balance = balance
             credits = openrouter_credits_left()
+            owned = sandbox_ids(arguments.job_dir) if prime and not arguments.once else []
+            jobs_finished = bool(arguments.pid_files) and not any(_alive(path) for path in arguments.pid_files)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            # A network blip must not end the guard while jobs keep spending.
-            print(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "read_error": str(error)}), flush=True)
-            time.sleep(min(arguments.interval, 30.0))
-            continue
+            print(json.dumps({"read_error": str(error), "stopped": stop(arguments.pid_files)}), flush=True)
+            if prime:
+                time.sleep(60)
+                delete_sandboxes(arguments.job_dir)
+            elif docker:
+                remove_tb_containers()
+            raise
         spent = arguments.already + inference + sandboxes
         record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "spent": round(spent, 2), "inference": round(inference, 2), "limit": arguments.limit, "openrouter_credits_left": round(credits, 2)}
         if docker:
@@ -122,8 +147,8 @@ def main(argv: list[str] | None = None) -> int:
                     record["pruned_images"] = prune_tb_images()
                 except (OSError, subprocess.SubprocessError) as error:
                     record["prune_error"] = str(error)
-        else:
-            record.update(sandboxes=round(sandboxes, 2), prime_balance=round(balance, 2))
+        elif prime:
+            record.update(sandboxes=round(sandboxes, 2), prime_balance=round(balance, 2), owned_sandboxes=len(owned))
         print(json.dumps(record), flush=True)
         if arguments.once:
             return 0
@@ -132,32 +157,66 @@ def main(argv: list[str] | None = None) -> int:
             reason = "budget limit reached"
         elif credits < arguments.min_credits:
             reason = "OpenRouter credits exhausted"
-        elif not docker and balance < arguments.min_credits:
+        elif prime and balance < arguments.min_credits:
             reason = "Prime wallet exhausted"
-        if reason is not None:
-            print(json.dumps({"reason": reason, "stopped": stop(arguments.pid_files)}), flush=True)
+        elif prime and len(owned) > arguments.max_sandboxes:
+            reason = "owned sandbox count exceeds the trial limit"
+        if reason is not None or jobs_finished:
+            print(json.dumps({"reason": reason or "all jobs stopped", "stopped": stop(arguments.pid_files)}), flush=True)
             time.sleep(60)
             if docker:
                 print(json.dumps({"removed_containers": remove_tb_containers()}), flush=True)
-            else:
-                print(json.dumps({"deleted_sandboxes": delete_sandboxes(started)}), flush=True)
-            return 1
-        if arguments.pid_files and not any(_alive(path) for path in arguments.pid_files):
-            return 0
+            elif prime:
+                print(json.dumps({"deleted_sandboxes": delete_sandboxes(arguments.job_dir)}), flush=True)
+            return 1 if reason is not None else 0
         time.sleep(arguments.interval)
 
 
-def delete_sandboxes(since: str) -> list[str]:
-    """Delete Harbor sandboxes created since the guard started; killed jobs leave them running and billing."""
-    try:
-        listed = subprocess.run(["prime", "sandbox", "list", "-o", "json", "-n", "500"], capture_output=True, text=True, timeout=120, check=True).stdout
-        ids = [box["id"] for box in json.loads(listed)["sandboxes"] if box.get("name", "").startswith("harbor-") and box.get("created_at", "") >= since and box.get("status") != "TERMINATED"]
-        if ids:
-            subprocess.run(["prime", "sandbox", "delete", "-y", "--plain", *ids], capture_output=True, text=True, timeout=600, check=True)
-        return ids
-    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-        print(json.dumps({"sandbox_cleanup_error": str(error)}), flush=True)
+def sandbox_ids(job_dirs: list[Path]) -> list[str]:
+    """List only sandboxes whose names belong to these jobs' saved trials."""
+    prefixes = tuple(
+        f"harbor-{trial.name}__"
+        for job_dir in job_dirs if job_dir.exists()
+        for trial in job_dir.iterdir()
+        if trial.is_dir() and (trial / "config.json").is_file()
+    )
+    if not prefixes:
         return []
+    from prime_sandboxes import AsyncSandboxClient
+    from prime_sandboxes.core.client import APIError
+
+    async def read_owned_ids() -> list[str]:
+        async with AsyncSandboxClient() as client:
+            inventory = await asyncio.wait_for(
+                client.list(exclude_terminated=True, per_page=500), timeout=30,
+            )
+        if inventory.has_next:
+            raise ValueError("Prime inventory exceeds 500 entries; cannot verify job ownership")
+        return [
+            box.id for box in inventory.sandboxes
+            if box.name.startswith(prefixes) and box.status != "TERMINATED"
+        ]
+
+    try:
+        return asyncio.run(read_owned_ids())
+    except APIError as error:
+        raise OSError(f"Prime inventory read failed: {error}") from error
+    except TimeoutError as error:
+        raise OSError("Prime inventory did not respond within 30 seconds.") from error
+
+
+def delete_sandboxes(job_dirs: list[Path]) -> list[str]:
+    """Delete owned sandboxes and fail if deletion does not complete."""
+    ids = sandbox_ids(job_dirs)
+    if not ids:
+        return []
+    subprocess.run(["prime", "sandbox", "delete", "-y", "--plain", *ids], capture_output=True, text=True, timeout=600, check=True)
+    deadline = time.monotonic() + 120
+    while remaining := sandbox_ids(job_dirs):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Prime sandboxes remain after deletion: {remaining}")
+        time.sleep(2)
+    return ids
 
 
 def _retry(read):
@@ -171,11 +230,22 @@ def _retry(read):
 
 
 def _alive(path: Path) -> bool:
+    """Return false for missing or exited processes; fail if ps cannot read state."""
     try:
-        os.kill(int(path.read_text().strip()), 0)
-        return True
+        pid = int(path.read_text().strip())
     except (OSError, ValueError):
         return False
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "stat="],
+        capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode == 1:
+        return False
+    result.check_returncode()
+    state = result.stdout.strip()
+    if not state:
+        raise ValueError(f"ps returned no state for process {pid}")
+    return state[0] not in ("Z", "X")
 
 
 if __name__ == "__main__":

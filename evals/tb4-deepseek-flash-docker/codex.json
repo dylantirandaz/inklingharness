@@ -39,9 +39,9 @@
       "name": "terminal-bench/terminal-bench",
       "ref": "sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732",
       "exclude_task_names": [
-        "jax-speedrun-gpu",
-        "fp8-rmsnorm-gemm",
-        "math-eval-grader"
+        "terminal-bench/jax-speedrun-gpu",
+        "terminal-bench/fp8-rmsnorm-gemm",
+        "terminal-bench/math-eval-grader"
       ]
     }
   ]
