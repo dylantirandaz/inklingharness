@@ -86,16 +86,27 @@ func runCommand(ctx context.Context, root string, jobs *Jobs, commandLine string
 		return Result{}, discardOutput(output, ctx.Err())
 	}
 	exitCode := 0
+	childHoldsOutput := false
 	if runErr != nil {
 		var exitError *exec.ExitError
-		if !errors.As(runErr, &exitError) {
+		switch {
+		case errors.As(runErr, &exitError):
+			exitCode = exitError.ExitCode()
+		case errors.Is(runErr, exec.ErrWaitDelay):
+			// The shell exited with status 0, but a background child kept the
+			// output pipe open past the drain delay. The command is done and
+			// the child lives on, so this is a result, not a failure.
+			childHoldsOutput = true
+		default:
 			return Result{}, discardOutput(output, fmt.Errorf("bash: %w", runErr))
 		}
-		exitCode = exitError.ExitCode()
 	}
 	content := output.finish()
 	if content == "" {
 		content = "(no output)"
+	}
+	if childHoldsOutput {
+		content += "\n[a background process still holds the output; later output is not shown]"
 	}
 	if exitCode != 0 {
 		return Result{Content: content + fmt.Sprintf("\n[exit code %d]", exitCode), IsError: true}, nil

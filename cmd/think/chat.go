@@ -59,7 +59,7 @@ Up/Down moves through input rows, then recalls history at the edges.
 Ctrl-P/Ctrl-N recalls history directly and restores the draft.
 Alt-Left/Right moves by word. Ctrl-W deletes the previous word.
 Pasted text stays in the input area until you press Enter.
-Attach files with @path or @"path with spaces". Use @@ for a literal @.
+Attach files with @path or @"path with spaces". An @word that names no file stays text. Use @@ for a literal @.
 In plain mode, end a line with a backslash to enter more lines.
 Ctrl-C stops the active request or tool. At an idle prompt, Ctrl-C exits.
 In /tools and /diff views: arrows or j/k scroll, PgUp/PgDn page, Home/End or g/G jump,

@@ -123,6 +123,21 @@ func TestBashReportsExitCodeAsExpectedFailure(t *testing.T) {
 	}
 }
 
+// A command that starts a background process, without redirecting its output,
+// is finished when the shell exits. The model gets the output and a note, and
+// the run goes on.
+func TestBashFinishesWhenABackgroundChildHoldsTheOutput(t *testing.T) {
+	bash := lookup(t, t.TempDir(), "bash")
+	started := time.Now()
+	result := runBash(t, bash, "(sleep 3; echo late) & echo started")
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("bash waited %s for the background child", elapsed)
+	}
+	if result.IsError || !strings.HasPrefix(result.Content, "started\n") || !strings.Contains(result.Content, "background process still holds the output") {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func runBash(t *testing.T, bash Tool, command string) Result {
 	t.Helper()
 	input, err := json.Marshal(map[string]string{"command": command})

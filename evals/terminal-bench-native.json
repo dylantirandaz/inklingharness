@@ -1,0 +1,72 @@
+{
+  "job_name": "terminal-bench-2.0-native",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 20,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "import_path": "evals.harbor_environment:NativeModalEnvironment",
+    "cpu_enforcement_policy": "guarantee",
+    "memory_enforcement_policy": "guarantee",
+    "kwargs": {
+      "app_name": "inkling-terminal-bench",
+      "modal_vm_runtime": true
+    }
+  },
+  "agents": [
+    {
+      "import_path": "evals.harbor_think:Think",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "binary_path": "out/terminal-bench/think-linux-amd64",
+        "reasoning_effort": "high"
+      }
+    },
+    {
+      "name": "claude-code",
+      "model_name": "thinkingmachines/inkling-small",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+        "ANTHROPIC_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "2.1.205",
+        "reasoning_effort": "high"
+      }
+    },
+    {
+      "import_path": "evals.harbor_codex:CodexOpenRouter",
+      "model_name": "thinkingmachines/inkling-small",
+      "env": {
+        "OPENAI_BASE_URL": "https://openrouter.ai/api/v1",
+        "OPENAI_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "0.146.0",
+        "reasoning_effort": "high"
+      }
+    },
+    {
+      "name": "pi",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "0.87.1",
+        "thinking": "high"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "name": "terminal-bench",
+      "version": "2.0"
+    }
+  ]
+}

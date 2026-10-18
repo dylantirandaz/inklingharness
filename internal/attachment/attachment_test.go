@@ -76,6 +76,9 @@ func TestPrepareQuotedPathsOrderDeduplicationAndEnvelope(t *testing.T) {
 func TestPrepareLiteralMarkersAndWhitespace(t *testing.T) {
 	root := t.TempDir()
 	writeText(t, root, "file.txt", "content")
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name   string
 		prompt string
@@ -91,6 +94,10 @@ func TestPrepareLiteralMarkersAndWhitespace(t *testing.T) {
 		{"fenced code", "Explain:\n```julia\n@time work()\n```\n@file.txt", "Explain:\n```julia\n@time work()\n```\n", 1},
 		{"tilde fence", "Explain:\n~~~python\n@decorator\n~~~", "Explain:\n~~~python\n@decorator\n~~~", 0},
 		{"unclosed code", "Explain `macro @missing", "Explain `macro @missing", 0},
+		// Pasted issue text has words that start with @. They are not files, so they stay text.
+		{"unknown words", "Allow ., @, +, and - in @property and @-1; skip @*.txt (no globbing).", "Allow ., @, +, and - in @property and @-1; skip @*.txt (no globbing).", 0},
+		{"directory", "See @sub and @sub/", "See @sub and @sub/", 0},
+		{"known file among unknown words", "Read @file.txt and @nothing.", "Read  and @nothing.", 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			prepared, err := attachment.Prepare(context.Background(), root, test.prompt, nil, nil)
@@ -125,7 +132,7 @@ func TestPrepareRejectsInvalidInputWithoutPartialResult(t *testing.T) {
 		{"nul", "Review", []string{"valid", "nul"}},
 		{"invalid UTF-8", "Review", []string{"valid", "invalid"}},
 		{"oversize", "Review", []string{"oversize"}},
-		{"no globbing", "Review @*.txt", nil},
+		{"missing quoted file", "Review @\"missing.txt\"", nil},
 		{"empty explicit path", "Review", []string{""}},
 		{"empty quoted path", "Review @\"\"", nil},
 		{"unterminated quote", "Review @'valid", nil},

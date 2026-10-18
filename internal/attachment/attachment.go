@@ -50,14 +50,17 @@ type attachedImage struct {
 
 // Prepare reads explicit paths followed by whitespace-delimited @path markers
 // in prompt. Quoted markers (@"path with spaces" or @'path with spaces') support
-// spaces; @@ escapes a literal @. Paths are not globbed or sandboxed. Relative
-// paths resolve from root, and cleaned absolute paths are deduplicated in order.
+// spaces and always name a file. An unquoted marker names a file only when a
+// regular file exists at that path; any other @word stays in the request as
+// text, so pasted prose and code cannot stop a run. @@ escapes a literal @.
+// Paths are not globbed or sandboxed. Relative paths resolve from root, and
+// cleaned absolute paths are deduplicated in order.
 // Each call reads fresh file contents and stores exact image snapshots.
 func Prepare(ctx context.Context, root, prompt string, paths []string, store *session.Store) (Prepared, error) {
 	if err := ctx.Err(); err != nil {
 		return Prepared{}, err
 	}
-	request, markers, err := parsePrompt(prompt)
+	request, markers, err := parsePrompt(prompt, regularFile(root))
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -243,7 +246,18 @@ func openRegular(ctx context.Context, path string) (*os.File, int64, error) {
 	return file, info.Size(), nil
 }
 
-func parsePrompt(prompt string) (string, []string, error) {
+// regularFile reports whether a path names a regular file, relative to root.
+func regularFile(root string) func(string) bool {
+	return func(path string) bool {
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
+		}
+		info, err := os.Stat(path)
+		return err == nil && info.Mode().IsRegular()
+	}
+}
+
+func parsePrompt(prompt string, isFile func(string) bool) (string, []string, error) {
 	if !strings.Contains(prompt, "@") {
 		return prompt, nil, nil
 	}
@@ -300,7 +314,7 @@ func parsePrompt(prompt string) (string, []string, error) {
 		if literal {
 			continue
 		}
-		if token[0] == '@' && len(token) > 1 && token[1] != '@' && token[1] != '"' && token[1] != '\'' {
+		if token[0] == '@' && len(token) > 1 && token[1] != '@' && token[1] != '"' && token[1] != '\'' && isFile(token[1:]) {
 			paths = append(paths, token[1:])
 			replace(start, i, "")
 		} else if strings.Contains(token, "@@") {

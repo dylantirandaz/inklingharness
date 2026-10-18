@@ -2,7 +2,7 @@
   "job_name": "terminal-bench-2.0-no-harness",
   "jobs_dir": "out/terminal-bench/jobs",
   "n_attempts": 1,
-  "n_concurrent_trials": 6,
+  "n_concurrent_trials": 10,
   "retry": {
     "max_retries": 0
   },
@@ -23,8 +23,8 @@
         "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
       },
       "kwargs": {
-        "binary_path": "out/terminal-bench/bare-0f7cd85848972eab-linux-amd64",
-        "wire_binary_path": "out/terminal-bench/harbor-wire-ade5d0f2d6784937-linux-amd64"
+        "binary_path": "out/terminal-bench/bare-linux-amd64",
+        "wire_binary_path": "out/terminal-bench/harbor-wire-linux-amd64"
       }
     },
     {
@@ -34,8 +34,8 @@
         "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
       },
       "kwargs": {
-        "binary_path": "out/terminal-bench/think-f97afc28c6835c80-linux-amd64",
-        "wire_binary_path": "out/terminal-bench/harbor-wire-ade5d0f2d6784937-linux-amd64"
+        "binary_path": "out/terminal-bench/think-linux-amd64",
+        "wire_binary_path": "out/terminal-bench/harbor-wire-linux-amd64"
       }
     }
   ],

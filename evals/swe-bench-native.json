@@ -1,0 +1,113 @@
+{
+  "job_name": "swe-bench-verified-40-native",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 12,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "import_path": "evals.harbor_environment:NativeModalEnvironment",
+    "cpu_enforcement_policy": "guarantee",
+    "memory_enforcement_policy": "guarantee",
+    "kwargs": {
+      "app_name": "inkling-terminal-bench",
+      "modal_vm_runtime": true
+    }
+  },
+  "agents": [
+    {
+      "import_path": "evals.harbor_think:Think",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "binary_path": "out/terminal-bench/think-linux-amd64",
+        "reasoning_effort": "high"
+      }
+    },
+    {
+      "name": "claude-code",
+      "model_name": "thinkingmachines/inkling-small",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+        "ANTHROPIC_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "2.1.205",
+        "reasoning_effort": "high"
+      }
+    },
+    {
+      "import_path": "evals.harbor_codex:CodexOpenRouter",
+      "model_name": "thinkingmachines/inkling-small",
+      "env": {
+        "OPENAI_BASE_URL": "https://openrouter.ai/api/v1",
+        "OPENAI_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "0.146.0",
+        "reasoning_effort": "high"
+      }
+    },
+    {
+      "name": "pi",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "0.87.1",
+        "thinking": "high"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "name": "swe-bench/swe-bench-verified",
+      "task_names": [
+        "swe-bench/django__django-10914",
+        "swe-bench/django__django-11066",
+        "swe-bench/django__django-11119",
+        "swe-bench/django__django-11179",
+        "swe-bench/django__django-11728",
+        "swe-bench/django__django-11749",
+        "swe-bench/django__django-11880",
+        "swe-bench/django__django-13033",
+        "swe-bench/django__django-13195",
+        "swe-bench/django__django-13410",
+        "swe-bench/django__django-13590",
+        "swe-bench/django__django-13820",
+        "swe-bench/django__django-14017",
+        "swe-bench/django__django-14771",
+        "swe-bench/django__django-16595",
+        "swe-bench/matplotlib__matplotlib-20826",
+        "swe-bench/matplotlib__matplotlib-22719",
+        "swe-bench/matplotlib__matplotlib-25287",
+        "swe-bench/matplotlib__matplotlib-25479",
+        "swe-bench/psf__requests-2317",
+        "swe-bench/pydata__xarray-3305",
+        "swe-bench/pydata__xarray-4966",
+        "swe-bench/pydata__xarray-6992",
+        "swe-bench/pylint-dev__pylint-7080",
+        "swe-bench/scikit-learn__scikit-learn-25232",
+        "swe-bench/sphinx-doc__sphinx-8056",
+        "swe-bench/sphinx-doc__sphinx-8120",
+        "swe-bench/sphinx-doc__sphinx-8459",
+        "swe-bench/sphinx-doc__sphinx-8548",
+        "swe-bench/sphinx-doc__sphinx-8595",
+        "swe-bench/sympy__sympy-12096",
+        "swe-bench/sympy__sympy-13615",
+        "swe-bench/sympy__sympy-13798",
+        "swe-bench/sympy__sympy-13974",
+        "swe-bench/sympy__sympy-15345",
+        "swe-bench/sympy__sympy-17139",
+        "swe-bench/sympy__sympy-19783",
+        "swe-bench/sympy__sympy-19954",
+        "swe-bench/sympy__sympy-20428",
+        "swe-bench/sympy__sympy-22714"
+      ]
+    }
+  ]
+}

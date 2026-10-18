@@ -13,9 +13,11 @@ and is reported as ungraded, never as a graded failure.
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 import json
 import math
 from pathlib import Path
+import random
 import statistics
 
 Z95 = 1.959964
@@ -54,10 +56,18 @@ class Outcome:
     cache_tokens: int | None
     output_tokens: int | None
     agent_seconds: float | None
+    # Time to install the harness in the sandbox before the agent starts.
+    setup_seconds: float | None = None
 
     @property
     def passed(self) -> bool:
         return self.grade == 1.0
+
+
+def _span_seconds(span: dict[str, str] | None) -> float | None:
+    if not span or not span.get("started_at") or not span.get("finished_at"):
+        return None
+    return (datetime.fromisoformat(span["finished_at"]) - datetime.fromisoformat(span["started_at"])).total_seconds()
 
 
 def _trial_outcome(directory: Path) -> tuple[str, Outcome]:
@@ -70,8 +80,15 @@ def _trial_outcome(directory: Path) -> tuple[str, Outcome]:
     run = directory / "agent" / "wire" / "run.json"
     if run.exists():
         seconds = json.loads(run.read_text()).get("elapsed_seconds")
-    # Token counts are valid only when the recorder saw every response whole.
-    complete = metadata.get("all_recorded_usage_complete") is True
+    else:
+        seconds = _span_seconds(result.get("agent_execution"))
+    # With a recorder, token counts are valid only when it saw every response
+    # whole. Without one, the counts of the harness are valid when all three exist.
+    recorded = metadata.get("all_recorded_usage_complete")
+    if recorded is None:
+        complete = all(agent.get(field) is not None for field in ("n_input_tokens", "n_cache_tokens", "n_output_tokens"))
+    else:
+        complete = recorded is True
     return result["agent_info"]["name"], Outcome(
         task=result["task_name"],
         grade=rewards.get("reward"),
@@ -80,6 +97,7 @@ def _trial_outcome(directory: Path) -> tuple[str, Outcome]:
         cache_tokens=agent.get("n_cache_tokens") if complete else None,
         output_tokens=agent.get("n_output_tokens") if complete else None,
         agent_seconds=seconds,
+        setup_seconds=_span_seconds(result.get("agent_setup")),
     )
 
 
@@ -115,19 +133,25 @@ def load_arm(source: Path, harness: str) -> dict[str, Outcome]:
     return arm
 
 
-def summarize(arm: dict[str, Outcome], prices: tuple[float, float, float]) -> dict[str, object]:
+def dollars(outcome: Outcome, prices: tuple[float, float, float]) -> float | None:
     """prices are dollars per million uncached input, output, and cached input tokens."""
+    if outcome.input_tokens is None or outcome.cache_tokens is None or outcome.output_tokens is None:
+        return None
     price_input, price_output, price_cache = prices
+    uncached = outcome.input_tokens - outcome.cache_tokens
+    return (uncached * price_input + outcome.cache_tokens * price_cache + outcome.output_tokens * price_output) / 1e6
+
+
+def summarize(arm: dict[str, Outcome], prices: tuple[float, float, float]) -> dict[str, object]:
     outcomes = list(arm.values())
     passes = sum(outcome.passed for outcome in outcomes)
     low, high = wilson_interval(passes, len(outcomes))
-    metered = [o for o in outcomes if o.input_tokens is not None and o.cache_tokens is not None and o.output_tokens is not None]
-    cost = sum(
-        ((o.input_tokens - o.cache_tokens) * price_input + o.cache_tokens * price_cache + o.output_tokens * price_output) / 1e6
-        for o in metered
-        if o.input_tokens is not None and o.cache_tokens is not None and o.output_tokens is not None
-    )
-    seconds = [o.agent_seconds for o in outcomes if o.agent_seconds is not None]
+    metered = [(o, cost) for o in outcomes if (cost := dollars(o, prices)) is not None]
+    metered_passes = sum(o.passed for o, _ in metered)
+    cost = sum(cost for _, cost in metered)
+    timed = [o for o in outcomes if o.agent_seconds is not None]
+    timed_passes = sum(o.passed for o in timed)
+    seconds = [o.agent_seconds for o in timed]
     return {
         "tasks": len(outcomes),
         "passes": passes,
@@ -137,9 +161,14 @@ def summarize(arm: dict[str, Outcome], prices: tuple[float, float, float]) -> di
         "exceptions": sum(o.exception is not None for o in outcomes),
         "metered_tasks": len(metered),
         "dollars_per_metered_task": cost / len(metered) if metered else None,
-        "mean_input_tokens_including_cache": statistics.fmean(o.input_tokens for o in metered if o.input_tokens is not None) if metered else None,
-        "mean_output_tokens": statistics.fmean(o.output_tokens for o in metered if o.output_tokens is not None) if metered else None,
+        # The price of one correct result: every metered trial counts, failures too.
+        "dollars_per_pass": cost / metered_passes if metered_passes else None,
+        "mean_input_tokens_including_cache": statistics.fmean(o.input_tokens for o, _ in metered if o.input_tokens is not None) if metered else None,
+        "mean_output_tokens": statistics.fmean(o.output_tokens for o, _ in metered if o.output_tokens is not None) if metered else None,
         "median_agent_seconds": statistics.median(seconds) if seconds else None,
+        "median_setup_seconds": statistics.median(setups) if (setups := [o.setup_seconds for o in outcomes if o.setup_seconds is not None]) else None,
+        # The time to one correct result: every timed trial counts, failures too.
+        "agent_seconds_per_pass": sum(seconds) / timed_passes if timed_passes else None,
     }
 
 
@@ -152,6 +181,46 @@ def compare(first: dict[str, Outcome], second: dict[str, Outcome]) -> dict[str, 
         "only_second_passed": only_second,
         "mcnemar_exact_p": exact_mcnemar(len(only_first), len(only_second)),
     }
+
+
+def efficiency(
+    first: dict[str, Outcome],
+    second: dict[str, Outcome],
+    prices: tuple[float, float, float],
+    *,
+    resamples: int = 2000,
+    seed: int = 1,
+) -> dict[str, object]:
+    """Compare the cost of the same work. Only the tasks that both arms passed
+    count, so an arm cannot look cheap by quitting early. Each figure is the
+    geometric mean of the per-task ratio of the first arm over the second, with
+    a 95% interval from resampling tasks. A ratio below 1 means the first arm
+    used less."""
+    common = sorted(task for task in first if first[task].passed and second[task].passed)
+    measures = {
+        "agent_seconds": lambda o: o.agent_seconds,
+        "input_tokens_including_cache": lambda o: o.input_tokens,
+        "output_tokens": lambda o: o.output_tokens,
+        "dollars": lambda o: dollars(o, prices),
+    }
+    report: dict[str, object] = {"matched_tasks": len(common)}
+    for name, measure in measures.items():
+        logs = []
+        for task in common:
+            numerator, denominator = measure(first[task]), measure(second[task])
+            if numerator is not None and denominator is not None and numerator > 0 and denominator > 0:
+                logs.append(math.log(numerator / denominator))
+        if not logs:
+            report[name] = None
+            continue
+        generator = random.Random(seed)
+        means = sorted(statistics.fmean(generator.choices(logs, k=len(logs))) for _ in range(resamples))
+        report[name] = {
+            "tasks": len(logs),
+            "ratio": math.exp(statistics.fmean(logs)),
+            "interval": [math.exp(means[int(0.025 * resamples)]), math.exp(means[int(0.975 * resamples) - 1])],
+        }
+    return report
 
 
 def parse_arm(spec: str) -> tuple[str, Path, str]:
@@ -184,20 +253,22 @@ def main() -> int:
         "prices_per_million_tokens": {"input": prices[0], "output": prices[1], "cache_read": prices[2]},
         "arms": {label: summarize(arm, prices) for label, arm in arms.items()},
         "paired_with_first": {label: compare(arms[labels[0]], arms[label]) for label in labels[1:]},
+        "efficiency_of_first_against": {label: efficiency(arms[labels[0]], arms[label], prices) for label in labels[1:]},
     }
     arguments.output.write_text(json.dumps(report, indent=2) + "\n")
-    print(f"{'arm':<28}{'pass':>10}{'95% interval':>16}{'ungraded':>10}{'errors':>8}{'$/task':>9}{'out tok':>10}{'median s':>10}")
+    print(f"{'arm':<28}{'pass':>10}{'95% interval':>16}{'ungraded':>10}{'errors':>8}{'$/task':>9}{'$/pass':>8}{'out tok':>10}{'median s':>10}{'s/pass':>8}{'setup s':>8}")
     for label, row in report["arms"].items():
         assert isinstance(row, dict)
         low, high = row["pass_rate_95_interval"]
-        dollars = row["dollars_per_metered_task"]
-        output = row["mean_output_tokens"]
+
+        def cell(value: object, width: int, digits: int) -> str:
+            return " " * width if value is None else format(value, f"{width}.{digits}f")
+
         print(
             f"{label:<28}{row['passes']:>4}/{row['tasks']:<4}{100 * low:>8.1f}-{100 * high:<6.1f}"
             f"{row['ungraded']:>10}{row['exceptions']:>8}"
-            f"{'' if dollars is None else format(dollars, '9.3f')}"
-            f"{'' if output is None else format(output, '10.0f')}"
-            f"{row['median_agent_seconds']:>10.0f}"
+            f"{cell(row['dollars_per_metered_task'], 9, 3)}{cell(row['dollars_per_pass'], 8, 3)}"
+            f"{cell(row['mean_output_tokens'], 10, 0)}{cell(row['median_agent_seconds'], 10, 0)}{cell(row['agent_seconds_per_pass'], 8, 0)}{cell(row['median_setup_seconds'], 8, 0)}"
         )
     return 0
 

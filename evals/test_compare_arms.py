@@ -3,7 +3,7 @@
 from pathlib import Path
 import unittest
 
-from evals.compare_arms import exact_mcnemar, parse_arm, wilson_interval, Z95
+from evals.compare_arms import Outcome, dollars, efficiency, exact_mcnemar, parse_arm, wilson_interval, Z95
 
 
 class WilsonIntervalTests(unittest.TestCase):
@@ -52,6 +52,57 @@ class ArmSpecificationTests(unittest.TestCase):
         for spec in ("bare", "=path:bare", "label=path", "label=:bare", "label=path:"):
             with self.assertRaises(ValueError):
                 parse_arm(spec)
+
+
+PRICES = (0.45, 1.2, 0.10)
+
+
+def outcome(task: str, grade: float | None, seconds: float, tokens: tuple[int, int, int] | None) -> Outcome:
+    input_tokens, cache_tokens, output_tokens = tokens if tokens else (None, None, None)
+    return Outcome(task, grade, None, input_tokens, cache_tokens, output_tokens, seconds)
+
+
+class DollarsTests(unittest.TestCase):
+    def test_cached_input_costs_less_than_new_input(self) -> None:
+        # 400k new input, 600k cached, 100k output.
+        self.assertAlmostEqual(dollars(outcome("a", 1.0, 1, (1_000_000, 600_000, 100_000)), PRICES), 0.36)
+
+    def test_missing_counts_give_no_price(self) -> None:
+        self.assertIsNone(dollars(outcome("a", 1.0, 1, None), PRICES))
+
+
+class EfficiencyTests(unittest.TestCase):
+    def test_ratio_is_the_geometric_mean_of_the_per_task_ratios(self) -> None:
+        # The first arm takes half the time on one task and twice the time on the other.
+        first = {"a": outcome("a", 1.0, 5, (10, 0, 10)), "b": outcome("b", 1.0, 20, (10, 0, 10))}
+        second = {"a": outcome("a", 1.0, 10, (10, 0, 10)), "b": outcome("b", 1.0, 10, (10, 0, 10))}
+        report = efficiency(first, second, PRICES)
+        self.assertAlmostEqual(report["agent_seconds"]["ratio"], 1.0)
+        self.assertAlmostEqual(report["output_tokens"]["ratio"], 1.0)
+
+    def test_only_tasks_that_both_arms_passed_count(self) -> None:
+        # The first arm looks fast on a task that it failed; that task must not count.
+        first = {"a": outcome("a", 1.0, 10, (10, 0, 10)), "b": outcome("b", 0.0, 1, (10, 0, 10))}
+        second = {"a": outcome("a", 1.0, 20, (10, 0, 10)), "b": outcome("b", 1.0, 20, (10, 0, 10))}
+        report = efficiency(first, second, PRICES)
+        self.assertEqual(report["matched_tasks"], 1)
+        self.assertAlmostEqual(report["agent_seconds"]["ratio"], 0.5)
+
+    def test_a_task_without_token_counts_still_counts_for_time(self) -> None:
+        first = {"a": outcome("a", 1.0, 10, None), "b": outcome("b", 1.0, 10, (10, 0, 10))}
+        second = {"a": outcome("a", 1.0, 20, (10, 0, 10)), "b": outcome("b", 1.0, 20, (10, 0, 10))}
+        report = efficiency(first, second, PRICES)
+        self.assertEqual(report["agent_seconds"]["tasks"], 2)
+        self.assertEqual(report["output_tokens"]["tasks"], 1)
+
+    def test_interval_surrounds_the_ratio_and_is_repeatable(self) -> None:
+        first = {name: outcome(name, 1.0, seconds, (10, 0, 10)) for name, seconds in zip("abcdef", (4, 5, 6, 7, 8, 9))}
+        second = {name: outcome(name, 1.0, 10, (10, 0, 10)) for name in "abcdef"}
+        report = efficiency(first, second, PRICES)
+        low, high = report["agent_seconds"]["interval"]
+        self.assertLessEqual(low, report["agent_seconds"]["ratio"])
+        self.assertGreaterEqual(high, report["agent_seconds"]["ratio"])
+        self.assertEqual(report, efficiency(first, second, PRICES))
 
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@ Use `think chat -show-thinking` to show reasoning. The Go renderer batches parti
 
 ## Context and images
 
-Attach with `-file path` or `@path`. Images stay in private session state: 5 MiB each. `inspect_images` sends up to eight images (10 MiB total) per request. Later turns reuse notes; re-inspection uses the original even after source deletion.
+Attach with `-file path` or `@path`. An `@path` attaches a file only when that regular file exists; any other `@word` stays in the text, so pasted issue text cannot stop a run. Images stay in private session state: 5 MiB each. `inspect_images` sends up to eight images (10 MiB total) per request. Later turns reuse notes; re-inspection uses the original even after source deletion.
 
 Use `context_checkpoint` for working notes and `context_read` for exact older messages. Notes are lossy, not a privacy filter. Back up the session `resources` directory; chat exports exclude resources.
 
@@ -71,7 +71,7 @@ go install ./cmd/think
 
 Tasks for `think eval`: `evals/tasks.jsonl` and `evals/harder.jsonl`. Replies do not prove success.
 
-Terminal-Bench 2.0 supports seven native harnesses on 89 tasks in VMs, including OpenCode and Goose. Install Harbor 0.21.0 and Modal 1.6.1, configure Modal authentication, and set `OPENROUTER_API_KEY`. From the repository root:
+Terminal-Bench 2.0 supports seven native harnesses on 89 tasks in VMs, including OpenCode and Goose. Install `harbor[modal]==0.24.0` and `modal==1.6.1`, configure Modal authentication, and set `OPENROUTER_API_KEY`. From the repository root:
 
 ```sh
 mkdir -p out/terminal-bench &&
@@ -82,6 +82,18 @@ python -m evals.harbor_wire out/terminal-bench/jobs/terminal-bench-2.0-native
 ```
 
 `compact_tokens` sets Think's threshold. Native launches use scripts. Verify Messages/Responses routes. Seven-harness results show no universal lead.
+
+The no-harness arm is `evals/bare`: the model, one bash tool, and a loop. It sends no system prompt and does no planning, context management, or recovery. The loop ends when the model answers without a tool call. `evals/terminal-bench-no-harness.json` runs it next to Think on the same 89 tasks, in the same VMs, with the same recorder profile. Build `bare-linux-amd64` as you build Think, then run `python -m evals.harbor_run evals/terminal-bench-no-harness.json`.
+
+`python -m evals.compare_arms --output FILE --arm LABEL=SOURCE:HARNESS ...` builds one table from several arms. SOURCE is a Harbor job directory or a saved outcomes file. The table has the pass rate with its 95% interval, ungraded trials, errors, cost per task and per pass, tokens, agent time per task and per pass, and install time. The first arm is the reference of the paired comparisons. A second table compares cost and time on the tasks that both arms passed, as a ratio with a 95% interval, so an arm cannot look cheap by quitting early.
+
+Result on Inkling Small, one attempt for each of the 89 tasks: no harness passed 49 and Think (commit 3a76490) passed 48. These two ran in one job on October 18. Pi 0.87.1, Claude Code 2.1.205, and Codex 0.146.0 passed 38, 41, and 26 in the October 10 run, which used Harbor 0.21.0. The 95% intervals of no harness, Think, Pi, and Claude Code overlap. Only the gap between Think and Codex is clear (exact paired test, p < 0.001). Think and no harness differ by one task, so they are tied.
+
+The native-setup comparison asks two questions: does Think help Inkling Small more than other harnesses do, and how much less does it cost? `evals/terminal-bench-native.json` runs Think, Claude Code 2.1.205, Codex 0.146.0, and Pi 0.87.1 on the 89 Terminal-Bench 2.0 tasks. `evals/swe-bench-native.json` runs the same four on 40 SWE-bench Verified tasks, drawn with seed 20261018, for time and cost. Harbor installs Claude Code, Codex, and Pi with its own agents. `evals/harbor_think.py` adds Think the same way: it uploads a Linux build and runs `think run` once for each task. All four use `thinkingmachines/inkling-small`, high effort, and one OpenRouter key. OpenRouter lists one provider for this model, DeepInfra.
+
+No recorder sits between a harness and the provider, so each harness keeps its own prompts, tools, turn limits, and output limits. Token counts are the counts that each harness reports. The frozen Think build is `out/terminal-bench/think-linux-amd64`. `out/terminal-bench/native-run-identity.json` names its digest and the patch over commit 3a76490 that builds it. Do not change a job's config after it starts. Harbor resumes a job only when its config is the same: run the same command again, and it keeps finished trials and removes unfinished ones, so copy those first.
+
+Run each job with `python -m evals.budget_guard --backend modal --limit DOLLARS --min-credits 3 --job-dir JOB_DIRECTORY PID_FILE`. When the guard stops a job, the agents inside its Modal sandboxes keep running and keep spending credit. The guard therefore terminates the sandboxes of the job's trials, and only those, and fails if any remain after 120 seconds.
 
 Terminal-Bench 4.0 compares harnesses on one model. Use Harbor 0.24.0 and the fixed dataset digest `sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732`. The older Luna configs are in `evals/tb4-luna/`; public Astra results are in `out/reference-tb4/`.
 
