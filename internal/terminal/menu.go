@@ -124,7 +124,7 @@ func (s *Screen) menuRowsLocked(matches []Command, width, limit int) []string {
 		usage := fitDocumentLabel(command.Usage, usageWidth)
 		name := s.theme.Accent("/" + usage)
 		if index == s.menuIndex {
-			marker = s.theme.Accent("▸ ")
+			marker = s.theme.Accent("❯ ")
 			name = s.theme.Bold(name)
 		}
 		row := marker + name

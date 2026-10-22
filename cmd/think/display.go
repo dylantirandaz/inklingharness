@@ -60,6 +60,9 @@ type consoleObserver struct {
 	// project is the folder that step titles name files from; empty in a
 	// headless run, which keeps the paths as the model wrote them.
 	project string
+	// steps is the kind of each tool step of the turn, in order: the score
+	// that ends the turn.
+	steps []presentation.StepKind
 }
 
 func newConsoleObserver(stdout, stderr io.Writer, screen *terminal.Screen, chat bool, theme presentation.Theme, showThinking, verbose bool) *consoleObserver {
@@ -74,6 +77,7 @@ func (c *consoleObserver) Begin() {
 	c.afterTools = false
 	c.pending = c.pending[:0]
 	c.nextTool, c.toolCount = 0, 0
+	c.steps = c.steps[:0]
 	c.activity(c.waitingLabel())
 }
 
@@ -141,8 +145,9 @@ func (c *consoleObserver) Text(delta string) {
 		io.WriteString(c.stdout, completeLines.String())
 	}
 	if c.line.Len() > 0 {
-		// Show tokens immediately; parse Markdown only when the line commits.
-		c.screen.StreamPreview(replyIndent, presentation.Safe(c.line.String()))
+		// Show tokens immediately, without the Markdown marks; style the line
+		// only when it commits.
+		c.screen.StreamPreview(replyIndent, c.markdown.Unmarked(c.line.String()))
 	}
 }
 
@@ -191,9 +196,15 @@ func (c *consoleObserver) flushThinking() {
 }
 
 // commitLine renders one complete reply line; its continuation rows keep the
-// same margin.
+// same margin. The fence that closes a code block draws nothing: the block
+// ends where its code ends, and the reply's own blank line follows it.
 func (c *consoleObserver) commitLine(out *strings.Builder, line string) {
-	for _, row := range terminal.WrapWords(c.markdown.Line(line), max(c.screen.Width()-3, 1)) {
+	inCode := c.markdown.InCode()
+	rendered := c.markdown.Line(line)
+	if inCode && !c.markdown.InCode() {
+		return
+	}
+	for _, row := range terminal.WrapWords(rendered, max(c.screen.Width()-3, 1)) {
 		out.WriteString(replyIndent)
 		out.WriteString(row)
 		out.WriteByte('\n')
@@ -260,8 +271,8 @@ func (c *consoleObserver) ToolCall(name string, input json.RawMessage) {
 // the full result.
 func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed time.Duration) {
 	c.flushText()
-	if c.screen != nil && result.IsError {
-		c.screen.Mark(presentation.TraceFailure, 1)
+	if c.screen != nil {
+		c.screen.Mark(presentation.TraceOf(presentation.KindOf(name, result.IsError)), 1)
 	}
 	if c.chat && !c.afterTools {
 		fmt.Fprintln(c.stderr)
@@ -287,6 +298,7 @@ func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed t
 		elapsed = max(elapsed-c.approval.takeWait(), 0)
 	}
 	step := presentation.ToolStep{Name: name, Title: title, Input: input, Content: result.Content, Failed: result.IsError, Elapsed: elapsed, Number: number}
+	c.steps = append(c.steps, presentation.KindOf(name, result.IsError))
 	var card []string
 	if c.chat && c.screen != nil && !c.verbose {
 		card = c.theme.ToolCard(step, max(c.screen.Width()-3, 1))
@@ -502,7 +514,7 @@ func firstLine(text string) string {
 // latestToolDocuments reads saved messages only when the user opens tool
 // output: every tool result since the last prompt, in the order of the cards.
 // The live cards do not keep another copy of the transcript or full results.
-func latestToolDocuments(messages []anthropic.EncodedMessage) ([]terminal.Document, error) {
+func latestToolDocuments(messages []anthropic.EncodedMessage, theme presentation.Theme) ([]terminal.Document, error) {
 	// The turn starts after the last user message that carries no tool
 	// result: the prompt. Later user messages hold only tool results.
 	start := 0
@@ -535,13 +547,16 @@ func latestToolDocuments(messages []anthropic.EncodedMessage) ([]terminal.Docume
 					Title:   "Result",
 					Details: "Missing saved call for result " + typed.ToolUseID,
 				}
+				name := ""
 				if call, found := calls[typed.ToolUseID]; found {
 					view = describeTool(call.Name, call.Input, presentation.Theme{})
+					name = call.Name
 				}
 				documents = append(documents, terminal.Document{
-					Title:  presentation.ToolCompletion(view.Title, typed.IsError, presentation.Theme{}),
+					Title:  view.Title,
 					Text:   view.Details + "\n\nResult\n" + typed.Content,
 					Format: terminal.PlainDocument,
+					Drop:   theme.Drop(presentation.KindOf(name, typed.IsError)),
 				})
 			}
 		}

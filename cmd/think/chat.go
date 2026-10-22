@@ -54,33 +54,42 @@ var chatCommandTable = []terminal.Command{
 	{Name: "quit", Usage: "quit", Description: "save and exit"},
 }
 
-const chatKeys = `Enter sends. Ctrl-J adds a line. Ctrl-U clears the input.
-Typing / opens the command menu: Up/Down selects, Tab completes, Enter runs, Esc closes.
-Up/Down moves through input rows, then recalls history at the edges.
-Ctrl-P/Ctrl-N recalls history directly and restores the draft.
-Alt-Left/Right moves by word. Ctrl-W deletes the previous word.
-Pasted text stays in the input area until you press Enter.
-Attach files with @path or @"path with spaces". An @word that names no file stays text. Use @@ for a literal @.
-In plain mode, end a line with a backslash to enter more lines.
-While Inkling works, you can type. Enter queues a steering message: it goes to the model
-after the current tool results, or before the turn ends. Alt-Enter queues a message that
-starts the next turn. A /command always waits for the turn to end. Alt-Up moves the queued
-messages back into the input. A stopped or failed turn also moves them back.
-Ctrl-C stops the active request or tool. At an idle prompt, Ctrl-C exits.
-In /tools and /diff views: arrows or j/k scroll, PgUp/PgDn page, Home/End or g/G jump,
-Left/Right, Tab, or a digit select a tab, and Esc, q, Enter, or Ctrl-C return to chat.
-`
+// chatKeys is the key table of /help: each key and what it does, in the order
+// that a user meets them.
+var chatKeys = [...]struct{ key, action string }{
+	{"Enter", "send; while Inkling works, steer the running turn"},
+	{"Alt-Enter", "while Inkling works, queue a message for the next turn"},
+	{"Alt-Up", "move the queued messages back into the input"},
+	{"Ctrl-J", "add a line"},
+	{"Ctrl-U", "clear the input"},
+	{"Up/Down", "move through input rows, then recall history at the edges"},
+	{"Ctrl-P/Ctrl-N", "recall history directly and restore the draft"},
+	{"Alt-Left/Right", "move by word"},
+	{"Ctrl-W", "delete the previous word"},
+	{"@path", "attach a file; @\"path with spaces\" for spaces, @@ for an @"},
+	{"/", "open the command menu: Up/Down selects, Tab completes, Esc closes"},
+	{"Ctrl-C", "stop the request or tool; at an idle prompt, exit"},
+	{"In /tools, /diff", "arrows or j/k scroll, Left/Right or a digit picks a tab, Esc returns"},
+	{"\\ at line end", "in plain mode, continue the prompt on the next line"},
+}
 
-// chatHelp lists the chat commands, then the extension help, then the keys.
-func chatHelp(extensionHelp string) string {
+// chatHelp lists the chat commands, then the extension help, then the keys,
+// as two aligned tables. With a theme the commands and keys take the model
+// color and their descriptions the gray of the command menu, so help reads
+// like the menu it explains.
+func chatHelp(extensionHelp string, theme presentation.Theme) string {
 	var out strings.Builder
-	out.WriteString("Commands:\n")
+	out.WriteString("\n  " + theme.Bold(theme.Ink("Commands")) + "\n")
 	for _, command := range chatCommandTable {
-		fmt.Fprintf(&out, "  /%-17s %s\n", command.Usage, command.Description)
+		usage := fmt.Sprintf("/%-17s", command.Usage)
+		fmt.Fprintf(&out, "  %s %s\n", theme.Accent(usage), theme.Graphite(command.Description))
 	}
 	out.WriteString(extensionHelp)
-	out.WriteString(chatKeys)
-	return out.String()
+	out.WriteString("\n  " + theme.Bold(theme.Ink("Keys")) + "\n")
+	for _, entry := range chatKeys {
+		fmt.Fprintf(&out, "  %s %s\n", theme.Ink(fmt.Sprintf("%-18s", entry.key)), theme.Graphite(entry.action))
+	}
+	return out.String() + "\n"
 }
 
 const promptPlaceholder = "Ask Inkling to work on a task"
@@ -652,7 +661,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				}
 				return 0
 			case "/help":
-				fmt.Fprint(stderr, chatHelp(ext.commandHelp()))
+				fmt.Fprint(progressOutput, chatHelp(ext.commandHelp(), theme))
 			case "/status":
 				if err := awaitBackground(); err != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", err)
@@ -688,7 +697,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 					fmt.Fprintf(stderr, "inkling: %v\n", err)
 					return 1
 				}
-				documents, err := latestToolDocuments(current.Messages)
+				documents, err := latestToolDocuments(current.Messages, theme)
 				if err != nil {
 					fmt.Fprintf(stderr, "inkling: %v\n", err)
 					continue
@@ -1127,8 +1136,9 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			inputTokens := outcome.Usage.InputTokens + outcome.Usage.CacheReadInputTokens + outcome.Usage.CacheCreationInputTokens
 			if theme.Soft() {
 				summary := presentation.TurnSummaryText(time.Since(started), outcome.Turns, inputTokens, outcome.Usage.OutputTokens)
-				// A row of air after the stats line closes the turn.
-				fmt.Fprintln(progressOutput, "\n"+theme.TurnRule(summary)+"\n")
+				// The score of drops and the stats close the turn, then a
+				// row of air.
+				fmt.Fprintln(progressOutput, "\n"+theme.TurnRule(summary, observer.steps)+"\n")
 			} else {
 				fmt.Fprintln(progressOutput, "\n  "+presentation.TurnSummary(time.Since(started), outcome.Turns, inputTokens, outcome.Usage.OutputTokens, theme))
 			}
@@ -1242,7 +1252,12 @@ func printLastReply(output io.Writer, messages []anthropic.EncodedMessage, theme
 			continue
 		}
 		for _, line := range strings.Split(text.Text, "\n") {
+			inCode := markdown.InCode()
 			rendered := markdown.Line(line)
+			if inCode && !markdown.InCode() {
+				// The fence that closes a code block draws nothing.
+				continue
+			}
 			if screenWidth <= 0 {
 				fmt.Fprintln(output, "  "+rendered)
 				continue

@@ -6,7 +6,9 @@ import (
 	"time"
 )
 
-// TraceMark is the kind of event that the trace records.
+// TraceMark is the kind of event that the trace records. The marks of a
+// step take the colors of its ink drop, so the trace and the score of a turn
+// speak one language. A later mark outranks an earlier one in a cell.
 type TraceMark uint8
 
 const (
@@ -14,11 +16,28 @@ const (
 	TraceReasoning TraceMark = iota
 	// TraceReply is a streamed piece of the reply.
 	TraceReply
-	// TraceTool is the start of a tool.
-	TraceTool
-	// TraceFailure is a tool that failed.
+	// TraceRead, TraceChange, and TraceRun are a finished step of that kind.
+	TraceRead
+	TraceChange
+	TraceRun
+	// TraceFailure is a step that failed.
 	TraceFailure
 )
+
+// TraceOf is the mark of a finished step of kind.
+func TraceOf(kind StepKind) TraceMark {
+	switch kind {
+	case StepRead:
+		return TraceRead
+	case StepChange:
+		return TraceChange
+	case StepRun:
+		return TraceRun
+	case StepFailed:
+		return TraceFailure
+	}
+	panic("presentation: unknown step kind")
+}
 
 // Trace records the stream of a turn as a ticker tape, on one row of cells.
 // A write head moves across at a constant pace and wraps at the end, erasing
@@ -115,7 +134,7 @@ func (t *Trace) Draw(theme Theme) string {
 			color, glyph = accents[theme.accent].color.on(theme.shade), "╸"
 		case cell.marked:
 			glyph = "┴"
-			if cell.mark >= TraceTool {
+			if cell.mark >= TraceRead {
 				glyph = "┸"
 			}
 			// A tick keeps its tone for a third of the sweep, then fades in
@@ -134,15 +153,17 @@ func (t *Trace) Draw(theme Theme) string {
 	return string(line)
 }
 
-// traceColor is the color of a kind of mark.
+// traceColor is the color of a kind of mark: the color of its step's drop.
 func (t Theme) traceColor(mark TraceMark) rgb {
 	switch mark {
 	case TraceReasoning:
 		return palette[roleGraphite].color.on(t.shade)
-	case TraceReply:
+	case TraceReply, TraceRun:
 		return palette[roleInk].color.on(t.shade)
-	case TraceTool:
-		return accents[t.accent].color.on(t.shade)
+	case TraceRead:
+		return palette[roleBlue].color.on(t.shade)
+	case TraceChange:
+		return palette[roleGreen].color.on(t.shade)
 	case TraceFailure:
 		return palette[roleRed].color.on(t.shade)
 	}

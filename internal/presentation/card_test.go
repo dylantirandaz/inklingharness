@@ -93,6 +93,26 @@ func TestApprovalRequestShowsTheObjectOnce(t *testing.T) {
 	}
 }
 
+// A streaming line shows without its Markdown marks, even before they close,
+// so they never flash; inside a code block the line stays as it is.
+func TestUnmarkedPreviewHidesMarksOutsideCode(t *testing.T) {
+	m := NewMarkdown(NewTheme(TrueColor, DarkBackground, AccentPlum))
+	for text, want := range map[string]string{
+		"- **Cause:** an off-by-one in `pag": "• Cause: an off-by-one in pag",
+		"## Fixed the pa":                    "Fixed the pa",
+		"**unfinished":                       "unfinished",
+		"    indented `code`":                "    indented `code`",
+	} {
+		if got := m.Unmarked(text); got != want {
+			t.Fatalf("Unmarked(%q) = %q, want %q", text, got, want)
+		}
+	}
+	m.Line("```python")
+	if got := m.Unmarked("x = a ** b"); got != "x = a ** b" || !m.InCode() {
+		t.Fatalf("code preview = %q", got)
+	}
+}
+
 func TestWaffleCellsShareTheGrid(t *testing.T) {
 	for _, test := range []struct {
 		name     string

@@ -29,10 +29,70 @@ func (t Theme) UserCard(rows []string, stamp string, width int) []string {
 	return append(out, band(""))
 }
 
-// TurnRule closes a finished turn with one quiet row: the three drops of the
-// Inkling picture, blue, red, and green, as a signature, then the wall time,
-// the request count, and the token use in gray.
-func (t Theme) TurnRule(summary string) string {
+// StepKind is what a tool step did, which names the color of its ink drop.
+type StepKind uint8
+
+const (
+	// StepRead looked at something: a file, a search, a page.
+	StepRead StepKind = iota
+	// StepChange changed a file or the memory.
+	StepChange
+	// StepRun ran a command, a task, or a tool from the user's files.
+	StepRun
+	// StepFailed is any step that failed.
+	StepFailed
+)
+
+// KindOf is the kind of a step of the tool name.
+func KindOf(name string, failed bool) StepKind {
+	if failed {
+		return StepFailed
+	}
+	switch name {
+	case "read_file", "read_files", "grep", "glob", "web_fetch", "web_search", "mcp_list":
+		return StepRead
+	case "edit_file", "write_file", "remember":
+		return StepChange
+	}
+	return StepRun
+}
+
+// Drop is the ink drop of a kind of step, in a color of the Inkling picture:
+// blue for a read, green for a change, ink for a run, and red for a failure.
+func (t Theme) Drop(kind StepKind) string {
+	switch kind {
+	case StepRead:
+		return t.Blue("●")
+	case StepChange:
+		return t.Green("●")
+	case StepRun:
+		return t.Ink("●")
+	case StepFailed:
+		return t.Red("●")
+	}
+	panic("presentation: unknown step kind")
+}
+
+// scoreLimit is the most drops that the score of a turn shows; a longer turn
+// ends its score with an ellipsis.
+const scoreLimit = 32
+
+// TurnRule closes a finished turn with its score: one ink drop for each step,
+// in order and in the color of what the step did, so the scrollback keeps the
+// shape of every turn. Then come the wall time, the request count, and the
+// token use in gray. A turn without steps is one drop of ink: the reply.
+func (t Theme) TurnRule(summary string, steps []StepKind) string {
 	summary = strings.TrimPrefix(singleLine(summary), "✓ ")
-	return "  " + t.Blue("●") + t.Red("●") + t.Green("●") + " " + t.Graphite(summary)
+	var score strings.Builder
+	if len(steps) == 0 {
+		score.WriteString(t.Drop(StepRun))
+	}
+	for index, kind := range steps {
+		if index == scoreLimit {
+			score.WriteString(t.Graphite("…"))
+			break
+		}
+		score.WriteString(t.Drop(kind))
+	}
+	return "  " + score.String() + " " + t.Graphite(summary)
 }

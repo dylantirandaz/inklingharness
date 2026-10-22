@@ -593,9 +593,6 @@ func (s *Screen) layoutLocked() {
 		start = max(0, editRow-maxBody+1)
 		s.inputTop, s.inputRows = start, len(bodyRows)
 		bodyRows = bodyRows[start:min(start+maxBody, len(bodyRows))]
-		if len(bodyRows) == 1 && maxBody >= 2 {
-			bodyRows = append(bodyRows, "")
-		}
 	case modeChoice:
 		// Without a tint the request sits in an amber box. With one it hangs
 		// on the page in its own frame, with nothing around it.
@@ -1233,12 +1230,8 @@ func (s *Screen) setStatusLocked(text string, tool bool) {
 	if text == s.status && tool == s.effects.toolRunning {
 		return
 	}
-	now := time.Now()
 	if text != s.status {
-		s.activitySince = now
-		if tool {
-			s.markLocked(presentation.TraceTool, 1)
-		}
+		s.activitySince = time.Now()
 	}
 	s.effects.toolRunning = tool
 	s.status = text

@@ -21,10 +21,13 @@ const (
 )
 
 // Document holds untrusted text. View removes terminal controls before display.
+// Drop, when set, is the styled ink drop that opens the document's tab, as
+// the step that the document shows opened its row in the transcript.
 type Document struct {
 	Title  string
 	Text   string
 	Format DocumentFormat
+	Drop   string
 }
 
 type documentRow struct {
@@ -251,18 +254,26 @@ const tabLabelWidth = 28
 func (s *Screen) viewTabsLocked(width int) string {
 	view := s.view
 	labels := view.labels
+	// A tab is its drop, a space, and its label.
+	tabWidth := func(index int) int {
+		cells := cellWidth(labels[index])
+		if view.documents[index].Drop != "" {
+			cells += 2
+		}
+		return cells
+	}
 	first, last := view.selected, view.selected
-	cells := cellWidth(labels[view.selected])
+	cells := tabWidth(view.selected)
 	for first > 0 || last < len(labels)-1 {
 		grew := false
-		if last < len(labels)-1 && cells+2+cellWidth(labels[last+1]) <= width-4 {
+		if last < len(labels)-1 && cells+2+tabWidth(last+1) <= width-4 {
 			last++
-			cells += 2 + cellWidth(labels[last])
+			cells += 2 + tabWidth(last)
 			grew = true
 		}
-		if first > 0 && cells+2+cellWidth(labels[first-1]) <= width-4 {
+		if first > 0 && cells+2+tabWidth(first-1) <= width-4 {
 			first--
-			cells += 2 + cellWidth(labels[first])
+			cells += 2 + tabWidth(first)
 			grew = true
 		}
 		if !grew {
@@ -278,8 +289,13 @@ func (s *Screen) viewTabsLocked(width int) string {
 		if index > first {
 			row.WriteString("  ")
 		}
+		// A drop is a cell of its own before the label, so the label widths
+		// that placed the tabs stay true.
+		if drop := view.documents[index].Drop; drop != "" {
+			row.WriteString(drop + " ")
+		}
 		if index == view.selected {
-			row.WriteString(s.theme.Bold(s.theme.Accent(labels[index])))
+			row.WriteString(s.theme.Bold(s.theme.Ink(labels[index])))
 		} else {
 			row.WriteString(s.theme.Graphite(labels[index]))
 		}
@@ -330,9 +346,15 @@ func (s *Screen) layoutViewLocked() {
 		if index < len(doc.rows) {
 			row := doc.rows[index]
 			text = doc.text[row.start:row.end]
-			if source.Format == DiffDocument {
-				prefix := doc.text[row.line:min(row.line+6, len(doc.text))]
+			prefix := doc.text[row.line:min(row.line+6, len(doc.text))]
+			switch source.Format {
+			case DiffDocument:
 				text = presentation.DiffLine(text, prefix, s.theme)
+			case PlainDocument:
+				// A tool document shows its change as "- " and "+ " lines.
+				if strings.HasPrefix(prefix, "- ") || strings.HasPrefix(prefix, "+ ") {
+					text = presentation.DiffLine(text, prefix, s.theme)
+				}
 			}
 		}
 		if chrome.scrollbar && thumbEnd > thumbStart {

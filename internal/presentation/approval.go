@@ -49,9 +49,10 @@ func NewApprovalRequest(name string, view ToolView) ApprovalRequest {
 	if len(lines) > 0 {
 		description, lines = lines[0], lines[1:]
 	}
-	request := ApprovalRequest{Title: title, Caption: "Full filesystem access, not sandboxed"}
+	// Every call runs with full filesystem access; two words say so.
+	request := ApprovalRequest{Title: title, Caption: "Not sandboxed"}
 	if description != "" {
-		request.Caption = description + " · full filesystem access, not sandboxed"
+		request.Caption = description + " · not sandboxed"
 	}
 	// The work of these tools is the object of the title, so the title
 	// names only the action and the work shows the object once.

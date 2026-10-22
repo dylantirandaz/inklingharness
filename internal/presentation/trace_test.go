@@ -63,11 +63,11 @@ func TestTraceHeadMovesInSilence(t *testing.T) {
 	}
 }
 
-// Color carries meaning only: reasoning is gray, and red appears only for a
-// failure.
-func TestTraceUsesRedOnlyForAFailure(t *testing.T) {
+// Color carries meaning only: a step's mark takes the color of its ink drop,
+// so a read is blue, a change green, and red appears only for a failure.
+func TestTraceMarksTakeTheColorsOfTheDrops(t *testing.T) {
 	theme := traceTheme()
-	red := string(theme.appendColor(nil, palette[roleRed].color.on(theme.shade), false))
+	color := func(r role) string { return string(theme.appendColor(nil, palette[r].color.on(theme.shade), false)) }
 	draw := func(kind TraceMark) string {
 		trace := NewTrace(48)
 		trace.Mark(kind, 3)
@@ -75,13 +75,15 @@ func TestTraceUsesRedOnlyForAFailure(t *testing.T) {
 		trace.Step(traceFrame)
 		return trace.Draw(theme)
 	}
-	for _, kind := range []TraceMark{TraceReasoning, TraceReply, TraceTool} {
-		if strings.Contains(draw(kind), red) {
+	for _, kind := range []TraceMark{TraceReasoning, TraceReply, TraceRead, TraceChange, TraceRun} {
+		if strings.Contains(draw(kind), color(roleRed)) {
 			t.Fatalf("mark %d is drawn in red", kind)
 		}
 	}
-	if !strings.Contains(draw(TraceFailure), red) {
-		t.Fatal("a failure is not drawn in red")
+	for kind, r := range map[TraceMark]role{TraceRead: roleBlue, TraceChange: roleGreen, TraceFailure: roleRed} {
+		if !strings.Contains(draw(kind), color(r)) {
+			t.Fatalf("mark %d is not drawn in the color of its drop", kind)
+		}
 	}
 }
 

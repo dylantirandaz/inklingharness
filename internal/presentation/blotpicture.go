@@ -175,11 +175,20 @@ func (p *BlotPicture) Draw(t Theme, progress float64) []string {
 				}
 				continue
 			}
-			// The body takes up pigment unevenly, the rim holds what the
-			// water carried to the edge, and the front is still dark and wet.
+			// A dry shape is flat and crisp: a pixel is in the shape or out
+			// of it, in one tone, so the dried picture reads as a drawn mark.
+			// Texture needs more pixels than a terminal cell holds. While the
+			// ink is wet, it still bleeds, pools at the rim, and darkens at
+			// the front.
+			if wet == 0 {
+				if share >= 0.5 {
+					p.canvas.over(x, y, pigment, 1)
+				}
+				continue
+			}
 			density := 0.82 + 0.2*float64(p.grain[index])
 			density += (1 - density) * float64(rim[index])
-			if behind < blotFrontBand && wet > 0 {
+			if behind < blotFrontBand {
 				density += (1 - density) * (1 - behind/blotFrontBand) * wet
 			}
 			p.canvas.over(x, y, pigment, density*float64(share))

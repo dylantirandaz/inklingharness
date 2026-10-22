@@ -24,6 +24,31 @@ func (m *Markdown) Preview(text string) string {
 	return m.render(Safe(text), false)
 }
 
+// Unmarked is a partial reply line as plain text without its Markdown marks,
+// for the preview that streams before the line commits: no emphasis marks or
+// backticks, a list mark as a bullet, and a heading without its hashes. It
+// grows as the line grows, so its letters can dry in place, and the marks
+// never flash on screen before they vanish. Inside a code block the line is
+// code and stays as it is. It does not change the state of the fence.
+func (m *Markdown) Unmarked(text string) string {
+	text = Safe(text)
+	if m.InCode() {
+		return text
+	}
+	trimmed := strings.TrimLeft(text, " ")
+	indent := text[:len(text)-len(trimmed)]
+	if len(indent) >= 4 || strings.HasPrefix(trimmed, "\t") || strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+		return text
+	}
+	switch {
+	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "), strings.HasPrefix(trimmed, "+ "):
+		trimmed = "• " + trimmed[2:]
+	case strings.HasPrefix(trimmed, "#"):
+		trimmed = strings.TrimLeft(strings.TrimLeft(trimmed, "#"), " ")
+	}
+	return indent + strings.NewReplacer("**", "", "__", "", "`", "").Replace(trimmed)
+}
+
 // InCode reports whether a code fence is open.
 func (m *Markdown) InCode() bool { return m.fence != 0 }
 

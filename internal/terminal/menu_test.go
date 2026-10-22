@@ -30,7 +30,7 @@ func TestMenuFiltersSelectsAndCompletes(t *testing.T) {
 	s.drawLocked()
 	take()
 	frame := withoutStyles(strings.Join(s.live, "\n"))
-	if !strings.Contains(frame, "▸ /tools [N]") || !strings.Contains(frame, "/title [TEXT]") || strings.Contains(frame, "/help") {
+	if !strings.Contains(frame, "❯ /tools [N]") || !strings.Contains(frame, "/title [TEXT]") || strings.Contains(frame, "/help") {
 		t.Fatalf("menu did not filter on the prefix: %q", frame)
 	}
 	s.keyLocked(key{kind: keyDown})

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dylantirandaz/inklingharness/internal/anthropic"
+	"github.com/dylantirandaz/inklingharness/internal/presentation"
 	"github.com/dylantirandaz/inklingharness/internal/terminal"
 )
 
@@ -55,7 +56,8 @@ func TestLatestToolDocumentsCoverWholeTurn(t *testing.T) {
 		encodedMessage(t, anthropic.RoleUser, anthropic.ToolResultBlock{ToolUseID: "two", Content: "hello"}, anthropic.ToolResultBlock{ToolUseID: "three", Content: "world", IsError: true}),
 		encodedMessage(t, anthropic.RoleAssistant, anthropic.TextBlock{Text: "Created b.txt"}),
 	}
-	documents, err := latestToolDocuments(messages)
+	theme := presentation.NewTheme(presentation.TrueColor, presentation.DarkBackground, presentation.AccentPlum)
+	documents, err := latestToolDocuments(messages, theme)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,14 +65,18 @@ func TestLatestToolDocumentsCoverWholeTurn(t *testing.T) {
 	for index, document := range documents {
 		titles[index] = document.Title
 	}
-	want := []string{"● Run echo world > b.txt", "● Run cat a.txt", "✕ Read b.txt"}
+	want := []string{"Run echo world > b.txt", "Run cat a.txt", "Read b.txt"}
 	if strings.Join(titles, "|") != strings.Join(want, "|") {
 		t.Fatalf("documents = %q, want %q", titles, want)
+	}
+	// Each tab opens with the drop of its step; the failed read is red.
+	if documents[0].Drop != theme.Drop(presentation.StepRun) || documents[2].Drop != theme.Drop(presentation.StepFailed) {
+		t.Fatalf("drops = %q, %q", documents[0].Drop, documents[2].Drop)
 	}
 	if !strings.HasSuffix(documents[2].Text, "\nResult\nworld") {
 		t.Fatalf("third document = %q", documents[2].Text)
 	}
-	if documents, err := latestToolDocuments(messages[:5]); err != nil || len(documents) != 0 {
+	if documents, err := latestToolDocuments(messages[:5], theme); err != nil || len(documents) != 0 {
 		t.Fatalf("a turn without tools gave %d documents, %v", len(documents), err)
 	}
 }

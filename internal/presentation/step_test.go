@@ -41,15 +41,49 @@ func TestToolCardRowsFitTheWidth(t *testing.T) {
 	}
 }
 
-// The title keeps the verb, the count, the time, and the number of its tab,
-// even when the target is far too long for the row.
+// The score of a turn is one drop per step, in order and in the color of
+// what the step did; a turn without steps is one drop of ink, and a very long
+// turn ends its score with an ellipsis.
+func TestTurnRuleScoresTheSteps(t *testing.T) {
+	theme := NewTheme(TrueColor, DarkBackground, AccentPlum)
+	summary := TurnSummaryText(5200*time.Millisecond, 4, 15600, 223)
+	steps := []StepKind{KindOf("read_file", false), KindOf("grep", false), KindOf("edit_file", false), KindOf("bash", true), KindOf("bash", false)}
+	want := "  " + theme.Drop(StepRead) + theme.Drop(StepRead) + theme.Drop(StepChange) + theme.Drop(StepFailed) + theme.Drop(StepRun) + " "
+	if rule := theme.TurnRule(summary, steps); !strings.HasPrefix(rule, want) || !strings.HasSuffix(Safe(rule), "5.2s · 4 requests · 15.6k in · 223 out") {
+		t.Fatalf("score = %q", rule)
+	}
+	if rule := Safe(theme.TurnRule(summary, nil)); !strings.HasPrefix(rule, "  ● 5.2s") {
+		t.Fatalf("a turn without steps = %q", rule)
+	}
+	long := make([]StepKind, scoreLimit+5)
+	if rule := Safe(theme.TurnRule(summary, long)); strings.Count(rule, "●") != scoreLimit || !strings.Contains(rule, "…") {
+		t.Fatalf("a long score = %q", rule)
+	}
+}
+
+// The title keeps the verb, the count, the time of a slow step, and the
+// number of its tab, even when the target is far too long for the row. The
+// time of a fast step is left out, because it says nothing.
 func TestToolCardTitleKeepsItsPartsWhenTheTargetIsLong(t *testing.T) {
-	rows := stepRows(t, ToolStep{Name: "read_file", Title: "Read " + strings.Repeat("deep/", 30) + "file.go", Content: "[end of file: 9 lines]", Elapsed: 12 * time.Millisecond, Number: 4}, 60)
-	title := rows[0]
-	for _, want := range []string{"●", "Read", "…", "9 lines", "12ms", "#4"} {
+	step := ToolStep{Name: "read_file", Title: "Read " + strings.Repeat("deep/", 30) + "file.go", Content: "[end of file: 9 lines]", Elapsed: 12 * time.Second, Number: 4}
+	title := stepRows(t, step, 60)[0]
+	for _, want := range []string{"●", "Read", "…", "9 lines", "12s", "#4"} {
 		if !strings.Contains(title, want) {
 			t.Fatalf("title is missing %q: %q", want, title)
 		}
+	}
+	step.Elapsed = 12 * time.Millisecond
+	if fast := stepRows(t, step, 60)[0]; strings.Contains(fast, "12ms") || !strings.Contains(fast, "#4") {
+		t.Fatalf("a fast step = %q", fast)
+	}
+}
+
+// A command that failed names its exit code with the facts of its title,
+// and its output shows without the tag or blank lines.
+func TestToolCardNamesTheExitCodeOfAFailure(t *testing.T) {
+	rows := stepRows(t, ToolStep{Name: "bash", Title: "Run make", Content: "make: *** No rule\n\n[exit code 2]", Failed: true}, 80)
+	if len(rows) != 2 || !strings.HasSuffix(rows[0], "· exit 2") || !strings.Contains(rows[1], "make: *** No rule") {
+		t.Fatalf("failed step = %q", rows)
 	}
 }
 

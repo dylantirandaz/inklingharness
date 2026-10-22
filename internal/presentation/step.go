@@ -35,21 +35,24 @@ const (
 	bodyIndent = "     "
 )
 
-// ToolCard sets a finished tool call as rows of the turn: a bullet row with
-// the verb in bold, the target, a count, and at the right edge the time and
-// the number of its tab; then what the tool left behind, hooked under the
-// bullet. A read, a search, or a listing leaves only its count. A change
-// shows its diff. Anything else shows a few lines of its output. The bullet
-// takes the model color, and red when the tool failed. It returns nil below
-// 256 colors, or when the row has no room, and the caller draws the plain
-// rail.
+// ToolCard sets a finished tool call as rows of the turn: an ink drop with
+// the verb in bold, the target, and the facts in gray; then what the tool
+// left behind, hooked under the drop. A read, a search, or a listing leaves
+// only its count. A change shows its diff. Anything else shows a few lines
+// of its output. A command that failed names its exit code with the facts,
+// not as a line of output. It returns nil below 256 colors, or when the row
+// has no room, and the caller draws the plain rail.
 func (t Theme) ToolCard(step ToolStep, width int) []string {
 	if !t.Soft() || width < 2*cardPadding+16 {
 		return nil
 	}
 	inner := width - 2*cardPadding
 	margin := strings.Repeat(" ", cardPadding)
-	rows := []string{margin + t.stepTitle(step, toolSummary(step), inner)}
+	summary := toolSummary(step)
+	if output, code, found := strings.Cut(step.Content, "\n[exit code "); step.Failed && found && strings.HasSuffix(code, "]") {
+		step.Content, summary = output, "exit "+strings.TrimSuffix(code, "]")
+	}
+	rows := []string{margin + t.stepTitle(step, summary, inner)}
 	for index, row := range t.stepBody(step, inner) {
 		if index == 0 {
 			// The hook ties the first row of the result to its bullet.
@@ -60,80 +63,61 @@ func (t Theme) ToolCard(step ToolStep, width int) []string {
 	return rows
 }
 
-// stepTitle is the first row of a step: an ink drop in the color of what the
-// tool did, the verb in bold, the target in ink, a count in gray, and at the
-// right edge the time and the number of its tab. The target gives way first
-// when the row is too narrow.
+// stepTitle is the first row of a step, read left to right as one sentence:
+// an ink drop in the color of what the tool did, the verb in bold, the
+// target in ink, then the facts in gray (a count, and the time when it is a
+// second or more), and last the number of its tab in a faint gray. The
+// target gives way first when the row is too narrow, then the tab number,
+// then the facts.
 func (t Theme) stepTitle(step ToolStep, summary string, inner int) string {
 	verb, target, _ := strings.Cut(singleLine(step.Title), " ")
 	if past, found := pastTense[verb]; found && !step.Failed {
 		verb = past
 	}
-	var meta []string
-	if step.Elapsed >= time.Millisecond {
-		meta = append(meta, ShortDuration(step.Elapsed))
-	}
-	if step.Number > 0 {
-		meta = append(meta, "#"+strconv.Itoa(step.Number))
-	}
-	right := strings.Join(meta, "  ")
-	suffix := ""
+	var facts []string
 	if summary != "" {
-		suffix = " · " + summary
+		facts = append(facts, summary)
+	}
+	// A step of a few milliseconds is the normal case; only a slow one is
+	// news.
+	if step.Elapsed >= time.Second {
+		facts = append(facts, ShortDuration(step.Elapsed))
+	}
+	suffix := ""
+	if len(facts) > 0 {
+		suffix = " · " + strings.Join(facts, " · ")
+	}
+	tab := ""
+	if step.Number > 0 {
+		tab = "  #" + strconv.Itoa(step.Number)
 	}
 	verb = Ellipsize(verb, max(inner-2, 1))
-	// The row keeps the verb and a little of the target. When it is too
-	// narrow for everything, the count goes first, and then the time.
-	if inner < titleMinimum(verb, suffix, right, target) {
+	// The row keeps the verb and a little of the target.
+	if inner < titleMinimum(verb, suffix+tab, target) {
+		tab = ""
+	}
+	if inner < titleMinimum(verb, suffix, target) {
 		suffix = ""
 	}
-	if inner < titleMinimum(verb, suffix, right, target) {
-		right = ""
-	}
-	fixed := 2 + CellWidth(verb) + CellWidth(suffix) // the bullet, a space, the verb, the count
-	if right != "" {
-		fixed += CellWidth(right) + 2 // at least two cells between the two sides
-	}
+	fixed := 2 + CellWidth(verb) + CellWidth(suffix) + CellWidth(tab) // the drop, a space, the verb, the facts
 	if target != "" {
 		target = Ellipsize(target, max(inner-fixed-1, 1))
 	}
-	bullet, verbText := t.inkDrop(step.Name), t.Bold(t.Ink(verb))
+	bullet, verbText := t.Drop(KindOf(step.Name, step.Failed)), t.Bold(t.Ink(verb))
 	if step.Failed {
-		bullet, verbText = t.Red("●"), t.Bold(t.Red(verb))
+		verbText = t.Bold(t.Red(verb))
 	}
-	left := bullet + " " + verbText
-	leftWidth := 2 + CellWidth(verb) + CellWidth(suffix)
+	row := bullet + " " + verbText
 	if target != "" {
-		leftWidth += 1 + CellWidth(target)
-		left += " " + t.Ink(target)
+		row += " " + t.Ink(target)
 	}
-	left += t.Graphite(suffix)
-	if right == "" {
-		return left
-	}
-	return left + strings.Repeat(" ", max(inner-leftWidth-CellWidth(right), 2)) + t.Graphite(right)
+	return row + t.Graphite(suffix) + t.Hairline(tab)
 }
 
-// inkDrop is the bullet of a step in a color of the Inkling picture: blue
-// for what a tool read, green for what it changed, and ink for what it ran.
-// A tool from the user's files counts as run.
-func (t Theme) inkDrop(name string) string {
-	switch name {
-	case "read_file", "read_files", "grep", "glob", "web_fetch", "web_search", "mcp_list":
-		return t.Blue("●")
-	case "edit_file", "write_file", "remember":
-		return t.Green("●")
-	}
-	return t.Ink("●")
-}
-
-// titleMinimum is the narrowest row that holds the verb, the count, the time,
+// titleMinimum is the narrowest row that holds the verb, the trailing text,
 // and a target cut to an ellipsis.
-func titleMinimum(verb, suffix, right, target string) int {
-	width := 2 + CellWidth(verb) + CellWidth(suffix)
-	if right != "" {
-		width += CellWidth(right) + 2
-	}
+func titleMinimum(verb, trailing, target string) int {
+	width := 2 + CellWidth(verb) + CellWidth(trailing)
 	if target != "" {
 		width += 2
 	}
@@ -163,6 +147,10 @@ func (t Theme) stepBody(step ToolStep, inner int) []string {
 func (t Theme) outputRows(lines []ResultLine, room int, color func(string) string) []string {
 	rows := make([]string, 0, len(lines))
 	for _, line := range lines {
+		// A blank line of output costs a row and says nothing.
+		if strings.TrimSpace(line.Text) == "" {
+			continue
+		}
 		text := Ellipsize(strings.ReplaceAll(line.Text, "\t", "    "), room)
 		if line.Notice {
 			rows = append(rows, bodyIndent+t.Graphite(text))
