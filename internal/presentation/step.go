@@ -35,9 +35,9 @@ const (
 	bodyIndent = "     "
 )
 
-// ToolCard sets a finished tool call as rows of the turn: an ink drop with
+// ToolCard sets a finished tool call as rows of the turn: a step mark with
 // the verb in bold, the target, and the facts in gray; then what the tool
-// left behind, hooked under the drop. A read, a search, or a listing leaves
+// left behind, hooked under the mark. A read, a search, or a listing leaves
 // only its count. A change shows its diff. Anything else shows a few lines
 // of its output. A command that failed names its exit code with the facts,
 // not as a line of output. It returns nil below 256 colors, or when the row
@@ -64,7 +64,7 @@ func (t Theme) ToolCard(step ToolStep, width int) []string {
 }
 
 // stepTitle is the first row of a step, read left to right as one sentence:
-// an ink drop in the color of what the tool did, the verb in bold, the
+// a wedge in the color of what the tool did, the verb in bold, the
 // target in ink, then the facts in gray (a count, and the time when it is a
 // second or more), and last the number of its tab in a faint gray. The
 // target gives way first when the row is too narrow, then the tab number,
@@ -99,11 +99,11 @@ func (t Theme) stepTitle(step ToolStep, summary string, inner int) string {
 	if inner < titleMinimum(verb, suffix, target) {
 		suffix = ""
 	}
-	fixed := 2 + CellWidth(verb) + CellWidth(suffix) + CellWidth(tab) // the drop, a space, the verb, the facts
+	fixed := 2 + CellWidth(verb) + CellWidth(suffix) + CellWidth(tab) // the mark, a space, the verb, the facts
 	if target != "" {
 		target = Ellipsize(target, max(inner-fixed-1, 1))
 	}
-	bullet, verbText := t.Drop(KindOf(step.Name, step.Failed)), t.Bold(t.Ink(verb))
+	bullet, verbText := t.StepMark(KindOf(step.Name, step.Failed)), t.Bold(t.Ink(verb))
 	if step.Failed {
 		verbText = t.Bold(t.Red(verb))
 	}

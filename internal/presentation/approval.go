@@ -2,7 +2,7 @@ package presentation
 
 import "strings"
 
-// ApprovalRequest is a tool call that waits for the user, drawn as a rounded
+// ApprovalRequest is a tool call that waits for the user, drawn as a heavy
 // box: the action in bold, the work, and what the action may touch. The
 // texts are plain; the theme styles them when it draws the request at a
 // width.
@@ -78,10 +78,10 @@ func NewApprovalRequest(name string, view ToolView) ApprovalRequest {
 }
 
 // ApprovalRows draws request in width cells. With 256 colors or more it is a
-// row of air, then a rounded box whose edge fades from plum to blue, holding
-// the action in bold, the work, and the caption in gray. Below 256 colors the
-// screen draws its own amber box around the request, so the rows are the
-// same content without a second frame. With air blank rows set the work
+// row of air, then a heavy frame whose title stands in a setback tower above
+// it, holding the work and the caption in gray. Below 256 colors the screen
+// draws its own amber box around the request, so the rows are the title and
+// the same content without a second frame. With air blank rows set the work
 // apart. A long line of the work wraps; it is never cut, because the user
 // approves what they see.
 func (t Theme) ApprovalRows(request ApprovalRequest, width int, air bool) []string {
@@ -89,7 +89,11 @@ func (t Theme) ApprovalRows(request ApprovalRequest, width int, air bool) []stri
 	if !t.Soft() {
 		inside = max(width, 12)
 	}
-	content := []string{t.Bold(t.Ink(Ellipsize(request.Title, inside)))}
+	title := Ellipsize(request.Title, inside)
+	var content []string
+	if !t.Soft() {
+		content = append(content, t.Bold(t.Ink(title)))
+	}
 	if air {
 		content = append(content, "")
 	}
@@ -113,7 +117,7 @@ func (t Theme) ApprovalRows(request ApprovalRequest, width int, air bool) []stri
 		return content
 	}
 	margin := strings.Repeat(" ", approvalMargin)
-	box := t.GradientBox(content, inside+4)
+	box := t.SetbackBox(title, content, inside+4)
 	rows := make([]string, 0, len(box)+1)
 	rows = append(rows, "")
 	for _, row := range box {
@@ -192,7 +196,7 @@ func (t Theme) workText(kind WorkKind, text string) string {
 func (t Theme) FailureRows(title, cause string, width int) []string {
 	margin := strings.Repeat(" ", approvalMargin)
 	room := max(width-approvalMargin-len(bodyIndent), 8)
-	rows := []string{"", margin + t.Red("●") + " " + t.Bold(t.Red(Ellipsize(title, room)))}
+	rows := []string{"", margin + t.StepMark(StepFailed) + " " + t.Bold(t.Red(Ellipsize(title, room)))}
 	for index, piece := range wrapWords(singleLine(cause), room) {
 		lead := bodyIndent
 		if index == 0 {

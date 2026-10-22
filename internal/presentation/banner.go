@@ -1,7 +1,7 @@
 package presentation
 
 import (
-	"hash/fnv"
+	"math"
 	"path/filepath"
 	"strings"
 )
@@ -22,7 +22,7 @@ type BannerInfo struct {
 const (
 	bannerMinimumWidth = 64
 	bannerArtMaxRows   = 12
-	bannerArtMaxWidth  = 48
+	bannerArtMaxWidth  = 60
 	bannerArtReserved  = 18
 	bannerArtMinRows   = 5
 )
@@ -51,14 +51,7 @@ func BannerAnimation(info BannerInfo, theme Theme) func(progress float64) string
 	}
 }
 
-// bannerSeed picks one of the page's seeds from the workspace path.
-func bannerSeed(directory string) uint32 {
-	hash := fnv.New32a()
-	hash.Write([]byte(directory))
-	return BlotSeeds[int(hash.Sum32()%uint32(len(BlotSeeds)))]
-}
-
-func (info BannerInfo) picture(theme Theme) *BlotPicture {
+func (info BannerInfo) picture(theme Theme) *CityPicture {
 	if theme.depth < ANSI256 || info.Width < bannerMinimumWidth {
 		return nil
 	}
@@ -66,7 +59,7 @@ func (info BannerInfo) picture(theme Theme) *BlotPicture {
 	if rows < bannerArtMinRows {
 		return nil
 	}
-	return NewBlotPicture(NewBlot(bannerSeed(info.Directory)), min(bannerArtMaxWidth, info.Width-8), rows)
+	return NewCityPicture(info.Directory, min(bannerArtMaxWidth, info.Width-8), rows)
 }
 
 func bannerText(info BannerInfo, theme Theme) []string {
@@ -76,32 +69,39 @@ func bannerText(info BannerInfo, theme Theme) []string {
 	}
 }
 
-// heroAt draws the opening screen at a progress from 0 to 1, centered like
-// the hero of the page: the artwork, and under it a label, as a museum hangs
-// one: the workspace name, then the model. Every progress has the same
-// number of rows, so the composer below stays in place.
-func heroAt(picture *BlotPicture, info BannerInfo, theme Theme, progress float64) string {
+// heroAt draws the opening screen at a progress from 0 to 1: the city, and
+// under it one line of force as wide as the city, set as Marinetti set words
+// in freedom: the workspace name in bold, a heavy rule that runs out toward
+// the model, and the model and effort. Every progress has the same number of
+// rows, so the composer below stays in place.
+func heroAt(picture *CityPicture, info BannerInfo, theme Theme, progress float64) string {
 	width := max(info.Width-1, 1)
-	center := func(plain, styled string) string {
-		return strings.Repeat(" ", max((width-CellWidth(plain))/2, 0)) + styled
-	}
+	pad := strings.Repeat(" ", max((width-picture.Columns)/2, 0))
 	var rows []string
 	rows = append(rows, "")
-	artPad := strings.Repeat(" ", max((width-picture.Columns)/2, 0))
 	for _, row := range picture.Draw(theme, min(progress/0.85, 1)) {
-		rows = append(rows, artPad+row)
+		rows = append(rows, pad+row)
 	}
-	rows = append(rows, "")
-	title := clipCells(singleLine(filepath.Base(info.Directory)), width-4)
-	subtitle := clipCells(singleLine(info.Model+"  ·  "+info.Effort+" effort"), width-4)
-	switch {
-	case progress >= 0.85:
-		rows = append(rows, center(title, theme.Bold(theme.Ink(title))), center(subtitle, theme.Graphite(subtitle)))
-	case progress >= 0.7:
-		rows = append(rows, center(title, theme.Bold(theme.Ink(title))), "")
-	default:
-		rows = append(rows, "", "")
-	}
-	rows = append(rows, "")
+	rows = append(rows, "", pad+theme.forceLine(info, picture.Columns, progress), "")
 	return strings.Join(rows, "\n")
+}
+
+// forceLine is the title under the city. The name shows first, the rule
+// runs out from it, and the model lands at its end.
+func (t Theme) forceLine(info BannerInfo, columns int, progress float64) string {
+	if progress < 0.7 {
+		return ""
+	}
+	name := clipCells(singleLine(filepath.Base(info.Directory)), max(columns/2, 4))
+	model := singleLine(info.Model + " · " + info.Effort)
+	room := columns - CellWidth(name) - CellWidth(model) - 3
+	if room < 4 {
+		model, room = "", columns-CellWidth(name)-2
+	}
+	run := int(math.Round(float64(max(room, 1)) * min((progress-0.7)/0.15, 1)))
+	line := t.Bold(t.Ink(name)) + " " + t.forceRule(run, room)
+	if progress >= 0.85 && model != "" {
+		line += " " + t.Graphite(model)
+	}
+	return line
 }

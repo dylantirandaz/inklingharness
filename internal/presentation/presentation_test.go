@@ -2,9 +2,6 @@ package presentation
 
 import (
 	"encoding/json"
-	"regexp"
-	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -533,12 +530,13 @@ func TestShadeAndAccentSelection(t *testing.T) {
 	}
 }
 
-// A picture has the rows and cells that it reports, fits the box it was
-// asked for, and only exists with 256 or more colors. A finished picture
-// shows the ink and all three shapes of the page.
-func TestBlotPictureGeometry(t *testing.T) {
+// A city has the rows and cells that it reports, fits the box it was asked
+// for, and only exists with 256 or more colors. Before it rises the sky is
+// empty; once it stands, the red of its lift shaft shows. A project keeps
+// its city, and another project gets another one.
+func TestCityPictureGeometry(t *testing.T) {
 	for _, theme := range themes {
-		picture := NewBlotPicture(NewBlot(BlotSeeds[4]), 44, 12)
+		picture := NewCityPicture("/work/project", 44, 12)
 		rows := picture.Draw(theme, 1)
 		if theme.depth < ANSI256 {
 			if rows != nil {
@@ -546,7 +544,7 @@ func TestBlotPictureGeometry(t *testing.T) {
 			}
 			continue
 		}
-		if picture.Columns > 44 || picture.Rows > 12 || len(rows) != picture.Rows {
+		if picture.Columns != 44 || picture.Rows != 12 || len(rows) != picture.Rows {
 			t.Fatalf("picture is %dx%d with %d rows", picture.Columns, picture.Rows, len(rows))
 		}
 		for _, row := range rows {
@@ -554,23 +552,18 @@ func TestBlotPictureGeometry(t *testing.T) {
 				t.Fatalf("row has %d cells, want %d: %q", got, picture.Columns, Safe(row))
 			}
 		}
-		if theme.depth != TrueColor {
-			continue
+		if strings.TrimSpace(Safe(strings.Join(picture.Draw(theme, 0), ""))) != "" {
+			t.Fatal("the sky is not empty before the city rises")
 		}
-		// Pixels blend their pigment with the page, so a layer shows as a
-		// color near its pigment, not as the pigment itself.
-		var drawn []rgb
-		for _, match := range regexp.MustCompile(`\x1b\[[34]8;2;(\d+);(\d+);(\d+)m`).FindAllStringSubmatch(strings.Join(rows, ""), -1) {
-			channel := func(text string) uint8 { value, _ := strconv.Atoi(text); return uint8(value) }
-			drawn = append(drawn, rgb{channel(match[1]), channel(match[2]), channel(match[3])})
+		finished := strings.Join(picture.Draw(theme, 1), "")
+		if theme.depth == TrueColor && !strings.Contains(finished, "239;64;44") {
+			t.Fatal("the finished city shows no lift shaft")
 		}
-		for layer := uint8(1); layer <= blotLayers; layer++ {
-			pigment := theme.blotColor(layer, picture.colors)
-			if !slices.ContainsFunc(drawn, func(color rgb) bool {
-				return square(int(color.r)-int(pigment.r))+square(int(color.g)-int(pigment.g))+square(int(color.b)-int(pigment.b)) <= 3*12*12
-			}) {
-				t.Fatalf("finished picture shows no pigment of layer %d", layer)
-			}
+		if again := strings.Join(NewCityPicture("/work/project", 44, 12).Draw(theme, 1), ""); again != finished {
+			t.Fatal("one project drew two cities")
+		}
+		if other := strings.Join(NewCityPicture("/work/another", 44, 12).Draw(theme, 1), ""); other == finished {
+			t.Fatal("two projects drew one city")
 		}
 	}
 }
@@ -611,16 +604,16 @@ func TestNearest256UsesCubeAndGray(t *testing.T) {
 
 func TestToolRowAndShortDuration(t *testing.T) {
 	theme := Theme{}
-	if got := ToolRow(StepRun, "Run go test ./...", 1200*time.Millisecond, theme); got != "● Ran go test ./...  1.2s" {
+	if got := ToolRow(StepRun, "Run go test ./...", 1200*time.Millisecond, theme); got != "▶ Ran go test ./...  1.2s" {
 		t.Fatalf("row = %q", got)
 	}
-	if got := ToolRow(StepRead, "Read a.go", 3*time.Millisecond, theme); got != "● Read a.go" {
+	if got := ToolRow(StepRead, "Read a.go", 3*time.Millisecond, theme); got != "▶ Read a.go" {
 		t.Fatalf("a fast row = %q", got)
 	}
 	if got := ToolRow(StepFailed, "Run rm -rf x", 0, theme); got != "✕ Run rm -rf x" {
 		t.Fatalf("failed row = %q", got)
 	}
-	if got := ToolRow(StepChange, "Edit a.go", 0, NewTheme(ANSI16, DarkBackground, AccentPlum)); !strings.HasPrefix(got, NewTheme(ANSI16, DarkBackground, AccentPlum).Green("●")) {
+	if got := ToolRow(StepChange, "Edit a.go", 0, NewTheme(ANSI16, DarkBackground, AccentPlum)); !strings.HasPrefix(got, NewTheme(ANSI16, DarkBackground, AccentPlum).Green("▶")) {
 		t.Fatalf("a change on 16 colors = %q", got)
 	}
 	for elapsed, want := range map[time.Duration]string{

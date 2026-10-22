@@ -41,22 +41,22 @@ func TestToolCardRowsFitTheWidth(t *testing.T) {
 	}
 }
 
-// The score of a turn is one drop per step, in order and in the color of
-// what the step did; a turn without steps is one drop of ink, and a very long
-// turn ends its score with an ellipsis.
+// The score of a turn is one wedge per step, in order and in the color of
+// what the step did; a turn without steps is one wedge of ink, and a very
+// long turn ends its score with an ellipsis.
 func TestTurnRuleScoresTheSteps(t *testing.T) {
 	theme := NewTheme(TrueColor, DarkBackground, AccentPlum)
 	summary := TurnSummaryText(5200*time.Millisecond, 4, 15600, 223)
 	steps := []StepKind{KindOf("read_file", false), KindOf("grep", false), KindOf("edit_file", false), KindOf("bash", true), KindOf("bash", false)}
-	want := "  " + theme.Drop(StepRead) + theme.Drop(StepRead) + theme.Drop(StepChange) + theme.Drop(StepFailed) + theme.Drop(StepRun) + " "
+	want := "  " + theme.StepMark(StepRead) + theme.StepMark(StepRead) + theme.StepMark(StepChange) + theme.StepMark(StepFailed) + theme.StepMark(StepRun) + " "
 	if rule := theme.TurnRule(summary, steps); !strings.HasPrefix(rule, want) || !strings.HasSuffix(Safe(rule), "5.2s · 4 requests · 15.6k in · 223 out") {
 		t.Fatalf("score = %q", rule)
 	}
-	if rule := Safe(theme.TurnRule(summary, nil)); !strings.HasPrefix(rule, "  ● 5.2s") {
+	if rule := Safe(theme.TurnRule(summary, nil)); !strings.HasPrefix(rule, "  ▶ 5.2s") {
 		t.Fatalf("a turn without steps = %q", rule)
 	}
 	long := make([]StepKind, scoreLimit+5)
-	if rule := Safe(theme.TurnRule(summary, long)); strings.Count(rule, "●") != scoreLimit || !strings.Contains(rule, "…") {
+	if rule := Safe(theme.TurnRule(summary, long)); strings.Count(rule, "▶") != scoreLimit || !strings.Contains(rule, "…") {
 		t.Fatalf("a long score = %q", rule)
 	}
 }
@@ -67,7 +67,7 @@ func TestTurnRuleScoresTheSteps(t *testing.T) {
 func TestToolCardTitleKeepsItsPartsWhenTheTargetIsLong(t *testing.T) {
 	step := ToolStep{Name: "read_file", Title: "Read " + strings.Repeat("deep/", 30) + "file.go", Content: "[end of file: 9 lines]", Elapsed: 12 * time.Second, Number: 4}
 	title := stepRows(t, step, 60)[0]
-	for _, want := range []string{"●", "Read", "…", "9 lines", "12s", "#4"} {
+	for _, want := range []string{"▶", "Read", "…", "9 lines", "12s", "#4"} {
 		if !strings.Contains(title, want) {
 			t.Fatalf("title is missing %q: %q", want, title)
 		}
@@ -156,7 +156,7 @@ func TestToolCardOutputBudgets(t *testing.T) {
 		t.Fatalf("output of a step that worked: %q", worked)
 	}
 	failed := stepRows(t, ToolStep{Name: "bash", Title: "Run x", Content: output, Failed: true, Number: 2}, 80)
-	if len(failed) != 1+failureRowLimit || !strings.Contains(failed[0], "● Run x") {
+	if len(failed) != 1+failureRowLimit || !strings.Contains(failed[0], "▶ Run x") {
 		t.Fatalf("output of a step that failed: %q", failed)
 	}
 }
@@ -178,9 +178,9 @@ func TestToolCardNeedsATintAndRoom(t *testing.T) {
 // A step's drop tells what the tool did: blue for a read, green for a
 // change, ink for a command, and red only for a failure, which also turns
 // the verb red.
-func TestToolCardDropTellsWhatTheToolDid(t *testing.T) {
+func TestToolCardMarkTellsWhatTheToolDid(t *testing.T) {
 	theme := NewTheme(TrueColor, LightBackground, AccentPlum)
-	drop := func(step ToolStep) string { return strings.Join(theme.ToolCard(step, 60), "") }
+	card := func(step ToolStep) string { return strings.Join(theme.ToolCard(step, 60), "") }
 	for _, test := range []struct {
 		step ToolStep
 		role role
@@ -190,11 +190,11 @@ func TestToolCardDropTellsWhatTheToolDid(t *testing.T) {
 		{ToolStep{Name: "bash", Title: "Run x"}, roleInk},
 		{ToolStep{Name: "bash", Title: "Run x", Failed: true}, roleRed},
 	} {
-		if row := drop(test.step); !strings.HasPrefix(row, "  "+theme.sgr[test.role]+"●") {
+		if row := card(test.step); !strings.HasPrefix(row, "  "+theme.sgr[test.role]+"▶") {
 			t.Fatalf("%s failed %t: row = %q", test.step.Name, test.step.Failed, row)
 		}
 	}
-	if worked := drop(ToolStep{Name: "bash", Title: "Run x"}); strings.Contains(worked, theme.sgr[roleRed]) || !strings.Contains(Safe(worked), "● Ran x") {
+	if worked := card(ToolStep{Name: "bash", Title: "Run x"}); strings.Contains(worked, theme.sgr[roleRed]) || !strings.Contains(Safe(worked), "▶ Ran x") {
 		t.Fatalf("a step that worked = %q", worked)
 	}
 }
@@ -216,25 +216,30 @@ func TestResultLinesMarkTheNotice(t *testing.T) {
 	}
 }
 
-// A prompt sits on a band with an edge of blue ink and a row of padding
-// above and below; the stamp ends two cells before the edge, and a stamp
-// that does not fit is left out.
+// A prompt sits on a band with a row of padding above and below. Its
+// leading edge leans forward one cell a row, with a stroke down it, while
+// the text keeps one column; the stamp ends two cells before the edge, and a
+// stamp that does not fit is left out.
 func TestUserCardHoldsTheStampAndWrappedRows(t *testing.T) {
 	theme := NewTheme(TrueColor, DarkBackground, AccentPlum)
 	card := theme.UserCard([]string{"first row", "second row"}, "23:09", 40)
-	if len(card) != 4 || Safe(card[0]) != "▌" || Safe(card[3]) != "▌" {
+	if len(card) != 4 {
 		t.Fatalf("band = %q", card)
 	}
-	for _, row := range card {
-		if !strings.HasPrefix(row, theme.chip+theme.sgr[roleBlue]+"▌") || !strings.Contains(row, "\x1b[K") {
-			t.Fatalf("a band row lacks the ink edge or the full-width tint: %q", row)
+	for index, row := range card {
+		lead, stroke := strings.Repeat(" ", max(bandSlant-1-index, 0)), "▞"
+		if index >= bandSlant {
+			stroke = "▌"
+		}
+		if !strings.HasPrefix(row, lead+theme.chip) || !strings.HasPrefix(Safe(row), lead+stroke) || !strings.Contains(row, "\x1b[K") {
+			t.Fatalf("band row %d does not lean or fill the width: %q", index, row)
 		}
 	}
 	first, second := Safe(card[1]), Safe(card[2])
-	if !strings.HasPrefix(first, "▌ first row") || !strings.HasSuffix(first, "23:09") || CellWidth(first) != 38 {
+	if !strings.HasPrefix(first, " ▞ first row") || !strings.HasSuffix(first, "23:09") || CellWidth(first) != 38 {
 		t.Fatalf("first row = %q", first)
 	}
-	if second != "▌ second row" {
+	if second != "▞  second row" {
 		t.Fatalf("second row = %q", second)
 	}
 	narrow := Safe(theme.UserCard([]string{"a prompt that fills the row"}, "23:09", 36)[1])

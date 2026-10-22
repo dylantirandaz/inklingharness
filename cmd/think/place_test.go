@@ -65,23 +65,24 @@ func TestHomeRelativeShortensOnlyPathsUnderHome(t *testing.T) {
 	}
 }
 
-// A sent prompt sits on a band with an edge of blue ink: a blank row, a
-// padding row, the rows of the prompt with the time at the end of the
-// first, and a padding row; no row leaves the live area. Without a tint it
-// stays a plain marked row.
+// A sent prompt sits on a band whose leading edge leans forward: a blank
+// row, a padding row, the rows of the prompt with the time at the end of the
+// first, and a padding row. The text keeps one column, and no row leaves the
+// live area. Without a tint it stays a plain marked row.
 func TestPrintUserEchoesABand(t *testing.T) {
 	var card bytes.Buffer
 	printUser(&card, "first line\n"+strings.Repeat("word ", 30), 60, tintedTheme)
 	rows := strings.Split(strings.TrimRight(card.String(), "\n"), "\n")
-	if len(rows) < 6 || rows[0] != "" || presentation.Safe(rows[1]) != "▌" || presentation.Safe(rows[len(rows)-1]) != "▌" {
+	if len(rows) < 6 || rows[0] != "" || presentation.Safe(rows[1]) != "  ▞" || presentation.Safe(rows[len(rows)-1]) != "▌" {
 		t.Fatalf("band = %q", rows)
 	}
 	for index, row := range rows[2 : len(rows)-1] {
-		if plain := presentation.Safe(row); presentation.CellWidth(plain) > 59 || !strings.HasPrefix(plain, "▌ ") {
-			t.Fatalf("prompt row %d leaves the live area or its edge: %q", index, plain)
+		plain := []rune(presentation.Safe(row))
+		if edge := strings.TrimSpace(string(plain[:min(3, len(plain))])); presentation.CellWidth(string(plain)) > 59 || len(plain) < 4 || plain[3] == ' ' || edge != "▞" && edge != "▌" {
+			t.Fatalf("prompt row %d leaves the live area or the text column: %q", index, string(plain))
 		}
 	}
-	if first := presentation.Safe(rows[2]); !strings.HasPrefix(first, "▌ first line") {
+	if first := presentation.Safe(rows[2]); !strings.HasPrefix(first, " ▞ first line") {
 		t.Fatalf("first row = %q", first)
 	}
 

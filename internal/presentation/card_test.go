@@ -22,11 +22,11 @@ func TestCardFramesEveryRowAtTheWidth(t *testing.T) {
 		first, last := []rune(plain)[0], []rune(plain)[len([]rune(plain))-1]
 		switch index {
 		case 0:
-			if first != '╭' || last != '╮' {
+			if first != '┌' || last != '┐' {
 				t.Fatalf("top edge = %q", plain)
 			}
 		case len(rows) - 1:
-			if first != '╰' || last != '╯' {
+			if first != '└' || last != '┘' {
 				t.Fatalf("bottom edge = %q", plain)
 			}
 		default:
@@ -40,10 +40,11 @@ func TestCardFramesEveryRowAtTheWidth(t *testing.T) {
 	}
 }
 
-// A request is a closed box after a row of air: every row is the same width
-// and stays inside the screen, the box holds the whole work, even a line
+// A request is a closed heavy frame after a row of air, with its title in a
+// tower that steps back into the frame: every row is the same width and
+// stays inside the screen, the frame holds the whole work, even a line
 // longer than the screen, a removed line takes the removed tint, and the
-// caption closes the box.
+// caption closes the frame.
 func TestApprovalRowsBoxTheWholeWork(t *testing.T) {
 	theme := NewTheme(TrueColor, DarkBackground, AccentPlum)
 	long := "+ " + strings.Repeat("abcdefghij", 12)
@@ -59,8 +60,11 @@ func TestApprovalRowsBoxTheWholeWork(t *testing.T) {
 	}
 	for _, air := range []bool{false, true} {
 		rows := theme.ApprovalRows(request, 70, air)
-		if rows[0] != "" || !strings.HasPrefix(strings.TrimSpace(Safe(rows[1])), "╭") || !strings.HasPrefix(strings.TrimSpace(Safe(rows[len(rows)-1])), "╰") {
+		if rows[0] != "" || !strings.HasPrefix(strings.TrimSpace(Safe(rows[1])), "┏") || !strings.HasPrefix(strings.TrimSpace(Safe(rows[len(rows)-1])), "┗") {
 			t.Fatalf("the request is not a box after a row of air: %q", rows)
+		}
+		if title := strings.TrimSpace(Safe(rows[2])); !strings.HasPrefix(title, "┃ Edit app.py ┗━") || !strings.HasSuffix(title, "┓") {
+			t.Fatalf("the title does not stand in a setback: %q", title)
 		}
 		var shown strings.Builder
 		for _, row := range rows[1:] {
@@ -68,7 +72,7 @@ func TestApprovalRowsBoxTheWholeWork(t *testing.T) {
 			if CellWidth(plain) != 70 {
 				t.Fatalf("box row is %d cells, want 70: %q", CellWidth(plain), plain)
 			}
-			shown.WriteString(strings.TrimSpace(strings.Trim(strings.TrimSpace(plain), "│")))
+			shown.WriteString(strings.TrimSpace(strings.Trim(strings.TrimSpace(plain), "┃")))
 			if strings.Contains(plain, "- old line") && !strings.Contains(row, theme.removed) {
 				t.Fatalf("the removed line has no removed tint: %q", row)
 			}

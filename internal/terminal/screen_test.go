@@ -90,7 +90,7 @@ func TestBusyActivityKeepsPreview(t *testing.T) {
 			t.Fatalf("busy view is missing %q: %q", text, s.live)
 		}
 	}
-	s.effects.epoch = s.effects.epoch.Add(-4 * expertTick)
+	s.effects.epoch = s.effects.epoch.Add(-expertTick)
 	s.drawLocked()
 	got := take()
 	if strings.Count(got, "\x1b[2K") != 1 || strings.Contains(got, "preview") || len(got) >= len(initial) {
@@ -410,7 +410,7 @@ func TestComposerCardAndApprovalCard(t *testing.T) {
 	s, take := renderScreen(t, modePrompt, 16, 60)
 	s.drawLocked()
 	take()
-	if !strings.HasPrefix(s.live[0], "╭") || !strings.HasPrefix(s.live[len(s.live)-2], "╰") {
+	if !strings.HasPrefix(s.live[0], "┌") || !strings.HasPrefix(s.live[len(s.live)-2], "└") {
 		t.Fatalf("composer is not a card: %q", s.live)
 	}
 	for _, row := range s.live[:len(s.live)-1] {
@@ -435,9 +435,10 @@ func TestComposerCardAndApprovalCard(t *testing.T) {
 	}
 }
 
-// With a tint a request is a rounded box with the action, the work, and the
-// caption, followed by the choices and the key hint; no row is wider than
-// the live width. A request that does not fit leaves only the choices.
+// With a tint a request is a heavy frame with the action in a setback tower,
+// the work, and the caption, followed by the choices and the key hint; no row
+// is wider than the live width. A request that does not fit leaves only the
+// choices.
 func TestSoftApprovalIsABox(t *testing.T) {
 	s, take := renderScreen(t, modeChoice, 14, 70)
 	s.theme = presentation.NewTheme(presentation.TrueColor, presentation.LightBackground, presentation.AccentPlum)
@@ -452,12 +453,12 @@ func TestSoftApprovalIsABox(t *testing.T) {
 	s.drawLocked()
 	take()
 	frame := withoutStyles(strings.Join(s.live, "\n"))
-	for _, want := range []string{"╭", "Run a command", "go test ./...", "not sandboxed", "╰", "Allow?", "y once", "n no", "Enter / Esc deny"} {
+	for _, want := range []string{"┏", "┃ Run a command ┗", "go test ./...", "not sandboxed", "┛", "Allow?", "y once", "n no", "Enter / Esc deny"} {
 		if !strings.Contains(frame, want) {
 			t.Fatalf("soft approval is missing %q: %q", want, frame)
 		}
 	}
-	if strings.Index(frame, "Run a command") > strings.Index(frame, "go test") || strings.Index(frame, "╰") > strings.Index(frame, "Allow?") {
+	if strings.Index(frame, "Run a command") > strings.Index(frame, "go test") || strings.Index(frame, "┛") > strings.Index(frame, "Allow?") {
 		t.Fatalf("the box must hold the work and lead to the choices: %q", frame)
 	}
 	for _, row := range s.live {
@@ -481,7 +482,7 @@ func TestCardFootHoldsKeysAndStatusBarEndsAtRightEdge(t *testing.T) {
 	s.drawLocked()
 	take()
 	foot := withoutStyles(s.live[len(s.live)-2])
-	if !strings.HasPrefix(foot, "╰─ Enter send · Ctrl-J new line") || !strings.HasSuffix(foot, "╯") {
+	if !strings.HasPrefix(foot, "└─ Enter send · Ctrl-J new line") || !strings.HasSuffix(foot, "┘") {
 		t.Fatalf("card foot = %q", foot)
 	}
 	bar := withoutStyles(s.live[len(s.live)-1])
@@ -522,7 +523,7 @@ func TestWrapWords(t *testing.T) {
 	}
 }
 
-// With a tint the composer is a rounded box with a cursor in the model
+// With a tint the composer is a heavy frame with a cursor in the model
 // color, and the keys sit in the status bar under it, not in its border.
 func TestSoftComposerBoxAndHintUnderIt(t *testing.T) {
 	s, _ := renderScreen(t, modePrompt, 14, 70)
@@ -539,7 +540,7 @@ func TestSoftComposerBoxAndHintUnderIt(t *testing.T) {
 		}
 	}
 	typed := withoutStyles(s.frame[s.frameRow])
-	if !strings.HasPrefix(typed, "│ ❯ typed text") {
+	if !strings.HasPrefix(typed, "┃ ❯ typed text") {
 		t.Fatalf("composer row = %q", typed)
 	}
 	if s.frameCol != 2+2+len("typed text") {
@@ -548,12 +549,12 @@ func TestSoftComposerBoxAndHintUnderIt(t *testing.T) {
 	top := withoutStyles(s.frame[s.frameRow-1])
 	bottom := ""
 	for _, row := range s.frame[s.frameRow+1:] {
-		if plain := withoutStyles(row); strings.HasPrefix(plain, "╰") {
+		if plain := withoutStyles(row); strings.HasPrefix(plain, "┗") {
 			bottom = plain
 			break
 		}
 	}
-	if !strings.HasPrefix(top, "╭") || bottom == "" || strings.Contains(bottom, "Enter") {
+	if !strings.HasPrefix(top, "┏") || bottom == "" || strings.Contains(bottom, "Enter") {
 		t.Fatalf("the box does not hold the input, or its border holds keys: %q / %q", top, bottom)
 	}
 	last := withoutStyles(s.frame[len(s.frame)-1])
@@ -636,19 +637,19 @@ func TestSoftFooterLeavesOutThePlaceOnShortScreens(t *testing.T) {
 	}
 }
 
-// The working row is the next step that has not landed: a drop in the column
-// of the step drops, the status, and the seconds. With motion the trace sits
-// at its right end, so the row spans the live width; without motion the drop
-// is still and nothing follows the seconds.
+// The working row is the next step on its way: a train of wedges that ends
+// in the column of the step marks, the status, and the seconds. With motion
+// the trace sits at its right end, so the row spans the live width; without
+// motion the train is still and nothing follows the seconds.
 func TestWorkingStatusLeadsTheRow(t *testing.T) {
 	s := softScreen(t, modeBusy, 24, 100)
 	s.status, s.activitySince = "Writing reply", time.Now().Add(-3*time.Second)
-	if row := withoutStyles(s.activityLocked()); row != "  ● Writing reply · 3s" {
+	if row := withoutStyles(s.activityLocked()); row != "▶▶▶ Writing reply · 3s" {
 		t.Fatalf("still working row = %q", row)
 	}
 	s.effects.motion, s.effects.epoch = true, time.Now()
 	row := withoutStyles(s.activityLocked())
-	if !strings.HasPrefix(row, "  ") || !strings.Contains(row, " Writing reply · 3s") || !strings.HasSuffix(row, "─") || cellWidth(row) != s.cols-1 {
+	if !strings.HasPrefix(row, "▶▶▶ Writing reply · 3s") || !strings.HasSuffix(row, "─") || cellWidth(row) != s.cols-1 {
 		t.Fatalf("working row = %q (%d cells)", row, cellWidth(row))
 	}
 }

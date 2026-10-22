@@ -130,8 +130,8 @@ func Section(label string, theme Theme) string {
 	return theme.Hairline("───") + " " + theme.Graphite(theme.Italic(singleLine(label)))
 }
 
-// AssistantLead starts the first line of a reply: an ink drop in the model
-// color. Later lines use two spaces.
+// AssistantLead starts the first line of a reply in plain chat: a dot in the
+// model color. Later lines use two spaces.
 func AssistantLead(theme Theme) string {
 	return theme.Accent("●") + " "
 }
@@ -350,15 +350,15 @@ var pastTense = map[string]string{
 	"Remember": "Remembered", "Ask": "Asked",
 }
 
-// ToolRow records a finished tool in the conversation: the drop of its kind,
-// as in the art, or a red cross for a failure, then the verb in bold (past
+// ToolRow records a finished tool in the conversation: the mark of its kind,
+// as in the full look, or a red cross for a failure, then the verb in bold (past
 // tense once it succeeded), the target, and the time when it is a second or
 // more. A failure has its own glyph, so the outcome does not depend on color.
 func ToolRow(kind StepKind, title string, elapsed time.Duration, theme Theme) string {
 	failed := kind == StepFailed
 	dot := theme.Red("✕")
 	if !failed {
-		dot = theme.Drop(kind)
+		dot = theme.StepMark(kind)
 	}
 	verb, target, _ := strings.Cut(singleLine(title), " ")
 	if past, found := pastTense[verb]; found && !failed {

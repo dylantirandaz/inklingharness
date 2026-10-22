@@ -7,7 +7,7 @@ import (
 )
 
 // TraceMark is the kind of event that the trace records. The marks of a
-// step take the colors of its ink drop, so the trace and the score of a turn
+// step take the colors of its step mark, so the trace and the score of a turn
 // speak one language. A later mark outranks an earlier one in a cell.
 type TraceMark uint8
 
@@ -133,9 +133,11 @@ func (t *Trace) Draw(theme Theme) string {
 		case index == head:
 			color, glyph = accents[theme.accent].color.on(theme.shade), "╸"
 		case cell.marked:
-			glyph = "┴"
+			// The stream leaves slanted strokes, lines of force along the
+			// tape; a finished step leaves the wedge of its mark.
+			glyph = "╱"
 			if cell.mark >= TraceRead {
-				glyph = "┸"
+				glyph = "▶"
 			}
 			// A tick keeps its tone for a third of the sweep, then fades in
 			// a few steps, so neighbors share a color and a frame stays small.
@@ -153,7 +155,7 @@ func (t *Trace) Draw(theme Theme) string {
 	return string(line)
 }
 
-// traceColor is the color of a kind of mark: the color of its step's drop.
+// traceColor is the color of a kind of mark: the color of its step's mark.
 func (t Theme) traceColor(mark TraceMark) rgb {
 	switch mark {
 	case TraceReasoning:

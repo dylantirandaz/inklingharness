@@ -10,9 +10,10 @@ const traceFrame = 33 * time.Millisecond
 
 func traceTheme() Theme { return NewTheme(TrueColor, DarkBackground, AccentPlum).OnPaper(20, 22, 26) }
 
-// barCells is the number of cells of a drawn trace that hold a tick.
+// barCells is the number of cells of a drawn trace that hold a tick: a
+// stroke of the stream or the wedge of a step.
 func barCells(row string) int {
-	return strings.Count(row, "┴") + strings.Count(row, "┸")
+	return strings.Count(row, "╱") + strings.Count(row, "▶")
 }
 
 // The trace keeps its width, and without intermediate colors it is a plain

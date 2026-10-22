@@ -70,8 +70,8 @@ func TestLatestToolDocumentsCoverWholeTurn(t *testing.T) {
 		t.Fatalf("documents = %q, want %q", titles, want)
 	}
 	// Each tab opens with the drop of its step; the failed read is red.
-	if documents[0].Drop != theme.Drop(presentation.StepRun) || documents[2].Drop != theme.Drop(presentation.StepFailed) {
-		t.Fatalf("drops = %q, %q", documents[0].Drop, documents[2].Drop)
+	if documents[0].Mark != theme.StepMark(presentation.StepRun) || documents[2].Mark != theme.StepMark(presentation.StepFailed) {
+		t.Fatalf("drops = %q, %q", documents[0].Mark, documents[2].Mark)
 	}
 	if !strings.HasSuffix(documents[2].Text, "\nResult\nworld") {
 		t.Fatalf("third document = %q", documents[2].Text)

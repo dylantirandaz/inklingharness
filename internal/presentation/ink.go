@@ -224,29 +224,14 @@ func (t Theme) OnPaper(r, g, b uint8) Theme {
 	return t
 }
 
-// hash01 maps a lattice point to a number from 0 to 1 that looks random.
-func hash01(x, y, z int64) float64 {
-	h := mix(uint64(x)*0x9E3779B97F4A7C15 ^ uint64(y)*0xC2B2AE3D27D4EB4F ^ uint64(z)*0x165667B19E3779F9)
-	return float64(h>>11) / (1 << 53)
-}
-
-func smoothStep(t float64) float64 { return t * t * (3 - 2*t) }
-
-// valueNoise is smooth noise from 0 to 1 in three dimensions: the third is
-// usually time, so a field changes without jumps.
-func valueNoise(x, y, z float64) float64 {
-	x0, y0, z0 := math.Floor(x), math.Floor(y), math.Floor(z)
-	fx, fy, fz := smoothStep(x-x0), smoothStep(y-y0), smoothStep(z-z0)
-	ix, iy, iz := int64(x0), int64(y0), int64(z0)
-	lerp := func(a, b, t float64) float64 { return a + (b-a)*t }
-	corner := func(dx, dy, dz int64) float64 { return hash01(ix+dx, iy+dy, iz+dz) }
-	bottom := lerp(lerp(corner(0, 0, 0), corner(1, 0, 0), fx), lerp(corner(0, 1, 0), corner(1, 1, 0), fx), fy)
-	top := lerp(lerp(corner(0, 0, 1), corner(1, 0, 1), fx), lerp(corner(0, 1, 1), corner(1, 1, 1), fx), fy)
-	return lerp(bottom, top, fz)
-}
-
-// fractalNoise adds three octaves of value noise, so a field has large
-// shapes with fine detail on them, as ink does.
-func fractalNoise(x, y, z float64) float64 {
-	return (4*valueNoise(x, y, z) + 2*valueNoise(2*x+17, 2*y+31, 2*z) + valueNoise(4*x+59, 4*y+7, 4*z)) / 7
+// paperColor is the background of the terminal: the one it reported, or an
+// estimate from its shade.
+func (t Theme) paperColor() rgb {
+	if t.paperKnown {
+		return t.paper
+	}
+	if t.shade == DarkBackground {
+		return rgb{27, 27, 27}
+	}
+	return rgb{255, 255, 255}
 }

@@ -21,13 +21,13 @@ const (
 )
 
 // Document holds untrusted text. View removes terminal controls before display.
-// Drop, when set, is the styled ink drop that opens the document's tab, as
+// Mark, when set, is the styled step mark that opens the document's tab, as
 // the step that the document shows opened its row in the transcript.
 type Document struct {
 	Title  string
 	Text   string
 	Format DocumentFormat
-	Drop   string
+	Mark   string
 }
 
 type documentRow struct {
@@ -254,10 +254,10 @@ const tabLabelWidth = 28
 func (s *Screen) viewTabsLocked(width int) string {
 	view := s.view
 	labels := view.labels
-	// A tab is its drop, a space, and its label.
+	// A tab is its mark, a space, and its label.
 	tabWidth := func(index int) int {
 		cells := cellWidth(labels[index])
-		if view.documents[index].Drop != "" {
+		if view.documents[index].Mark != "" {
 			cells += 2
 		}
 		return cells
@@ -289,10 +289,10 @@ func (s *Screen) viewTabsLocked(width int) string {
 		if index > first {
 			row.WriteString("  ")
 		}
-		// A drop is a cell of its own before the label, so the label widths
+		// A mark is a cell of its own before the label, so the label widths
 		// that placed the tabs stay true.
-		if drop := view.documents[index].Drop; drop != "" {
-			row.WriteString(drop + " ")
+		if mark := view.documents[index].Mark; mark != "" {
+			row.WriteString(mark + " ")
 		}
 		if index == view.selected {
 			row.WriteString(s.theme.Bold(s.theme.Ink(labels[index])))

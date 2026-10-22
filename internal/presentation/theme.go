@@ -151,9 +151,9 @@ var (
 	// The diff tints are the brand green and red at a low share of the page.
 	addedTint   = shaded{dark: rgb{18, 46, 37}, light: rgb{226, 245, 236}}
 	removedTint = shaded{dark: rgb{58, 28, 25}, light: rgb{252, 230, 226}}
-	// The shapes of the mark keep their brand colors on both shades; only the
-	// blot follows the ink.
-	markGreen, markBlue, markRed = rgb{14, 153, 114}, rgb{1, 85, 191}, rgb{239, 64, 44}
+	// shaftRed is the Futurist red of the lift shaft in the opening city, the
+	// brand red on both shades, so the one machine of the city stands out.
+	shaftRed = rgb{239, 64, 44}
 )
 
 // Theme holds the escape sequences of each role for one color depth, shade,

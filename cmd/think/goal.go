@@ -44,7 +44,7 @@ func (g *goal) next(ctx context.Context, workDir string, output io.Writer, theme
 		return goalGiveUp, "", err
 	}
 	if result.Passed {
-		fmt.Fprintln(output, "  "+theme.Green("●")+" goal met: "+presentation.Safe(g.command))
+		fmt.Fprintln(output, "  "+theme.Green("▶")+" goal met: "+presentation.Safe(g.command))
 		*g = goal{}
 		return goalMet, "", nil
 	}
@@ -54,7 +54,7 @@ func (g *goal) next(ctx context.Context, workDir string, output io.Writer, theme
 		return goalGiveUp, "", nil
 	}
 	g.rounds++
-	fmt.Fprintf(output, "  %s goal check failed (%s); round %d of %d\n", theme.Amber("●"), result.Status, g.rounds, maxGoalRounds)
+	fmt.Fprintf(output, "  %s goal check failed (%s); round %d of %d\n", theme.Amber("▶"), result.Status, g.rounds, maxGoalRounds)
 	return goalContinue, goalPrompt(g.command, result), nil
 }
 

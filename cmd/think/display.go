@@ -358,7 +358,7 @@ func (c *consoleObserver) printToolRail(step presentation.ToolStep, result tools
 	for index, line := range lines {
 		rail := "│"
 		if index == len(lines)-1 {
-			rail = "╰"
+			rail = "└"
 		}
 		if c.chat && !result.IsError {
 			line = c.theme.Graphite(line)
@@ -556,7 +556,7 @@ func latestToolDocuments(messages []anthropic.EncodedMessage, theme presentation
 					Title:  view.Title,
 					Text:   view.Details + "\n\nResult\n" + typed.Content,
 					Format: terminal.PlainDocument,
-					Drop:   theme.Drop(presentation.KindOf(name, typed.IsError)),
+					Mark:   theme.StepMark(presentation.KindOf(name, typed.IsError)),
 				})
 			}
 		}

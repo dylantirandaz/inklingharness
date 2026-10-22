@@ -59,7 +59,7 @@ type Screen struct {
 	request *presentation.ApprovalRequest
 	// choiceSince is when the current approval appeared; see choiceGrace.
 	choiceSince time.Time
-	// box is true while the live area draws its input inside a rounded bar;
+	// box is true while the live area draws its input inside a framed bar;
 	// the input then wraps four cells narrower.
 	box bool
 	// soft is true while the screen draws the gallery: the key hints sit in
@@ -408,19 +408,19 @@ const boxWidth = 12
 // cardPaddingCells is the width of the margin inside a card, on each side.
 const cardPaddingCells = 2
 
-// boxed draws rows inside a rounded card of width cells. The title sits in
+// boxed draws rows inside a thin square card of width cells. The title sits in
 // the top border and foot in the bottom one. Rows must already fit width-4
 // cells.
 func (s *Screen) boxed(rows []string, width int, border func(string) string, title, foot string) []string {
 	inner := width - 4
 	out := make([]string, 0, len(rows)+2)
-	out = append(out, s.borderRow("╭", "╮", title, inner, width, border))
+	out = append(out, s.borderRow("┌", "┐", title, inner, width, border))
 	left, right := border("│")+" ", " "+border("│")
 	for _, row := range rows {
 		pad := max(inner-cellWidth(withoutStyles(row)), 0)
 		out = append(out, left+row+strings.Repeat(" ", pad)+right)
 	}
-	return append(out, s.borderRow("╰", "╯", foot, inner, width, border))
+	return append(out, s.borderRow("└", "┘", foot, inner, width, border))
 }
 
 // borderRow draws one horizontal card edge with an optional label after the
@@ -548,7 +548,7 @@ func (s *Screen) layoutLocked() {
 	marker := s.mode != modeChoice && width >= 4
 	var bodyRows []string
 	editRow, editCol, start := 0, 0, 0
-	// The composer sits in a rounded bar when there is room for its two
+	// The composer sits in a framed bar when there is room for its two
 	// borders and the status bar; otherwise a hairline or nothing separates
 	// it. The bar decides the footer, so it comes first.
 	box := width >= boxWidth && rows >= 4
@@ -719,8 +719,8 @@ func (s *Screen) layoutLocked() {
 	case s.mode == modeChoice:
 		s.frame = append(s.frame, s.boxed(live, width, s.theme.Amber, s.theme.Amber("Approval needed"), s.theme.Graphite(foot))...)
 	case s.soft:
-		// The composer is a rounded box whose edge fades from plum to blue:
-		// the one surface that takes input.
+		// The composer is a heavy frame whose edge is a line of force: the
+		// one surface that takes input.
 		s.frame = append(s.frame, s.theme.GradientBox(live, width)...)
 	default:
 		s.frame = append(s.frame, s.boxed(live, width, s.theme.Hairline, "", s.theme.Graphite(foot))...)
@@ -763,40 +763,36 @@ func visibleRows(rows []string, limit, width int) []string {
 	return rows
 }
 
-// dropFrames is the activity mark while the agent works: a drop of ink that
-// forms, swells, and falls, then forms again, in the column of the step
-// drops, so the working row is the next step that has not landed yet.
-var dropFrames = [...]string{"·", "∙", "•", "●", "●", "•", "∙", " "}
-
-// activityLocked is the working row: the forming drop in the color of the
-// model, the status in ink, the seconds in gray, and at the right end the
-// trace of the turn. Without motion the drop is still.
+// activityLocked is the working row: the train of wedges, whose last wedge
+// stands in the column of the step marks, so the row reads as the next step
+// on its way; then the status in ink, the seconds in gray, and at the right
+// end the trace of the turn. Without motion the train is still. Without a
+// tint the train is one wedge at the start of the row.
 func (s *Screen) activityLocked() string {
 	now := time.Now()
 	if s.status == "" {
 		return s.theme.Graphite("·")
 	}
-	mark := "●"
+	phase := 2
 	if s.effects.motion {
-		mark = dropFrames[s.tickLocked(now)%len(dropFrames)]
+		phase = s.tickLocked(now)
 	}
-	mark = s.theme.Accent(mark)
-	row := mark + " " + s.theme.Ink(s.status)
+	row := s.theme.WorkingTrain(phase) + " " + s.theme.Ink(s.status)
 	if !s.activitySince.IsZero() {
 		row += s.theme.Graphite(" · " + strconv.Itoa(int(now.Sub(s.activitySince).Seconds())) + "s")
 	}
 	if !s.theme.Soft() {
 		return row
 	}
-	used := 2 + cellWidth(withoutStyles(row)) + 3
+	used := cellWidth(withoutStyles(row)) + 3
 	room := max(max(s.cols-1, 2)-used, 0)
 	trace := s.traceLocked(now, room)
 	if trace == "" {
-		return "  " + row
+		return row
 	}
 	// The trace sits at the right end of the row, as the display of an
 	// instrument, so it keeps its place while the label changes.
-	return "  " + row + strings.Repeat(" ", 3+room-traceColumns) + trace
+	return row + strings.Repeat(" ", 3+room-traceColumns) + trace
 }
 
 // traceColumns is the width of the trace: about five seconds of the stream,
