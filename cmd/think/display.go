@@ -258,7 +258,7 @@ func (c *consoleObserver) ToolCall(name string, input json.RawMessage) {
 	title = presentation.TrimProject(c.project, title)
 	c.pending = append(c.pending, pendingTool{name: name, title: title, input: input})
 	if c.screen != nil {
-		c.screen.SetToolStatus(title)
+		c.screen.SetStatus(title)
 	}
 	if c.verbose {
 		fmt.Fprintf(c.stderr, "\n[tool %s] %s\n", presentation.Safe(name), presentation.Safe(string(input)))

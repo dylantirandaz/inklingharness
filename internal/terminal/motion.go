@@ -57,8 +57,6 @@ type effects struct {
 	previewPrefix, previewBody string
 	wet                        []wetRun
 
-	toolRunning bool
-
 	use       presentation.ContextUse
 	haveUse   bool
 	gaugeFrom float64

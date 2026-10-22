@@ -201,7 +201,7 @@ func (approval *approvals) check(ctx context.Context, call anthropic.ToolUseBloc
 		if err != nil {
 			return false, err
 		}
-		approval.screen.SetToolStatus(presentation.Safe(view.Title))
+		approval.screen.SetStatus(presentation.Safe(view.Title))
 		outcome := func(text string, style func(string) string) {
 			if shown || approval.theme.Soft() {
 				fmt.Fprintln(approval.output, "  "+approval.theme.Graphite("· ")+style(text))

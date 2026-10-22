@@ -763,30 +763,27 @@ func visibleRows(rows []string, limit, width int) []string {
 	return rows
 }
 
-// spinnerFrames is the activity mark while the agent works.
-var spinnerFrames = [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+// dropFrames is the activity mark while the agent works: a drop of ink that
+// forms, swells, and falls, then forms again, in the column of the step
+// drops, so the working row is the next step that has not landed yet.
+var dropFrames = [...]string{"·", "∙", "•", "●", "●", "•", "∙", " "}
 
-// activityLocked keeps the status ahead of the activity mark: a spinner in
-// the model color while the agent works, amber while a tool runs. With a tint
-// a hairline carries the row, so that working looks like part of the frame
-// that holds the composer, and not a line of text above it.
+// activityLocked is the working row: the forming drop in the color of the
+// model, the status in ink, the seconds in gray, and at the right end the
+// trace of the turn. Without motion the drop is still.
 func (s *Screen) activityLocked() string {
 	now := time.Now()
 	if s.status == "" {
 		return s.theme.Graphite("·")
 	}
-	mark := "·"
+	mark := "●"
 	if s.effects.motion {
-		mark = spinnerFrames[(s.tickLocked(now)/2)%len(spinnerFrames)]
+		mark = dropFrames[s.tickLocked(now)%len(dropFrames)]
 	}
-	if s.effects.toolRunning {
-		mark = s.theme.Amber(mark)
-	} else {
-		mark = s.theme.Accent(mark)
-	}
-	row := mark + "  " + s.theme.Ink(s.status)
+	mark = s.theme.Accent(mark)
+	row := mark + " " + s.theme.Ink(s.status)
 	if !s.activitySince.IsZero() {
-		row += s.theme.Graphite("   " + strconv.Itoa(int(now.Sub(s.activitySince).Seconds())) + "s")
+		row += s.theme.Graphite(" · " + strconv.Itoa(int(now.Sub(s.activitySince).Seconds())) + "s")
 	}
 	if !s.theme.Soft() {
 		return row
@@ -1216,24 +1213,10 @@ func (s *Screen) Notify(text string) {
 func (s *Screen) SetStatus(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.setStatusLocked(text, false)
-}
-
-// SetToolStatus shows a running tool with the model accent.
-func (s *Screen) SetToolStatus(text string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.setStatusLocked(text, true)
-}
-
-func (s *Screen) setStatusLocked(text string, tool bool) {
-	if text == s.status && tool == s.effects.toolRunning {
+	if text == s.status {
 		return
 	}
-	if text != s.status {
-		s.activitySince = time.Now()
-	}
-	s.effects.toolRunning = tool
+	s.activitySince = time.Now()
 	s.status = text
 	s.layoutDirty = true
 	s.drawLocked()

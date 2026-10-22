@@ -636,18 +636,19 @@ func TestSoftFooterLeavesOutThePlaceOnShortScreens(t *testing.T) {
 	}
 }
 
-// The working row leads with the mark, the status, and the seconds. With
-// motion the trace sits at its right end, so the row spans the live width;
-// without motion nothing follows the seconds.
+// The working row is the next step that has not landed: a drop in the column
+// of the step drops, the status, and the seconds. With motion the trace sits
+// at its right end, so the row spans the live width; without motion the drop
+// is still and nothing follows the seconds.
 func TestWorkingStatusLeadsTheRow(t *testing.T) {
 	s := softScreen(t, modeBusy, 24, 100)
 	s.status, s.activitySince = "Writing reply", time.Now().Add(-3*time.Second)
-	if row := withoutStyles(s.activityLocked()); row != "  ·  Writing reply   3s" {
+	if row := withoutStyles(s.activityLocked()); row != "  ● Writing reply · 3s" {
 		t.Fatalf("still working row = %q", row)
 	}
 	s.effects.motion, s.effects.epoch = true, time.Now()
 	row := withoutStyles(s.activityLocked())
-	if !strings.HasPrefix(row, "  ") || !strings.Contains(row, "Writing reply   3s") || !strings.HasSuffix(row, "─") || cellWidth(row) != s.cols-1 {
+	if !strings.HasPrefix(row, "  ") || !strings.Contains(row, " Writing reply · 3s") || !strings.HasSuffix(row, "─") || cellWidth(row) != s.cols-1 {
 		t.Fatalf("working row = %q (%d cells)", row, cellWidth(row))
 	}
 }
