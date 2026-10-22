@@ -10,10 +10,10 @@ const traceFrame = 33 * time.Millisecond
 
 func traceTheme() Theme { return NewTheme(TrueColor, DarkBackground, AccentPlum).OnPaper(20, 22, 26) }
 
-// barCells is the number of cells of a drawn trace that hold a tick: a
-// stroke of the stream or the wedge of a step.
+// barCells is the number of cells of a drawn trace that hold a mark: a
+// stroke of the speed line or the wedge of a step.
 func barCells(row string) int {
-	return strings.Count(row, "╱") + strings.Count(row, "▶")
+	return strings.Count(row, "━") + strings.Count(row, "▶")
 }
 
 // The trace keeps its width, and without intermediate colors it is a plain
@@ -55,11 +55,11 @@ func TestTraceShowsSilenceAsAnEmptyStretch(t *testing.T) {
 func TestTraceHeadMovesInSilence(t *testing.T) {
 	theme := traceTheme()
 	trace := NewTrace(48)
-	first := strings.Index(Safe(trace.Draw(theme)), "╸")
+	first := strings.Index(Safe(trace.Draw(theme)), "●")
 	for range 10 {
 		trace.Step(traceFrame)
 	}
-	if later := strings.Index(Safe(trace.Draw(theme)), "╸"); later <= first {
+	if later := strings.Index(Safe(trace.Draw(theme)), "●"); later <= first {
 		t.Fatalf("the head stayed at %d after a third of a second (was %d)", later, first)
 	}
 }

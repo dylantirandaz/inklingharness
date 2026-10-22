@@ -39,14 +39,14 @@ func TraceOf(kind StepKind) TraceMark {
 	panic("presentation: unknown step kind")
 }
 
-// Trace records the stream of a turn as a ticker tape, on one row of cells.
+// Trace records the stream of a turn as a speed line, on one row of cells.
 // A write head moves across at a constant pace and wraps at the end, erasing
 // a short gap ahead of itself. Every slice of time in which a piece of the
-// stream arrived gets a fine tick on the hairline, so the rhythm of the model
-// is the pattern: dense while tokens pour in, open while it waits. A tool is
-// a taller tick in the model color, and only a failure is red. Ticks fade
-// toward the hairline as the head moves away from them. Nothing is filled,
-// and nothing moves but the head.
+// stream arrived gets a heavy stroke on the hairline, so the rhythm of the
+// model is the pattern: one fast line while tokens pour in, open hairline
+// while it waits. A finished step leaves a wedge in the color of its mark.
+// Marks fade toward the hairline as the head moves away from them. Nothing
+// moves but the head.
 type Trace struct {
 	cells []traceCell
 	// head is the position of the write head, in cells, from 0 to the width.
@@ -113,10 +113,10 @@ func (t *Trace) Step(elapsed time.Duration) {
 	}
 }
 
-// Draw paints the trace as one row in theme. The head is a short bright tick
-// at the leading edge, just ahead of the cell that it writes, so the newest
-// mark shows at once and the trace moves while the model is silent. Below 256
-// colors it is the hairline.
+// Draw paints the trace as one row in theme. The head is a bright point at
+// the leading edge, just ahead of the cell that it writes, so the newest
+// mark shows at once and the line moves while the model is silent. Below
+// 256 colors it is the hairline.
 func (t *Trace) Draw(theme Theme) string {
 	if !theme.Blends() {
 		return theme.Hairline(strings.Repeat("─", len(t.cells)))
@@ -131,15 +131,17 @@ func (t *Trace) Draw(theme Theme) string {
 		color, glyph := hairline, "─"
 		switch {
 		case index == head:
-			color, glyph = accents[theme.accent].color.on(theme.shade), "╸"
+			color, glyph = accents[theme.accent].color.on(theme.shade), "●"
 		case cell.marked:
-			// The stream leaves slanted strokes, lines of force along the
-			// tape; a finished step leaves the wedge of its mark.
-			glyph = "╱"
+			// The stream is a speed line: a heavy stroke where pieces of the
+			// stream arrived, so a run of them reads as one fast line, as
+			// Balla drew motion. A finished step leaves the wedge of its
+			// mark on the line.
+			glyph = "━"
 			if cell.mark >= TraceRead {
 				glyph = "▶"
 			}
-			// A tick keeps its tone for a third of the sweep, then fades in
+			// A mark keeps its tone for a third of the sweep, then fades in
 			// a few steps, so neighbors share a color and a frame stays small.
 			fade := min(max((cell.age/span-0.33)/0.67, 0), 1)
 			color = blend(theme.traceColor(cell.mark), hairline, 0.85*math.Round(fade*traceFadeSteps)/traceFadeSteps)
