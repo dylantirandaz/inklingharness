@@ -333,7 +333,7 @@ func (c *consoleObserver) printToolRail(step presentation.ToolStep, result tools
 	}
 	var completion string
 	if c.chat {
-		completion = presentation.ToolRow(step.Title, result.IsError, step.Elapsed, c.theme)
+		completion = presentation.ToolRow(presentation.KindOf(step.Name, result.IsError), step.Title, step.Elapsed, c.theme)
 	} else {
 		completion = presentation.ToolCompletion(step.Title, result.IsError, c.theme)
 	}

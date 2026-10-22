@@ -350,13 +350,15 @@ var pastTense = map[string]string{
 	"Remember": "Remembered", "Ask": "Asked",
 }
 
-// ToolRow records a finished tool in the conversation: a green dot or a red
-// cross, the verb in bold (past tense once it succeeded), the target, and a quiet
-// duration. The glyphs differ so the outcome does not depend on color.
-func ToolRow(title string, failed bool, elapsed time.Duration, theme Theme) string {
-	dot := theme.Green("●")
-	if failed {
-		dot = theme.Red("✕")
+// ToolRow records a finished tool in the conversation: the drop of its kind,
+// as in the art, or a red cross for a failure, then the verb in bold (past
+// tense once it succeeded), the target, and the time when it is a second or
+// more. A failure has its own glyph, so the outcome does not depend on color.
+func ToolRow(kind StepKind, title string, elapsed time.Duration, theme Theme) string {
+	failed := kind == StepFailed
+	dot := theme.Red("✕")
+	if !failed {
+		dot = theme.Drop(kind)
 	}
 	verb, target, _ := strings.Cut(singleLine(title), " ")
 	if past, found := pastTense[verb]; found && !failed {
@@ -366,7 +368,7 @@ func ToolRow(title string, failed bool, elapsed time.Duration, theme Theme) stri
 	if target != "" {
 		line += " " + target
 	}
-	if elapsed >= time.Millisecond {
+	if elapsed >= time.Second {
 		line += "  " + theme.Graphite(ShortDuration(elapsed))
 	}
 	return line

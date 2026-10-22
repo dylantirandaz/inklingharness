@@ -79,7 +79,7 @@ var chatKeys = [...]struct{ key, action string }{
 // like the menu it explains.
 func chatHelp(extensionHelp string, theme presentation.Theme) string {
 	var out strings.Builder
-	out.WriteString("\n  " + theme.Bold(theme.Ink("Commands")) + "\n")
+	out.WriteString("  " + theme.Bold(theme.Ink("Commands")) + "\n")
 	for _, command := range chatCommandTable {
 		usage := fmt.Sprintf("/%-17s", command.Usage)
 		fmt.Fprintf(&out, "  %s %s\n", theme.Accent(usage), theme.Graphite(command.Description))
@@ -89,6 +89,7 @@ func chatHelp(extensionHelp string, theme presentation.Theme) string {
 	for _, entry := range chatKeys {
 		fmt.Fprintf(&out, "  %s %s\n", theme.Ink(fmt.Sprintf("%-18s", entry.key)), theme.Graphite(entry.action))
 	}
+	// The row of air that ends the block, as after a card.
 	return out.String() + "\n"
 }
 

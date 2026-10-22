@@ -77,15 +77,18 @@ func NewApprovalRequest(name string, view ToolView) ApprovalRequest {
 	return request
 }
 
-// ApprovalRows draws request in width cells: a row of air, then a rounded
-// box with the action in bold, the work, and the caption in gray. The edge
-// fades from plum to blue; below 256 colors it is a gray line. With air
-// blank rows inside the box set the work apart. A long line of the work
-// wraps; it is never cut, because the user approves what they see.
+// ApprovalRows draws request in width cells. With 256 colors or more it is a
+// row of air, then a rounded box whose edge fades from plum to blue, holding
+// the action in bold, the work, and the caption in gray. Below 256 colors the
+// screen draws its own amber box around the request, so the rows are the
+// same content without a second frame. With air blank rows set the work
+// apart. A long line of the work wraps; it is never cut, because the user
+// approves what they see.
 func (t Theme) ApprovalRows(request ApprovalRequest, width int, air bool) []string {
-	margin := strings.Repeat(" ", approvalMargin)
-	outer := max(width-approvalMargin, 16)
-	inside := outer - 4
+	inside := max(width-approvalMargin, 16) - 4
+	if !t.Soft() {
+		inside = max(width, 12)
+	}
 	content := []string{t.Bold(t.Ink(Ellipsize(request.Title, inside)))}
 	if air {
 		content = append(content, "")
@@ -93,7 +96,7 @@ func (t Theme) ApprovalRows(request ApprovalRequest, width int, air bool) []stri
 	for _, line := range request.Work {
 		for _, piece := range wrapCells(expandTabs(line.Text), inside-2) {
 			// A changed line fills the box, so its tint is a clean band.
-			if line.Kind != WorkPlain {
+			if line.Kind != WorkPlain && t.Soft() {
 				piece += strings.Repeat(" ", max(inside-2-CellWidth(piece), 0))
 			}
 			content = append(content, "  "+t.workText(line.Kind, piece))
@@ -106,11 +109,11 @@ func (t Theme) ApprovalRows(request ApprovalRequest, width int, air bool) []stri
 	for _, piece := range wrapWords(request.Caption, inside) {
 		content = append(content, t.Graphite(piece))
 	}
-	// A gradient needs 256 colors; below that the edge is a plain line.
-	box := t.roundedFrame(content, outer)
-	if t.Soft() {
-		box = t.GradientBox(content, outer)
+	if !t.Soft() {
+		return content
 	}
+	margin := strings.Repeat(" ", approvalMargin)
+	box := t.GradientBox(content, inside+4)
 	rows := make([]string, 0, len(box)+1)
 	rows = append(rows, "")
 	for _, row := range box {

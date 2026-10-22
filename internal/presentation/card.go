@@ -17,21 +17,23 @@ const CardInset = cardPadding + 1
 // tint cannot be expressed, and the plain renderers take over.
 func (t Theme) Soft() bool { return t.chip != "" }
 
-// Card sets rows in a thin frame of width cells, as a piece hangs in a
-// gallery: a line around the text and air inside it, with no fill, so the
-// page shows through. Rows must fit width-2*CardInset cells; a wider row is
-// not cut.
+// Card sets rows in a thin rounded frame of width cells: a gray line around
+// the text and air inside it, with no fill, so the page shows through. Every
+// box of the chat is rounded; a box that waits for the user, such as the
+// composer or an approval, takes the gradient edge of GradientBox, and a box
+// that the user only reads takes this gray one. Rows must fit
+// width-2*CardInset cells; a wider row is not cut.
 func (t Theme) Card(rows []string, width int) []string {
 	inner := max(width-2, 0)
 	edge := strings.Repeat("─", inner)
 	side, air := t.Frame("│"), strings.Repeat(" ", cardPadding)
 	out := make([]string, 0, len(rows)+2)
-	out = append(out, t.Frame("┌"+edge+"┐"))
+	out = append(out, t.Frame("╭"+edge+"╮"))
 	for _, row := range rows {
 		gap := max(inner-2*cardPadding-visibleWidth(row), 0)
 		out = append(out, side+air+row+strings.Repeat(" ", gap)+air+side)
 	}
-	return append(out, t.Frame("└"+edge+"┘"))
+	return append(out, t.Frame("╰"+edge+"╯"))
 }
 
 // visibleWidth is the number of cells that a styled row takes on screen.
@@ -82,18 +84,4 @@ func (t Theme) edgeRow(open, close string, width int) string {
 func (t Theme) edgeColor(column, width int) rgb {
 	share := float64(column) / float64(max(width-1, 1))
 	return blend(plum.on(t.shade), blue.on(t.shade), math.Round(share*edgeSteps)/edgeSteps)
-}
-
-// roundedFrame is the gradient box for a terminal without 256 colors: the
-// same shape with a plain gray edge.
-func (t Theme) roundedFrame(rows []string, width int) []string {
-	inner := max(width-4, 0)
-	edge := strings.Repeat("─", max(width-2, 0))
-	side := t.Frame("│")
-	out := make([]string, 0, len(rows)+2)
-	out = append(out, t.Frame("╭"+edge+"╮"))
-	for _, row := range rows {
-		out = append(out, side+" "+row+strings.Repeat(" ", max(inner-visibleWidth(row), 0))+" "+side)
-	}
-	return append(out, t.Frame("╰"+edge+"╯"))
 }

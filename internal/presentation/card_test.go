@@ -22,11 +22,11 @@ func TestCardFramesEveryRowAtTheWidth(t *testing.T) {
 		first, last := []rune(plain)[0], []rune(plain)[len([]rune(plain))-1]
 		switch index {
 		case 0:
-			if first != '┌' || last != '┐' {
+			if first != '╭' || last != '╮' {
 				t.Fatalf("top edge = %q", plain)
 			}
 		case len(rows) - 1:
-			if first != '└' || last != '┘' {
+			if first != '╰' || last != '╯' {
 				t.Fatalf("bottom edge = %q", plain)
 			}
 		default:

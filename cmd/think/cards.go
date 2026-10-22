@@ -37,10 +37,10 @@ func cardFits(theme presentation.Theme, screenWidth int) bool {
 	return theme.Soft() && cardWidth(screenWidth) >= minCardWidth
 }
 
-// printCard writes rows on a card, indented like the reply text and set off
-// by a blank line on each side.
+// printCard writes rows on a card, indented like the reply text, and the row
+// of air that ends it. The block above already ends with its own air, so the
+// card adds none before it.
 func printCard(output io.Writer, theme presentation.Theme, screenWidth int, rows []string) {
-	fmt.Fprintln(output)
 	for _, row := range theme.Card(rows, cardWidth(screenWidth)) {
 		fmt.Fprintln(output, "  "+row)
 	}
