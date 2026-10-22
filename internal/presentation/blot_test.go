@@ -1,6 +1,7 @@
 package presentation
 
 import (
+	"math"
 	"reflect"
 	"testing"
 )
@@ -74,31 +75,27 @@ func TestBlotSeedZeroIsSeedOne(t *testing.T) {
 	}
 }
 
-// The reveal only adds ink: a quadrant that has appeared stays, so a frame
-// never shows less than the one before it.
-func TestBlotRevealOnlyAddsInk(t *testing.T) {
+// The spread only adds ink: the front of each layer never moves back, so a
+// frame never shows less than the one before it. At the end the water has
+// reached every pixel of every shape, and the ink is dry.
+func TestBlotSpreadOnlyAddsInkAndEndsDry(t *testing.T) {
 	picture := NewBlotPicture(NewBlot(BlotSeeds[0]), 40, 12)
-	previous := 0
-	for step := 0; step <= 20; step++ {
-		progress := float64(step) / 20
-		shown := 0
-		for index, layer := range picture.layer {
-			if layer != 0 && progress > float64(picture.reveal[index]) {
-				shown++
+	for layer := range blotLayers {
+		previous := math.Inf(-1)
+		for step := 0; step <= 40; step++ {
+			front, _ := blotSpread(layer, float64(step)/40)
+			if front < previous {
+				t.Fatalf("layer %d: the front moves back from %.3f to %.3f at step %d", layer, previous, front, step)
+			}
+			previous = front
+		}
+		for index, share := range picture.coverage[layer] {
+			if share > 0 && float64(picture.arrival[layer][index]) > previous {
+				t.Fatalf("layer %d: pixel %d of the shape is never reached", layer, index)
 			}
 		}
-		if shown < previous {
-			t.Fatalf("progress %.2f shows %d quadrants after %d", progress, shown, previous)
+		if _, wet := blotSpread(layer, 1); wet != 0 {
+			t.Fatalf("layer %d is still wet at the end: %.3f", layer, wet)
 		}
-		previous = shown
-	}
-	complete := 0
-	for _, layer := range picture.layer {
-		if layer != 0 {
-			complete++
-		}
-	}
-	if previous != complete {
-		t.Fatalf("the reveal ends with %d of %d quadrants", previous, complete)
 	}
 }

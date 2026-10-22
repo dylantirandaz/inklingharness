@@ -13,7 +13,12 @@ import (
 
 func bodyBytes(t *testing.T, request Request) []byte {
 	t.Helper()
-	body, err := request.body()
+	return encodedBytes(t, new(Client), request)
+}
+
+func encodedBytes(t *testing.T, client *Client, request Request) []byte {
+	t.Helper()
+	body, err := client.encode(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,6 +27,47 @@ func bodyBytes(t *testing.T, request Request) []byte {
 		t.Fatalf("body size = %d, joined length = %d", body.size, len(joined))
 	}
 	return joined
+}
+
+// One client reuses the encoded tail of the last request. Each change of a
+// field that the tail holds, also a change in place of a caller's slice or
+// map, must give the bytes of a new encoding.
+func TestRequestTailCacheFollowsEveryChange(t *testing.T) {
+	client := new(Client)
+	request := Request{
+		Model: "m", MaxTokens: 9, System: "system", Messages: mustEncode(t, Message{Role: RoleUser, Content: []ContentBlock{TextBlock{Text: "hi"}}}),
+		Tools: []ToolDefinition{{Name: "read", Description: "read a file", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		Extra: map[string]json.RawMessage{"output_config": json.RawMessage(`{"effort":"high"}`)},
+	}
+	changes := []struct {
+		name   string
+		change func()
+	}{
+		{"same request", func() {}},
+		{"new turn", func() {
+			request.Messages = append(request.Messages, mustEncode(t, Message{Role: RoleAssistant, Content: []ContentBlock{TextBlock{Text: "yes"}}})...)
+		}},
+		{"system", func() { request.System = "other system" }},
+		{"tool description in place", func() { request.Tools[0].Description = "read one file" }},
+		{"tool schema bytes in place", func() { request.Tools[0].InputSchema[2] = 'T' }},
+		{"another tool", func() {
+			request.Tools = append(request.Tools, ToolDefinition{Name: "grep", InputSchema: json.RawMessage(`{}`)})
+		}},
+		{"thinking", func() { request.Thinking = json.RawMessage(`{"type":"disabled"}`) }},
+		{"extra value in place", func() { request.Extra["output_config"] = json.RawMessage(`{"effort":"low"}`) }},
+		{"no extra", func() { request.Extra = nil }},
+		{"model", func() { request.Model = "other" }},
+	}
+	for _, change := range changes {
+		change.change()
+		if got, want := encodedBytes(t, client, request), bodyBytes(t, request); !bytes.Equal(got, want) {
+			t.Fatalf("%s: cached body differs from a new encoding:\n got %s\nwant %s", change.name, got, want)
+		}
+	}
+	request.Extra = map[string]json.RawMessage{"tools": json.RawMessage(`null`)}
+	if _, err := client.encode(request); err == nil {
+		t.Fatal("a cached tail hid an extra field collision")
+	}
 }
 
 func TestRequestBodyPreservesTypedAndExtraFields(t *testing.T) {
@@ -94,7 +140,7 @@ func TestRequestBodyMatchesOneJSONEncoding(t *testing.T) {
 		t.Fatalf("segmented body differs from one encoding:\n got %s\nwant %s", got, want)
 	}
 	request.Messages = append(request.Messages, EncodedMessage{})
-	if _, err := request.body(); err == nil {
+	if _, err := new(Client).encode(request); err == nil {
 		t.Fatal("zero encoded message was sent")
 	}
 }
@@ -127,7 +173,7 @@ func TestRequestBodyReservesEveryManagedField(t *testing.T) {
 				{Model: "m", MaxTokens: 1, System: "system", Messages: mustEncode(t, Message{Role: RoleUser}), Tools: []ToolDefinition{{Name: "read"}}, Thinking: json.RawMessage(`{"type":"disabled"}`)},
 			} {
 				request.Extra = map[string]json.RawMessage{key: json.RawMessage(`null`)}
-				if _, err := request.body(); err == nil || !strings.Contains(err.Error(), "collides") {
+				if _, err := new(Client).encode(request); err == nil || !strings.Contains(err.Error(), "collides") {
 					t.Errorf("managed field %q must reject extra collision: %v", key, err)
 				}
 			}

@@ -11,20 +11,19 @@ func stepRows(t *testing.T, step ToolStep, width int) []string {
 	t.Helper()
 	theme := NewTheme(TrueColor, LightBackground, AccentPlum)
 	card := theme.ToolCard(step, width)
-	if len(card) < 3 {
-		t.Fatalf("a card needs two edges and a title, got %d rows", len(card))
+	if len(card) == 0 {
+		t.Fatal("a step needs a title row")
 	}
-	// The first and last rows are the edges of the card.
-	rows := make([]string, 0, len(card)-2)
-	for _, row := range card[1 : len(card)-1] {
+	rows := make([]string, 0, len(card))
+	for _, row := range card {
 		rows = append(rows, Safe(row))
 	}
 	return rows
 }
 
-// Every row of a card, whatever its content, is as wide as the card, so the
-// tint reaches the same edge on all of them and no row wraps.
-func TestToolCardRowsFillTheWidth(t *testing.T) {
+// No row of a step, whatever its content, is wider than the step, so no row
+// wraps.
+func TestToolCardRowsFitTheWidth(t *testing.T) {
 	long := strings.Repeat("a long target ", 20)
 	for _, width := range []int{24, 40, 80, 120} {
 		for _, step := range []ToolStep{
@@ -34,7 +33,7 @@ func TestToolCardRowsFillTheWidth(t *testing.T) {
 			{Name: "edit_file", Title: "Edit a.go", Input: json.RawMessage(`{"path":"a.go","old_string":"x","new_string":"` + long + `"}`), Content: "edited a.go: now lines 4-4", Number: 2},
 		} {
 			for _, row := range stepRows(t, step, width) {
-				if cells := CellWidth(row); cells != width {
+				if cells := CellWidth(row); cells > width {
 					t.Fatalf("width %d, %s: row is %d cells: %q", width, step.Name, cells, row)
 				}
 			}
@@ -47,7 +46,7 @@ func TestToolCardRowsFillTheWidth(t *testing.T) {
 func TestToolCardTitleKeepsItsPartsWhenTheTargetIsLong(t *testing.T) {
 	rows := stepRows(t, ToolStep{Name: "read_file", Title: "Read " + strings.Repeat("deep/", 30) + "file.go", Content: "[end of file: 9 lines]", Elapsed: 12 * time.Millisecond, Number: 4}, 60)
 	title := rows[0]
-	for _, want := range []string{"✓", "Read", "…", "9 lines", "12ms", "#4"} {
+	for _, want := range []string{"●", "Read", "…", "9 lines", "12ms", "#4"} {
 		if !strings.Contains(title, want) {
 			t.Fatalf("title is missing %q: %q", want, title)
 		}
@@ -123,7 +122,7 @@ func TestToolCardOutputBudgets(t *testing.T) {
 		t.Fatalf("output of a step that worked: %q", worked)
 	}
 	failed := stepRows(t, ToolStep{Name: "bash", Title: "Run x", Content: output, Failed: true, Number: 2}, 80)
-	if len(failed) != 1+failureRowLimit || !strings.Contains(failed[0], "✗") {
+	if len(failed) != 1+failureRowLimit || !strings.Contains(failed[0], "● Run x") {
 		t.Fatalf("output of a step that failed: %q", failed)
 	}
 }
@@ -142,17 +141,27 @@ func TestToolCardNeedsATintAndRoom(t *testing.T) {
 	}
 }
 
-// The tint carries the outcome: the same step on a different tone is a
-// different card, and a failure is never drawn as a success.
-func TestToolCardTintFollowsTheOutcome(t *testing.T) {
+// A step's drop tells what the tool did: blue for a read, green for a
+// change, ink for a command, and red only for a failure, which also turns
+// the verb red.
+func TestToolCardDropTellsWhatTheToolDid(t *testing.T) {
 	theme := NewTheme(TrueColor, LightBackground, AccentPlum)
-	worked := strings.Join(theme.ToolCard(ToolStep{Name: "bash", Title: "Run x"}, 60), "")
-	failed := strings.Join(theme.ToolCard(ToolStep{Name: "bash", Title: "Run x", Failed: true}, 60), "")
-	if !strings.Contains(worked, theme.background(successTint.on(LightBackground))) || strings.Contains(worked, theme.background(failureTint.on(LightBackground))) {
-		t.Fatal("a step that worked is not on the success tint")
+	drop := func(step ToolStep) string { return strings.Join(theme.ToolCard(step, 60), "") }
+	for _, test := range []struct {
+		step ToolStep
+		role role
+	}{
+		{ToolStep{Name: "read_file", Title: "Read a.go"}, roleBlue},
+		{ToolStep{Name: "edit_file", Title: "Edit a.go"}, roleGreen},
+		{ToolStep{Name: "bash", Title: "Run x"}, roleInk},
+		{ToolStep{Name: "bash", Title: "Run x", Failed: true}, roleRed},
+	} {
+		if row := drop(test.step); !strings.HasPrefix(row, "  "+theme.sgr[test.role]+"●") {
+			t.Fatalf("%s failed %t: row = %q", test.step.Name, test.step.Failed, row)
+		}
 	}
-	if !strings.Contains(failed, theme.background(failureTint.on(LightBackground))) || strings.Contains(failed, theme.background(successTint.on(LightBackground))) {
-		t.Fatal("a step that failed is not on the failure tint")
+	if worked := drop(ToolStep{Name: "bash", Title: "Run x"}); strings.Contains(worked, theme.sgr[roleRed]) || !strings.Contains(Safe(worked), "● Ran x") {
+		t.Fatalf("a step that worked = %q", worked)
 	}
 }
 
@@ -173,43 +182,32 @@ func TestResultLinesMarkTheNotice(t *testing.T) {
 	}
 }
 
+// A prompt sits on a band with an edge of blue ink and a row of padding
+// above and below; the stamp ends two cells before the edge, and a stamp
+// that does not fit is left out.
 func TestUserCardHoldsTheStampAndWrappedRows(t *testing.T) {
 	theme := NewTheme(TrueColor, DarkBackground, AccentPlum)
 	card := theme.UserCard([]string{"first row", "second row"}, "23:09", 40)
-	if len(card) != 4 {
-		t.Fatalf("card has %d rows", len(card))
+	if len(card) != 4 || Safe(card[0]) != "▌" || Safe(card[3]) != "▌" {
+		t.Fatalf("band = %q", card)
 	}
-	plain := make([]string, len(card))
-	for index, row := range card {
-		plain[index] = Safe(row)
-		if cells := CellWidth(plain[index]); cells != 40 {
-			t.Fatalf("row %d is %d cells wide", index, cells)
+	for _, row := range card {
+		if !strings.HasPrefix(row, theme.chip+theme.sgr[roleBlue]+"▌") || !strings.Contains(row, "\x1b[K") {
+			t.Fatalf("a band row lacks the ink edge or the full-width tint: %q", row)
 		}
 	}
-	if !strings.Contains(plain[1], "› first row") || !strings.HasSuffix(strings.TrimRight(plain[1], " "), "23:09") {
-		t.Fatalf("first row = %q", plain[1])
+	first, second := Safe(card[1]), Safe(card[2])
+	if !strings.HasPrefix(first, "▌ first row") || !strings.HasSuffix(first, "23:09") || CellWidth(first) != 38 {
+		t.Fatalf("first row = %q", first)
 	}
-	if strings.Contains(plain[2], "23:09") || !strings.Contains(plain[2], "  second row") {
-		t.Fatalf("second row = %q", plain[2])
+	if second != "▌ second row" {
+		t.Fatalf("second row = %q", second)
 	}
-	// A stamp that does not fit leaves the row without it.
 	narrow := Safe(theme.UserCard([]string{"a prompt that fills the row"}, "23:09", 36)[1])
 	if strings.Contains(narrow, "23:09") {
 		t.Fatalf("a stamp that does not fit was drawn: %q", narrow)
 	}
 	if NewTheme(ANSI16, DarkBackground, AccentPlum).UserCard([]string{"x"}, "", 40) != nil {
-		t.Fatal("a card without a tint")
-	}
-}
-
-func TestTurnRuleCarriesTheSummaryAcrossTheWidth(t *testing.T) {
-	theme := NewTheme(TrueColor, LightBackground, AccentPlum)
-	summary := TurnSummaryText(5200*time.Millisecond, 4, 15600, 223)
-	rule := Safe(theme.TurnRule(summary, 80))
-	if CellWidth(rule) != 80 || !strings.Contains(rule, summary) || !strings.HasPrefix(rule, "── ") || !strings.HasSuffix(rule, "──") {
-		t.Fatalf("rule = %q", rule)
-	}
-	if plain := (Theme{}).TurnRule(summary, 80); plain != summary {
-		t.Fatalf("a rule without a tint = %q", plain)
+		t.Fatal("a band below 256 colors")
 	}
 }

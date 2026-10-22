@@ -1,0 +1,28 @@
+{
+  "job_name": "oracle-airgap-swe-bench",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 13,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "import_path": "evals.harbor_environment:NativeModalEnvironment",
+    "cpu_enforcement_policy": "guarantee",
+    "memory_enforcement_policy": "guarantee",
+    "kwargs": {
+      "app_name": "inkling-terminal-bench",
+      "modal_vm_runtime": true
+    }
+  },
+  "agents": [
+    {
+      "name": "oracle"
+    }
+  ],
+  "datasets": [
+    {
+      "path": "out/terminal-bench/swe-bench-airgap"
+    }
+  ]
+}

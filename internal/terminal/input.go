@@ -36,6 +36,11 @@ const (
 	keyWordDelete
 	keyHistoryPrevious
 	keyHistoryNext
+	// keyAltEnter sends the draft for later while the agent works; at a
+	// prompt it is Enter.
+	keyAltEnter
+	// keyAltUp moves the queued messages back into the editor.
+	keyAltUp
 )
 
 type key struct {
@@ -103,6 +108,8 @@ func (p *parser) feed(data []byte, now time.Time) []key {
 					kind = keyRight
 				case "\x1b[D", "\x1bOD":
 					kind = keyLeft
+				case "\x1b[1;3A":
+					kind = keyAltUp
 				case "\x1b[1;3D", "\x1b[1;5D":
 					kind = keyWordLeft
 				case "\x1b[1;3C", "\x1b[1;5C":
@@ -142,6 +149,18 @@ func (p *parser) feed(data []byte, now time.Time) []key {
 				p.stalePending = false
 				continue
 			}
+			// Some terminals send Alt with an arrow as Escape before the arrow.
+			// Only a complete sequence counts, because a pair of Escapes that
+			// waits for more bytes would never become keys.
+			if len(p.pending) >= 4 && p.pending[1] == 27 && (string(p.pending[2:4]) == "[A" || string(p.pending[2:4]) == "OA") {
+				p.pending = p.pending[4:]
+				p.escapeAt = time.Time{}
+				p.stalePending = false
+				if !p.paste {
+					keys = append(keys, key{kind: keyAltUp, stale: stale})
+				}
+				continue
+			}
 			var wordKey keyKind
 			switch p.pending[1] {
 			case 'b':
@@ -152,6 +171,12 @@ func (p *parser) feed(data []byte, now time.Time) []key {
 				wordKey = keyWordDelete
 			case 8, 127:
 				wordKey = keyWordBackspace
+			case '\r':
+				// Inside a paste the carriage return stays a line of text.
+				wordKey = keyEscape
+				if !p.paste {
+					wordKey = keyAltEnter
+				}
 			default:
 				wordKey = keyEscape
 			}

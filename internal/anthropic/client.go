@@ -4,13 +4,16 @@
 package anthropic
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"slices"
+	"sync"
 
 	"github.com/dylantirandaz/inklingharness/internal/latency"
 )
@@ -31,12 +34,13 @@ type Recorder interface {
 	Begin(requestBody [][]byte) (io.WriteCloser, error)
 }
 
-// Client sends Messages API requests.
+// Client sends Messages API requests. It is safe for concurrent use.
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
 	apiKey     string
 	recorder   Recorder
+	tails      tailCache
 }
 
 // NewClient builds a client. recorder may be nil. The HTTP client has no
@@ -164,21 +168,14 @@ func (b requestBody) reader() io.Reader {
 	return &buffers
 }
 
-func (r Request) body() (requestBody, error) {
+// tail encodes the fields after the messages, from "]" to the closing "}".
+func (r Request) tail() ([]byte, error) {
 	for key := range r.Extra {
 		switch key {
 		case "model", "max_tokens", "messages", "stream", "cache_control", "system", "tools", "thinking":
-			return requestBody{}, fmt.Errorf("anthropic: extra field %q collides with a client-managed field", key)
+			return nil, fmt.Errorf("anthropic: extra field %q collides with a client-managed field", key)
 		}
 	}
-	head, err := json.Marshal(struct {
-		Model     string `json:"model"`
-		MaxTokens int    `json:"max_tokens"`
-	}{Model: r.Model, MaxTokens: r.MaxTokens})
-	if err != nil {
-		return requestBody{}, err
-	}
-	head = append(head[:len(head)-1], `,"messages":[`...)
 	tailFields := requestTail{
 		Stream: true,
 		// Automatic caching moves the breakpoint as the conversation grows.
@@ -190,7 +187,7 @@ func (r Request) body() (requestBody, error) {
 	}
 	encodedTail, err := json.Marshal(tailFields)
 	if err != nil {
-		return requestBody{}, err
+		return nil, err
 	}
 	tail := make([]byte, 0, len(encodedTail)+1)
 	tail = append(tail, ']', ',')
@@ -198,13 +195,26 @@ func (r Request) body() (requestBody, error) {
 	if len(r.Extra) > 0 {
 		extra, err := json.Marshal(r.Extra)
 		if err != nil {
-			return requestBody{}, fmt.Errorf("anthropic: encode extra fields: %w", err)
+			return nil, fmt.Errorf("anthropic: encode extra fields: %w", err)
 		}
 		// Both encoders produced JSON objects. Join their fields without
 		// decoding either object.
 		tail[len(tail)-1] = ','
 		tail = append(tail, extra[1:]...)
 	}
+	return tail, nil
+}
+
+// body joins the head, the stored messages, and tail, which r.tail encoded.
+func (r Request) body(tail []byte) (requestBody, error) {
+	head, err := json.Marshal(struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+	}{Model: r.Model, MaxTokens: r.MaxTokens})
+	if err != nil {
+		return requestBody{}, err
+	}
+	head = append(head[:len(head)-1], `,"messages":[`...)
 	body := requestBody{segments: make([][]byte, 0, 2*len(r.Messages)+1)}
 	body.segments = append(body.segments, head)
 	body.size = int64(len(head) + len(tail))
@@ -223,6 +233,67 @@ func (r Request) body() (requestBody, error) {
 	return body, nil
 }
 
+// tailCache keeps the encoded tail of the last request. Every turn of a
+// conversation sends the same system prompt, tools, and settings, and they
+// are most of the bytes that a turn must encode, so a turn reuses them. The
+// cache compares the fields by value and keeps its own copies, so a changed
+// field always gives a new encoding with the same bytes that r.tail gives.
+type tailCache struct {
+	mutex sync.Mutex
+	valid bool
+	// key holds only the fields that r.tail reads.
+	key  Request
+	tail []byte
+}
+
+func (c *tailCache) encoded(r Request) ([]byte, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.valid && sameTail(c.key, r) {
+		return c.tail, nil
+	}
+	tail, err := r.tail()
+	if err != nil {
+		return nil, err
+	}
+	tools := make([]ToolDefinition, len(r.Tools))
+	for index, tool := range r.Tools {
+		tools[index] = ToolDefinition{Name: tool.Name, Description: tool.Description, InputSchema: bytes.Clone(tool.InputSchema)}
+	}
+	extra := make(map[string]json.RawMessage, len(r.Extra))
+	for key, value := range r.Extra {
+		extra[key] = bytes.Clone(value)
+	}
+	c.key = Request{System: r.System, Tools: tools, Thinking: bytes.Clone(r.Thinking), Extra: extra}
+	c.tail, c.valid = tail, true
+	return tail, nil
+}
+
+// sameTail reports whether r.tail gives the same bytes for both requests.
+func sameTail(a, b Request) bool {
+	return a.System == b.System && sameRaw(a.Thinking, b.Thinking) &&
+		slices.EqualFunc(a.Tools, b.Tools, func(x, y ToolDefinition) bool {
+			return x.Name == y.Name && x.Description == y.Description && sameRaw(x.InputSchema, y.InputSchema)
+		}) &&
+		maps.EqualFunc(a.Extra, b.Extra, sameRaw)
+}
+
+// sameRaw also compares nil, because a nil value and an empty one encode
+// differently.
+func sameRaw(a, b json.RawMessage) bool {
+	return (a == nil) == (b == nil) && bytes.Equal(a, b)
+}
+
+// encode builds the body of request and reuses the encoded tail of the last
+// request when it is the same.
+func (c *Client) encode(request Request) (requestBody, error) {
+	tail, err := c.tails.encoded(request)
+	if err != nil {
+		return requestBody{}, err
+	}
+	return request.body(tail)
+}
+
 // Stream sends one request and streams the reply. Retryable HTTP statuses get
 // up to five attempts, only before a successful response starts. It calls observe
 // for each live event, in order, on the calling goroutine. It returns the complete
@@ -231,7 +302,7 @@ func (c *Client) Stream(ctx context.Context, request Request, observe func(Strea
 	ctx, timing := latency.StartRequest(ctx)
 	defer func() { timing.End(err) }()
 	encoding := latency.Begin(ctx, latency.Encoding, "messages")
-	body, err := request.body()
+	body, err := c.encode(request)
 	encoding.End(err)
 	if err != nil {
 		return nil, err
@@ -291,6 +362,7 @@ func (c *Client) Stream(ctx context.Context, request Request, observe func(Strea
 	}
 
 	scanner := newEventScanner(stream)
+	defer scanner.release()
 	builder := newResponseBuilder()
 	builder.timing = timing
 	for {

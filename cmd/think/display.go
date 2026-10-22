@@ -57,6 +57,9 @@ type consoleObserver struct {
 	approval *approvals
 	// model names the endpoint in the wait status; empty names no model.
 	model string
+	// project is the folder that step titles name files from; empty in a
+	// headless run, which keeps the paths as the model wrote them.
+	project string
 }
 
 func newConsoleObserver(stdout, stderr io.Writer, screen *terminal.Screen, chat bool, theme presentation.Theme, showThinking, verbose bool) *consoleObserver {
@@ -145,6 +148,10 @@ func (c *consoleObserver) Text(delta string) {
 
 func (c *consoleObserver) Thinking(delta string) {
 	c.activity("Thinking")
+	if c.screen != nil {
+		// The trace shows the pace of reasoning even when its text is hidden.
+		c.screen.Mark(presentation.TraceReasoning, 1)
+	}
 	if !c.showThinking {
 		return
 	}
@@ -183,35 +190,10 @@ func (c *consoleObserver) flushThinking() {
 	}
 }
 
-// blockRows sets one rendered reply line on a screen where the text has width
-// cells. Prose wraps at words. On a terminal with a tint, code sits on a card
-// instead of between rules.
-func blockRows(theme presentation.Theme, block presentation.Block, width int) []string {
-	switch {
-	case !theme.Soft() || block.Kind == presentation.ProseLine:
-		return terminal.WrapWords(block.Text, width)
-	case block.Kind == presentation.CodeStart:
-		rows := []string{theme.CardTop(width)}
-		if block.Info != "" {
-			rows = append(rows, theme.CardRow(theme.Graphite(block.Info), width))
-		}
-		return rows
-	case block.Kind == presentation.CodeLine:
-		var rows []string
-		for _, row := range terminal.WrapWords(block.Text, max(width-2*presentation.CardInset, 1)) {
-			rows = append(rows, theme.CardRow(row, width))
-		}
-		return rows
-	case block.Kind == presentation.CodeEnd:
-		return []string{theme.CardBottom(width)}
-	}
-	panic(fmt.Sprintf("think: unknown block kind %d", block.Kind))
-}
-
 // commitLine renders one complete reply line; its continuation rows keep the
 // same margin.
 func (c *consoleObserver) commitLine(out *strings.Builder, line string) {
-	for _, row := range blockRows(c.theme, c.markdown.Block(line), max(c.screen.Width()-3, 1)) {
+	for _, row := range terminal.WrapWords(c.markdown.Line(line), max(c.screen.Width()-3, 1)) {
 		out.WriteString(replyIndent)
 		out.WriteString(row)
 		out.WriteByte('\n')
@@ -233,12 +215,9 @@ func (c *consoleObserver) flushText() {
 		c.commitLine(&rows, c.line.String())
 		c.line.Reset()
 	}
-	// A reply that ends inside a fence still closes its card.
+	// A reply that ends inside a fence leaves no open code state behind.
 	if c.markdown.InCode() {
 		c.markdown.EndCode()
-		if c.theme.Soft() {
-			rows.WriteString("  " + c.theme.CardBottom(max(c.screen.Width()-3, 1)) + "\n")
-		}
 	}
 	io.WriteString(c.stdout, rows.String())
 }
@@ -265,6 +244,7 @@ func (c *consoleObserver) ToolCall(name string, input json.RawMessage) {
 	if err != nil {
 		title = presentation.Safe(name) + " (invalid or unknown arguments)"
 	}
+	title = presentation.TrimProject(c.project, title)
 	c.pending = append(c.pending, pendingTool{name: name, title: title, input: input})
 	if c.screen != nil {
 		c.screen.SetToolStatus(title)
@@ -280,6 +260,9 @@ func (c *consoleObserver) ToolCall(name string, input json.RawMessage) {
 // the full result.
 func (c *consoleObserver) ToolResult(name string, result tools.Result, elapsed time.Duration) {
 	c.flushText()
+	if c.screen != nil && result.IsError {
+		c.screen.Mark(presentation.TraceFailure, 1)
+	}
 	if c.chat && !c.afterTools {
 		fmt.Fprintln(c.stderr)
 		c.bodyStarted = true
@@ -447,9 +430,6 @@ func contextUse(o *options, messages []anthropic.EncodedMessage, usage *anthropi
 
 // motionVariable turns the terminal animations off with the value "off".
 const motionVariable = "INKLING_MOTION"
-
-// bannerFrames is the number of frames of the opening animation.
-const bannerFrames = 24
 
 // motionSetting reads INKLING_MOTION: empty or "on" animates, "off" keeps
 // every row still. Another value is an error, not a silent default.

@@ -6,9 +6,6 @@ import (
 	"strings"
 )
 
-// wordmark uses the site's letter spacing without claiming its identity.
-const wordmark = "I N K L I N G"
-
 // BannerInfo is what the opening screen shows.
 type BannerInfo struct {
 	// Directory is the workspace. Its name is the title, and it picks the
@@ -38,19 +35,20 @@ func Banner(info BannerInfo, theme Theme) string {
 	return "\n  " + strings.Join(bannerText(info, theme), "\n\n  ") + "\n"
 }
 
-// BannerFrames reveals the artwork and the workspace without moving the
-// composer. It is nil when the terminal has no room or color support for the
-// artwork.
-func BannerFrames(info BannerInfo, theme Theme, count int) []string {
+// BannerAnimation draws the opening screen at a progress from 0 to 1: the
+// ink soaks in, then the workspace and the model appear, and the composer
+// below never moves. It is nil when the terminal has no room or color support
+// for the artwork. It draws each frame when called, from one picture, so a
+// screen computes only the frames that it shows. It is not safe for
+// concurrent calls.
+func BannerAnimation(info BannerInfo, theme Theme) func(progress float64) string {
 	picture := info.picture(theme)
-	if picture == nil || count < 2 {
+	if picture == nil {
 		return nil
 	}
-	frames := make([]string, count)
-	for index := range frames {
-		frames[index] = heroAt(picture, info, theme, float64(index)/float64(count-1))
+	return func(progress float64) string {
+		return heroAt(picture, info, theme, min(max(progress, 0), 1))
 	}
-	return frames
 }
 
 // bannerSeed picks one of the page's seeds from the workspace path.
@@ -73,16 +71,15 @@ func (info BannerInfo) picture(theme Theme) *BlotPicture {
 
 func bannerText(info BannerInfo, theme Theme) []string {
 	return []string{
-		theme.Graphite(wordmark),
 		theme.Bold(theme.Ink(singleLine(filepath.Base(info.Directory)))),
 		theme.Graphite("/help commands") + theme.Hairline(" · ") + theme.Graphite("/status session"),
 	}
 }
 
 // heroAt draws the opening screen at a progress from 0 to 1, centered like
-// the hero of the page: the artwork, the wordmark, the workspace name, and
-// the model. Every progress has the same number of rows, so the composer
-// below stays in place.
+// the hero of the page: the artwork, and under it a label, as a museum hangs
+// one: the workspace name, then the model. Every progress has the same
+// number of rows, so the composer below stays in place.
 func heroAt(picture *BlotPicture, info BannerInfo, theme Theme, progress float64) string {
 	width := max(info.Width-1, 1)
 	center := func(plain, styled string) string {
@@ -95,11 +92,8 @@ func heroAt(picture *BlotPicture, info BannerInfo, theme Theme, progress float64
 		rows = append(rows, artPad+row)
 	}
 	rows = append(rows, "")
-	// The wordmark is typed, then the name and the model appear.
-	typed := int(float64(len(wordmark)) * min(max((progress-0.45)/0.35, 0), 1))
-	rows = append(rows, center(wordmark, theme.Graphite(wordmark[:typed])), "")
 	title := clipCells(singleLine(filepath.Base(info.Directory)), width-4)
-	subtitle := clipCells(singleLine(info.Model+" · "+info.Effort+" effort"), width-4)
+	subtitle := clipCells(singleLine(info.Model+"  ·  "+info.Effort+" effort"), width-4)
 	switch {
 	case progress >= 0.85:
 		rows = append(rows, center(title, theme.Bold(theme.Ink(title))), center(subtitle, theme.Graphite(subtitle)))

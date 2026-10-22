@@ -16,10 +16,10 @@ import (
 // context window.
 const maxReadBytes = 256 * 1024
 
-func readFileTool(root string) Tool {
+func readFileTool(root string, limits Limits) Tool {
 	return Tool{
 		Name:        "read_file",
-		Description: "Read file text. Give path in every call. offset is a 1-based line number; limit defaults to 2000 lines. Use ranges for large files.",
+		Description: fmt.Sprintf("Read file text. Give path in every call. offset is a 1-based line number; limit defaults to %d lines. Use ranges for large files.", limits.ReadLines),
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`),
 		ReadOnly:    true,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {
@@ -27,7 +27,7 @@ func readFileTool(root string) Tool {
 				Path   string `json:"path"`
 				Offset int    `json:"offset"`
 				Limit  int    `json:"limit"`
-			}{Offset: 1, Limit: 2000}
+			}{Offset: 1, Limit: limits.ReadLines}
 			if err := json.Unmarshal(input, &arguments); err != nil {
 				return invalidInput(err), nil
 			}

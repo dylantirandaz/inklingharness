@@ -11,10 +11,8 @@ limit is raised: Think stops after 50 turns by default, but the built-in
 harnesses have no turn limit, so the task timeout of Harbor is the only bound.
 """
 
-import hashlib
 import json
 import shlex
-from pathlib import Path
 from typing import Annotated, Literal, override
 
 from pydantic import Field
@@ -26,7 +24,10 @@ from harbor.agents.options import Cli, InstalledAgentOptions
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from evals.harbor_binary import LocalFile, put_file
+
 _REMOTE_BINARY = "/installed-agent/think"
+_REMOTE_SYSTEM = "/installed-agent/system.txt"
 _EVENTS_FILENAME = "think-events.jsonl"
 _STDERR_FILENAME = "think-stderr.log"
 _PROVIDER = "openrouter"
@@ -34,6 +35,14 @@ _PROVIDER = "openrouter"
 
 class ThinkOptions(InstalledAgentOptions):
     binary_path: str = Field(description="Path of a linux/amd64 build of think on this computer.")
+    staged_dir: str | None = Field(
+        default=None,
+        description="Folder in the sandbox, on a read-only volume, that holds this build under its staged name; see evals.harbor_binary. Without it the build is uploaded.",
+    )
+    system_file: str | None = Field(
+        default=None,
+        description="Path on this computer of a system prompt file that replaces the built-in coding guidance (think -system). The file is uploaded with a hash check, and its hash is part of the agent version.",
+    )
     reasoning_effort: Annotated[
         Literal["low", "medium", "high", "xhigh", "max"] | None,
         Cli("-effort"),
@@ -43,6 +52,12 @@ class ThinkOptions(InstalledAgentOptions):
     )
     max_turns: Annotated[int, Cli("-max-turns")] = Field(
         default=10000, gt=0, description="Most model turns in one run."
+    )
+    no_web: Annotated[bool, Cli("-no-web")] = Field(
+        default=False, description="Do not offer web_search and web_fetch, and leave them out of the prompt."
+    )
+    lean: Annotated[bool, Cli("-lean")] = Field(
+        default=False, description="Headless profile for Inkling Small: read_files, shorter tool output, fewer tools, and the matching prompt (think run -lean)."
     )
 
 
@@ -54,15 +69,14 @@ class Think(BaseInstalledAgent):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._binary = Path(self.options.binary_path).expanduser().resolve(strict=True)
-        with self._binary.open("rb") as binary:
+        self._local = LocalFile.read(self.options.binary_path)
+        with self._local.path.open("rb") as binary:
             header = binary.read(20)
-            if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
-                raise ValueError(f"Expected a Linux amd64 ELF binary: {self._binary}")
-            binary.seek(0)
-            digest = hashlib.file_digest(binary, "sha256").hexdigest()
+        if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
+            raise ValueError(f"Expected a Linux amd64 ELF binary: {self._local.path}")
+        self._system = LocalFile.read(self.options.system_file) if self.options.system_file else None
         if self._version is None:
-            self._version = "sha256:" + digest
+            self._version = "sha256:" + self._local.sha256 + (f"+system:{self._system.sha256[:12]}" if self._system else "")
 
     @staticmethod
     @override
@@ -73,8 +87,9 @@ class Think(BaseInstalledAgent):
     async def install(self, environment: BaseEnvironment) -> None:
         # Think finds the project through git, and many task images lack it.
         await self.ensure_system_dependencies(environment, ("git",))
-        await environment.upload_file(self._binary, _REMOTE_BINARY)
-        await self.exec_as_root(environment, command=f"chmod 755 {_REMOTE_BINARY}")
+        await put_file(environment, self._local, _REMOTE_BINARY, mode="755", staged_dir=self.options.staged_dir)
+        if self._system is not None:
+            await put_file(environment, self._system, _REMOTE_SYSTEM, mode="644")
 
     def _model_id(self) -> str:
         if not self.model_name:
@@ -97,6 +112,8 @@ class Think(BaseInstalledAgent):
             raise ValueError("Think needs an OpenRouter model and OPENROUTER_API_KEY")
         env = {"OPENROUTER_API_KEY": access.api_key}
         command = [_REMOTE_BINARY, "run", "-model", self._model_id(), "-yes", "-json"]
+        if self._system is not None:
+            command += ["-system", _REMOTE_SYSTEM]
         if self.build_cli_flags():
             command.append(self.build_cli_flags())
         if access.configured_base_url:

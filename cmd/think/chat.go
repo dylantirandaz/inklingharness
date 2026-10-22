@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -61,6 +62,10 @@ Alt-Left/Right moves by word. Ctrl-W deletes the previous word.
 Pasted text stays in the input area until you press Enter.
 Attach files with @path or @"path with spaces". An @word that names no file stays text. Use @@ for a literal @.
 In plain mode, end a line with a backslash to enter more lines.
+While Inkling works, you can type. Enter queues a steering message: it goes to the model
+after the current tool results, or before the turn ends. Alt-Enter queues a message that
+starts the next turn. A /command always waits for the turn to end. Alt-Up moves the queued
+messages back into the input. A stopped or failed turn also moves them back.
 Ctrl-C stops the active request or tool. At an idle prompt, Ctrl-C exits.
 In /tools and /diff views: arrows or j/k scroll, PgUp/PgDn page, Home/End or g/G jump,
 Left/Right, Tab, or a digit select a tab, and Esc, q, Enter, or Ctrl-C return to chat.
@@ -133,6 +138,8 @@ type approvals struct {
 	screen   *terminal.Screen
 	theme    presentation.Theme
 	signals  shipSignals
+	// project is the folder that the label of a request names files from.
+	project string
 	// waited is the time spent on the last answered approval.
 	waited time.Duration
 }
@@ -156,23 +163,30 @@ func (approval *approvals) check(ctx context.Context, call anthropic.ToolUseBloc
 		return false, nil
 	}
 	view := describeTool(call.Name, call.Input, approval.theme)
-	// A request that fits shows inside the approval box and leaves only its
-	// outcome; a longer one, such as a large diff, stays in the scrollback.
-	card := ""
-	if approval.screen != nil {
-		card = presentation.ApprovalCard(view, approval.theme)
-		if !approval.screen.CardFits(card) {
-			card = ""
+	request := presentation.NewApprovalRequest(call.Name, view)
+	// The label names files from the project; the work keeps its paths,
+	// because the user approves exactly what will run.
+	request.Title = presentation.TrimProject(approval.project, request.Title)
+	request.Caption = presentation.TrimProject(approval.project, request.Caption)
+	// A request that fits hangs above the choices and leaves only its
+	// outcome; a longer one, such as a large diff, goes to the scrollback.
+	shown := approval.screen != nil && approval.screen.RequestFits(request)
+	if !shown {
+		text := presentation.Approval(view, approval.theme)
+		if approval.screen != nil && approval.theme.Soft() {
+			text = strings.Join(approval.theme.ApprovalRows(request, approval.screen.Width()-1, false), "\n")
 		}
-	}
-	if card == "" {
-		fmt.Fprintf(approval.output, "\n%s\n", presentation.Approval(view, approval.theme))
+		fmt.Fprintf(approval.output, "\n%s\n", text)
 	}
 	if approval.screen != nil {
 		approval.screen.SetStatus("Waiting for approval")
 		approval.signals.approval(presentation.Safe(view.Title))
 		started := time.Now()
-		choice, err := approval.screen.ChooseCard(ctx, card)
+		choose := approval.screen.Choose
+		if shown {
+			choose = func(ctx context.Context) (terminal.Choice, error) { return approval.screen.ChooseRequest(ctx, request) }
+		}
+		choice, err := choose(ctx)
 		approval.waited = time.Since(started)
 		approval.signals.working()
 		if err != nil {
@@ -180,7 +194,7 @@ func (approval *approvals) check(ctx context.Context, call anthropic.ToolUseBloc
 		}
 		approval.screen.SetToolStatus(presentation.Safe(view.Title))
 		outcome := func(text string, style func(string) string) {
-			if card != "" {
+			if shown || approval.theme.Soft() {
 				fmt.Fprintln(approval.output, "  "+approval.theme.Graphite("· ")+style(text))
 				return
 			}
@@ -188,7 +202,7 @@ func (approval *approvals) check(ctx context.Context, call anthropic.ToolUseBloc
 		}
 		switch choice {
 		case terminal.AllowOnce:
-			if card == "" {
+			if !shown {
 				outcome("allowed once", approval.theme.Green)
 			}
 			return true, nil
@@ -197,7 +211,7 @@ func (approval *approvals) check(ctx context.Context, call anthropic.ToolUseBloc
 			outcome("allowed for this session", approval.theme.Green)
 			return true, nil
 		case terminal.Deny:
-			if card == "" {
+			if !shown {
 				outcome("denied", approval.theme.Red)
 			}
 			return false, nil
@@ -359,7 +373,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		return 2
 	}
 	prewarm(ctx, client)
-	ext, err := loadExtensions(projectContext.WorkDir)
+	ext, err := loadExtensions(projectContext.WorkDir, o.noWeb)
 	if err != nil {
 		fmt.Fprintf(stderr, "inkling: %v\n", err)
 		return 1
@@ -423,13 +437,14 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		answerer = lineAsker(input, progressOutput)
 	}
 	signals := shipSignals{screen: screen, place: filepath.Base(projectContext.WorkDir)}
-	approval := &approvals{output: progressOutput, allowAll: o.approveAll, screen: screen, theme: theme, signals: signals}
+	approval := &approvals{output: progressOutput, allowAll: o.approveAll, screen: screen, theme: theme, signals: signals, project: projectContext.WorkDir}
 	if interactive && screen == nil {
 		approval.input = input
 	}
 	observer := newConsoleObserver(displayOutput, progressOutput, screen, true, theme, o.showThinking, o.verbose)
 	observer.approval = approval
 	observer.model = o.model
+	observer.project = projectContext.WorkDir
 	saveOnStart := *resume != "last" || current.Model != o.model || current.Effort != o.effort
 	current.Model, current.Effort = o.model, o.effort
 	if saveOnStart {
@@ -446,9 +461,9 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	if screen != nil {
 		banner.Width, banner.Height = screen.Width(), screen.Height()
 	}
-	frames := presentation.BannerFrames(banner, theme, bannerFrames)
-	if screen != nil && frames != nil {
-		screen.Intro(frames)
+	animation := presentation.BannerAnimation(banner, theme)
+	if screen != nil && animation != nil {
+		screen.Intro(animation)
 	} else {
 		fmt.Fprintln(displayOutput, presentation.Banner(banner, theme))
 	}
@@ -538,7 +553,10 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	// first, for /undo and /rewind. They are not saved with the session.
 	var checkpoints []checkpoint
 	// activeGoal is the check of /goal; queued is a prompt that a failed check
-	// sends next, without user input.
+	// sends next, without user input. The screen queue of the user comes
+	// around it: steering that came after the last boundary of a turn goes
+	// first, because it changes the current work; a message for later waits
+	// until the goal stops.
 	var activeGoal goal
 	var queued string
 	// tinkerWatch switches the chat to each checkpoint that /tinker trains.
@@ -546,10 +564,23 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 	for {
 		var line string
 		var err error
-		goalTurn := queued != ""
-		if goalTurn {
+		var steering []string
+		followUp, haveFollowUp := "", false
+		if screen != nil {
+			steering = screen.TakeSteering()
+			if len(steering) == 0 && queued == "" {
+				followUp, haveFollowUp = screen.TakeFollowUp()
+			}
+		}
+		goalTurn := len(steering) == 0 && queued != ""
+		switch {
+		case len(steering) > 0:
+			line = strings.Join(steering, "\n\n")
+		case goalTurn:
 			line, queued = queued, ""
-		} else if screen != nil {
+		case haveFollowUp:
+			line = followUp
+		case screen != nil:
 			screen.SetContext(contextUse(o, current.Messages, &current.Usage))
 			signals.ready()
 			var start func() *backgroundCompaction
@@ -579,7 +610,7 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 				fmt.Fprintf(stderr, "inkling: %v\n", settleError)
 				return 1
 			}
-		} else {
+		default:
 			fmt.Fprint(stderr, "inkling> ")
 			line, err = readPrompt(ctx, input, stderr)
 		}
@@ -991,6 +1022,15 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		policy.beforeChange = pending.settled
 		ext.configure(&config, toolSet, policy, approval.check)
 		config.Notices = jobs.Notices
+		if screen != nil {
+			config.Steering = func() []string {
+				steering := screen.TakeSteering()
+				if len(steering) > 0 {
+					observer.steered(steering)
+				}
+				return steering
+			}
+		}
 		width := 0
 		if screen != nil {
 			width = screen.Width()
@@ -1025,6 +1065,9 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		if prepareError != nil {
 			finish()
 			observer.Finish()
+			if screen != nil {
+				screen.RestoreQueue()
+			}
 			var timingError error
 			if timing != nil {
 				timing.Finish(prepareError)
@@ -1041,6 +1084,11 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 		outcome, runErr := agent.Run(turnCtx, client, config, toolSet, current.Messages, agent.Prompt{Text: prepared.Prompt}, observer)
 		finish()
 		observer.Finish()
+		if screen != nil && runErr != nil {
+			// After a stop or a failure the user decides again what to send,
+			// so the queued messages go back into the editor.
+			screen.RestoreQueue()
+		}
 		snapshot, snapshotErr := pending.wait(context.Background())
 		if snapshotErr != nil {
 			fmt.Fprintf(stderr, "inkling: undo is off for this prompt: %v\n", snapshotErr)
@@ -1065,13 +1113,22 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			fmt.Fprintf(stderr, "%d turns, %s, %s\n", outcome.Turns, formatUsage(outcome.Usage), time.Since(started).Round(time.Millisecond))
 		}
 		if runErr != nil {
-			fmt.Fprintf(stderr, "inkling: %v\n", runErr)
+			if screen != nil && theme.Soft() {
+				title := "Turn failed"
+				if errors.Is(runErr, context.Canceled) {
+					title = "Turn stopped"
+				}
+				fmt.Fprintln(progressOutput, strings.Join(theme.FailureRows(title, failureCause(runErr), screen.Width()-1), "\n")+"\n")
+			} else {
+				fmt.Fprintf(stderr, "inkling: %v\n", runErr)
+			}
 		}
 		if screen != nil && runErr == nil && outcome.Turns > 0 {
 			inputTokens := outcome.Usage.InputTokens + outcome.Usage.CacheReadInputTokens + outcome.Usage.CacheCreationInputTokens
 			if theme.Soft() {
 				summary := presentation.TurnSummaryText(time.Since(started), outcome.Turns, inputTokens, outcome.Usage.OutputTokens)
-				fmt.Fprintln(progressOutput, "\n"+theme.TurnRule(summary, screen.Width()-1))
+				// A row of air after the stats line closes the turn.
+				fmt.Fprintln(progressOutput, "\n"+theme.TurnRule(summary)+"\n")
 			} else {
 				fmt.Fprintln(progressOutput, "\n  "+presentation.TurnSummary(time.Since(started), outcome.Turns, inputTokens, outcome.Usage.OutputTokens, theme))
 			}
@@ -1104,6 +1161,22 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			background = startBackgroundCompaction(ctx, client, config, toolSet, current.Messages, o)
 		}
 	}
+}
+
+// steered shows each steering message that went to the model as a sent
+// prompt, at the point where it took effect. The reply text before it
+// commits first, and the reply after it starts a new block.
+func (c *consoleObserver) steered(messages []string) {
+	c.flushThinking()
+	c.flushText()
+	width := 0
+	if c.screen != nil {
+		width = c.screen.Width()
+	}
+	for _, message := range messages {
+		printUser(c.stdout, message, width, c.theme)
+	}
+	c.bodyStarted, c.leadShown, c.afterTools = false, false, false
 }
 
 func chatConfig(options *options, projectContext project.Context, ext *extensions, store *session.Store) (agent.Config, error) {
@@ -1169,18 +1242,15 @@ func printLastReply(output io.Writer, messages []anthropic.EncodedMessage, theme
 			continue
 		}
 		for _, line := range strings.Split(text.Text, "\n") {
-			rendered := markdown.Block(line)
+			rendered := markdown.Line(line)
 			if screenWidth <= 0 {
-				fmt.Fprintln(output, "  "+rendered.Text)
+				fmt.Fprintln(output, "  "+rendered)
 				continue
 			}
-			for _, row := range blockRows(theme, rendered, max(screenWidth-3, 1)) {
+			for _, row := range terminal.WrapWords(rendered, max(screenWidth-3, 1)) {
 				fmt.Fprintln(output, "  "+row)
 			}
 		}
-	}
-	if markdown.InCode() && screenWidth > 0 && theme.Soft() {
-		fmt.Fprintln(output, "  "+theme.CardBottom(max(screenWidth-3, 1)))
 	}
 	return nil
 }
@@ -1258,4 +1328,27 @@ func sessionsExportCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, path)
 	return 0
+}
+
+// failureCause says why a turn failed in the words of the provider: an HTTP
+// error shows its status and the message of its JSON body, not the body, and
+// an error inside the stream shows its kind and message.
+func failureCause(err error) string {
+	var streamError *anthropic.StreamError
+	if errors.As(err, &streamError) {
+		return "provider " + strings.ReplaceAll(streamError.Type, "_", " ") + " · " + streamError.Message
+	}
+	var apiError *anthropic.APIError
+	if !errors.As(err, &apiError) {
+		return err.Error()
+	}
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(apiError.Body), &body) != nil || body.Error.Message == "" {
+		return err.Error()
+	}
+	return fmt.Sprintf("HTTP %d · %s", apiError.StatusCode, body.Error.Message)
 }

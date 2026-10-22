@@ -301,11 +301,11 @@ func FooterModel(use ContextUse, theme Theme) string {
 
 // FooterUsage is the context against the compaction threshold, with its
 // four-cell gauge, and the total session use.
-func FooterUsage(use ContextUse, shownTokens int, glow float64, theme Theme) string {
+func FooterUsage(use ContextUse, shownTokens int, theme Theme) string {
 	separator := theme.Hairline(" · ")
 	var out strings.Builder
 	if use.CompactTokens > 0 {
-		out.WriteString(theme.Gauge(shownTokens, use.CompactTokens, 4, glow))
+		out.WriteString(theme.Gauge(shownTokens, use.CompactTokens, 4))
 		out.WriteByte(' ')
 		out.WriteString(theme.Graphite(ShortTokens(shownTokens) + " / " + ShortTokens(use.CompactTokens)))
 	} else {

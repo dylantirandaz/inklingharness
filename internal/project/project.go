@@ -59,22 +59,41 @@ func Inspect(ctx context.Context, workDir string) (Context, error) {
 		return Context{}, fmt.Errorf("project: work directory is not a directory: %q", absolute)
 	}
 	result := Context{WorkDir: absolute}
-	rootOutput, stderr, err := gitCommand(ctx, absolute, "rev-parse", "--show-toplevel")
-	if err != nil {
+	// Each git command takes about 10 ms, mostly process start, and the
+	// first request waits for all of them. They read the repository and do
+	// not depend on each other, so in a likely repository they start
+	// together with the root check. Elsewhere they would only slow the root
+	// check, so they start after it, and only if it finds a repository. The
+	// results are the same in both orders. The deferred cancel stops the
+	// commands whose results are not used.
+	gitContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	toplevel := startGit(gitContext, absolute, "rev-parse", "--show-toplevel")
+	var probe gitProbe
+	var gitFiles <-chan gitOutput
+	if likelyRepository(absolute) {
+		probe, gitFiles = startGitProbe(gitContext, absolute)
+	}
+	top := <-toplevel
+	if top.err != nil {
 		if ctx.Err() != nil {
 			return Context{}, fmt.Errorf("project: inspect git repository: %w", ctx.Err())
 		}
 		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() != 128 || !strings.HasPrefix(stderr, "fatal: not a git repository") {
-			return Context{}, gitError("find repository", stderr, err)
+		if !errors.As(top.err, &exit) || exit.ExitCode() != 128 || !strings.HasPrefix(top.stderr, "fatal: not a git repository") {
+			return Context{}, gitError("find repository", top.stderr, top.err)
 		}
+		gitFiles = nil
 	} else {
-		root := strings.TrimSuffix(rootOutput, "\n")
+		if gitFiles == nil {
+			probe, gitFiles = startGitProbe(gitContext, absolute)
+		}
+		root := strings.TrimSuffix(top.stdout, "\n")
 		root, err = filepath.EvalSymlinks(root)
 		if err != nil {
 			return Context{}, fmt.Errorf("project: resolve repository root: %w", err)
 		}
-		git, err := inspectGit(ctx, absolute, root)
+		git, err := probe.inspect(gitContext, absolute, root)
 		if err != nil {
 			return Context{}, err
 		}
@@ -110,7 +129,7 @@ func Inspect(ctx context.Context, workDir string) (Context, error) {
 			}
 		}
 	}
-	files, err := listFiles(ctx, absolute, result.Git != nil)
+	files, err := listFiles(ctx, absolute, gitFiles)
 	if err != nil {
 		return Context{}, fmt.Errorf("project: list files: %w", err)
 	}
@@ -147,40 +166,95 @@ func readInstructions(path string) (Instructions, bool, error) {
 	return Instructions{Path: path, Text: string(text)}, true, nil
 }
 
-func inspectGit(ctx context.Context, workDir, root string) (GitInfo, error) {
-	result := GitInfo{Root: root}
-	branch, stderr, err := gitCommand(ctx, workDir, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil {
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
-			return GitInfo{}, gitError("read branch", stderr, err)
+// gitOutput is the result of one git command.
+type gitOutput struct {
+	stdout, stderr string
+	err            error
+}
+
+// startGit runs one git command in the background. The channel receives the
+// result once.
+func startGit(ctx context.Context, directory string, args ...string) <-chan gitOutput {
+	result := make(chan gitOutput, 1)
+	go func() {
+		stdout, stderr, err := gitCommand(ctx, directory, args...)
+		result <- gitOutput{stdout: stdout, stderr: stderr, err: err}
+	}()
+	return result
+}
+
+// gitProbe holds the started commands that inspect reads.
+type gitProbe struct {
+	branch, status, head, commits <-chan gitOutput
+}
+
+// startGitProbe starts the commands of inspect and the file list command,
+// whose output listFiles reads.
+func startGitProbe(ctx context.Context, workDir string) (gitProbe, <-chan gitOutput) {
+	return gitProbe{
+		branch:  startGit(ctx, workDir, "symbolic-ref", "--quiet", "--short", "HEAD"),
+		status:  startGit(ctx, workDir, "status", "--short", "--untracked-files=normal"),
+		head:    startGit(ctx, workDir, "rev-parse", "--verify", "--quiet", "HEAD"),
+		commits: startGit(ctx, workDir, "log", "-5", "--format=%s", "--no-show-signature"),
+	}, startGit(ctx, workDir, "ls-files", "--cached", "--others", "--exclude-standard")
+}
+
+// likelyRepository reports whether directory or a parent holds a .git entry,
+// or GIT_DIR names a repository. Only the start order of the git commands
+// depends on it, not the result of Inspect, so a wrong guess costs only time.
+func likelyRepository(directory string) bool {
+	if os.Getenv("GIT_DIR") != "" {
+		return true
+	}
+	for {
+		if _, err := os.Lstat(filepath.Join(directory, ".git")); err == nil {
+			return true
 		}
-		branch, stderr, err = gitCommand(ctx, workDir, "rev-parse", "--short", "HEAD")
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return false
+		}
+		directory = parent
+	}
+}
+
+// inspect reads the results in the order of the checks, so the first failure
+// is the one that a sequential run reports.
+func (p gitProbe) inspect(ctx context.Context, workDir, root string) (GitInfo, error) {
+	result := GitInfo{Root: root}
+	branch := <-p.branch
+	if branch.err != nil {
+		var exit *exec.ExitError
+		if !errors.As(branch.err, &exit) || exit.ExitCode() != 1 {
+			return GitInfo{}, gitError("read branch", branch.stderr, branch.err)
+		}
+		detached, stderr, err := gitCommand(ctx, workDir, "rev-parse", "--short", "HEAD")
 		if err != nil {
 			return GitInfo{}, gitError("read detached HEAD", stderr, err)
 		}
-		branch = "detached HEAD at " + branch
+		branch.stdout = "detached HEAD at " + detached
 	}
-	result.Branch = strings.TrimSuffix(branch, "\n")
-	status, stderr, err := gitCommand(ctx, workDir, "status", "--short", "--untracked-files=normal")
-	if err != nil {
-		return GitInfo{}, gitError("read status", stderr, err)
+	result.Branch = strings.TrimSuffix(branch.stdout, "\n")
+	status := <-p.status
+	if status.err != nil {
+		return GitInfo{}, gitError("read status", status.stderr, status.err)
 	}
-	result.Status = strings.TrimSuffix(status, "\n")
-	_, stderr, err = gitCommand(ctx, workDir, "rev-parse", "--verify", "--quiet", "HEAD")
-	if err != nil {
+	result.Status = strings.TrimSuffix(status.stdout, "\n")
+	head := <-p.head
+	if head.err != nil {
 		var exit *exec.ExitError
-		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		if errors.As(head.err, &exit) && exit.ExitCode() == 1 {
+			// An unborn branch has no log; the log command failed too.
 			result.RecentCommits = "(no commits yet)"
 			return result, nil
 		}
-		return GitInfo{}, gitError("resolve HEAD", stderr, err)
+		return GitInfo{}, gitError("resolve HEAD", head.stderr, head.err)
 	}
-	commits, stderr, err := gitCommand(ctx, workDir, "log", "-5", "--format=%s", "--no-show-signature")
-	if err != nil {
-		return GitInfo{}, gitError("read recent commits", stderr, err)
+	commits := <-p.commits
+	if commits.err != nil {
+		return GitInfo{}, gitError("read recent commits", commits.stderr, commits.err)
 	}
-	result.RecentCommits = strings.TrimSuffix(commits, "\n")
+	result.RecentCommits = strings.TrimSuffix(commits.stdout, "\n")
 	return result, nil
 }
 

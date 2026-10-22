@@ -300,13 +300,6 @@ func Approval(view ToolView, theme Theme) string {
 	return out.String()
 }
 
-// ApprovalCard is the same request for the approval box above the
-// composer: the box carries the amber title, so the card starts with the
-// action in bold.
-func ApprovalCard(view ToolView, theme Theme) string {
-	return theme.Bold(theme.Ink(singleLine(view.Title))) + "\n" + strings.Join(approvalLines(view, theme), "\n")
-}
-
 func approvalLines(view ToolView, theme Theme) []string {
 	title := singleLine(view.Title)
 	details := Safe(view.Details)

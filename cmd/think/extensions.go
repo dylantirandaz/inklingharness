@@ -36,9 +36,15 @@ type extensions struct {
 	commands []extend.Command
 	skills   []extend.Skill
 	memory   string
+	// noWeb leaves web_search and web_fetch out of the tool set. The zero
+	// value offers them, so code that builds an extensions value by hand
+	// keeps the default.
+	noWeb bool
+	// lean leaves out the remember tool; see options.lean.
+	lean bool
 }
 
-func loadExtensions(workDir string) (*extensions, error) {
+func loadExtensions(workDir string, noWeb bool) (*extensions, error) {
 	settings, err := extend.LoadSettings(workDir)
 	if err != nil {
 		return nil, err
@@ -68,7 +74,7 @@ func loadExtensions(workDir string) (*extensions, error) {
 	if err != nil {
 		return nil, err
 	}
-	loaded := &extensions{workDir: workDir, rules: rules, hooks: settings.Hooks, tools: custom,
+	loaded := &extensions{workDir: workDir, rules: rules, hooks: settings.Hooks, tools: custom, noWeb: noWeb,
 		commands: append(extend.BuiltinCommands(), userCommands...), skills: skills, memory: memory}
 	if len(settings.MCPServers) > 0 {
 		configs := make([]mcp.ServerConfig, len(settings.MCPServers))
@@ -110,13 +116,20 @@ func (e *extensions) systemPrompt() string {
 	return strings.Join(sections, "\n\n")
 }
 
-// toolSet adds web_search, web_fetch, remember, ask_user, then custom and MCP
-// tools in a fixed order. ask_user is absent when no user can answer.
+// toolSet adds web_search and web_fetch unless noWeb is set, then remember
+// unless lean is set, ask_user, and the custom and MCP tools in a fixed order.
+// ask_user is absent when no user can answer.
 func (e *extensions) toolSet(standard *tools.Set, ask questionAsker) (*tools.Set, error) {
 	all := append([]tools.Tool(nil), standard.All()...)
-	all = append(all, web.SearchTool(), web.FetchTool(), extend.MemoryTool(e.workDir))
+	if !e.noWeb {
+		all = append(all, web.SearchTool(), web.FetchTool())
+	}
+	if !e.lean {
+		all = append(all, extend.MemoryTool(e.workDir))
+	}
 	if ask != nil {
 		all = append(all, askUserTool(ask))
+
 	}
 	return tools.NewSet(append(all, e.tools...)...)
 }

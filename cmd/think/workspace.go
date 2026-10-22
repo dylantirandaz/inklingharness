@@ -62,10 +62,11 @@ func newWorkspace(ctx context.Context, o *options, root string, stderr io.Writer
 	if err != nil {
 		return nil, err
 	}
-	ext, err := loadExtensions(projectContext.WorkDir)
+	ext, err := loadExtensions(projectContext.WorkDir, o.noWeb)
 	if err != nil {
 		return nil, err
 	}
+	ext.lean = o.lean
 	config.System += "\n\n" + projectContext.SystemPrompt()
 	if text := ext.systemPrompt(); text != "" {
 		config.System += "\n\n" + text

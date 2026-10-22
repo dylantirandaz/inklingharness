@@ -20,14 +20,17 @@ var errTooManyFiles = errors.New("too many files")
 
 // listFiles returns the sorted file paths below workDir, relative to it, or
 // nil when there are more than fileListLimit. In a git repository it lists
-// tracked and untracked files that .gitignore does not exclude; elsewhere it
-// walks the folder. Both leave out hidden paths and node_modules.
-func listFiles(ctx context.Context, workDir string, inGit bool) ([]string, error) {
-	if inGit {
-		output, stderr, err := gitCommand(ctx, workDir, "ls-files", "--cached", "--others", "--exclude-standard")
-		if err != nil {
-			return nil, gitError("list files", stderr, err)
+// tracked and untracked files that .gitignore does not exclude, from
+// gitFiles, the result of the ls-files command that startGitProbe started;
+// elsewhere gitFiles is nil and it walks the folder. Both leave out hidden
+// paths and node_modules.
+func listFiles(ctx context.Context, workDir string, gitFiles <-chan gitOutput) ([]string, error) {
+	if gitFiles != nil {
+		listed := <-gitFiles
+		if listed.err != nil {
+			return nil, gitError("list files", listed.stderr, listed.err)
 		}
+		output := listed.stdout
 		if strings.HasSuffix(output, truncationMarker) {
 			return nil, nil
 		}

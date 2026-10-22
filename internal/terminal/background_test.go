@@ -36,9 +36,9 @@ func TestBackgroundRepliesAndTypedInput(t *testing.T) {
 		if string(rest) != test.remaining {
 			t.Fatalf("%s: typed input = %q, want %q", test.name, rest, test.remaining)
 		}
-		shade, reported := backgroundShade(replies)
-		if shade != test.shade || reported != test.reported {
-			t.Fatalf("%s: shade %d reported %t, want %d %t", test.name, shade, reported, test.shade, test.reported)
+		color, reported := backgroundColor(replies)
+		if shade := presentation.ShadeOf(color.r, color.g, color.b); reported != test.reported || reported && shade != test.shade {
+			t.Fatalf("%s: color %v reported %t, want shade %d reported %t", test.name, color, reported, test.shade, test.reported)
 		}
 	}
 }

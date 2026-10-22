@@ -12,38 +12,16 @@ var (
 	plainTheme  = presentation.NewTheme(presentation.ANSI16, presentation.LightBackground, presentation.AccentPlum)
 )
 
-// Code sits on a card as wide as its text, so the tint reaches the same right
-// edge on every row, whether a line is short, long, or wraps.
-func TestCodeLinesFillTheCardAtAnyLength(t *testing.T) {
-	const width = 40
-	markdown := presentation.NewMarkdown(tintedTheme)
-	var rows []string
-	for _, line := range []string{"```go", "x := 1", strings.Repeat("word ", 20), "```"} {
-		rows = append(rows, blockRows(tintedTheme, markdown.Block(line), width)...)
-	}
-	if len(rows) < 6 {
-		t.Fatalf("code on a card has %d rows: %q", len(rows), rows)
-	}
-	for _, row := range rows {
-		if cells := presentation.CellWidth(presentation.Safe(row)); cells != width {
-			t.Fatalf("card row is %d cells wide, want %d: %q", cells, width, presentation.Safe(row))
+// A code fence shows only its language, in gray, on every terminal, and a
+// closing fence is air, so code copies without marks around it.
+func TestCodeFenceIsTheLanguageAlone(t *testing.T) {
+	for _, theme := range []presentation.Theme{tintedTheme, plainTheme} {
+		markdown := presentation.NewMarkdown(theme)
+		fence := presentation.Safe(markdown.Line("```go"))
+		markdown.Line("x := 1")
+		if fence != "go" || markdown.Line("```") != "" {
+			t.Fatalf("fence = %q", fence)
 		}
-	}
-	if !strings.Contains(presentation.Safe(rows[1]), "go") {
-		t.Fatalf("the card does not name its language: %q", presentation.Safe(rows[1]))
-	}
-}
-
-// Without a tint code stays between rules, as before, and prose is not a card.
-func TestCodeWithoutTintKeepsItsRules(t *testing.T) {
-	markdown := presentation.NewMarkdown(plainTheme)
-	fence := blockRows(plainTheme, markdown.Block("```go"), 40)
-	if len(fence) != 1 || !strings.Contains(presentation.Safe(fence[0]), "────") {
-		t.Fatalf("fence without tint = %q", fence)
-	}
-	prose := blockRows(tintedTheme, presentation.NewMarkdown(tintedTheme).Block("plain words"), 40)
-	if len(prose) != 1 || strings.Contains(prose[0], "▗") {
-		t.Fatalf("prose became a card: %q", prose)
 	}
 }
 

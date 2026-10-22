@@ -85,7 +85,7 @@ func TestBusyActivityKeepsPreview(t *testing.T) {
 	s.activitySince = time.Now()
 	s.drawLocked()
 	initial := take()
-	for _, text := range []string{"first preview line", "second preview line", "working", "Input paused", "Ctrl-C"} {
+	for _, text := range []string{"first preview line", "second preview line", "working", "^C"} {
 		if !strings.Contains(strings.Join(s.live, "\n"), text) {
 			t.Fatalf("busy view is missing %q: %q", text, s.live)
 		}
@@ -96,8 +96,8 @@ func TestBusyActivityKeepsPreview(t *testing.T) {
 	if strings.Count(got, "\x1b[2K") != 1 || strings.Contains(got, "preview") || len(got) >= len(initial) {
 		t.Fatalf("activity mark repainted preview: %q", got)
 	}
-	if s.cursorVisible {
-		t.Fatal("busy cursor is visible")
+	if !s.cursorVisible {
+		t.Fatal("busy composer hid its cursor")
 	}
 }
 
@@ -203,20 +203,22 @@ func TestChoiceNarrowAndNoColor(t *testing.T) {
 	}
 }
 
-func TestPromptToBusyKeepsInactiveComposer(t *testing.T) {
+func TestPromptToBusyKeepsEditableComposer(t *testing.T) {
 	s, take := renderScreen(t, modePrompt, 8, 40)
+	result := make(chan answer, 1)
+	s.result = result
 	s.insertLocked("finished input")
 	s.drawLocked()
 	take()
-	s.finishLocked(answer{text: "finished input"})
+	s.keyLocked(key{kind: keyEnter})
 	s.drawLocked()
 	if got := take(); got == "" {
 		t.Fatal("mode change did not redraw the composer")
 	}
 	frame := strings.Join(s.live, "\n")
-	if strings.Contains(frame, "finished input") || !strings.Contains(frame, "Input paused") ||
-		!strings.Contains(frame, "Ctrl-C") || s.cursorVisible || len(s.text) != 0 {
-		t.Fatalf("busy composer is not empty and inactive: %q", frame)
+	if (<-result).text != "finished input" || strings.Contains(frame, "finished input") ||
+		!strings.Contains(frame, "^C") || !s.cursorVisible || len(s.text) != 0 {
+		t.Fatalf("busy composer is not empty and editable: %q", frame)
 	}
 }
 
@@ -368,7 +370,7 @@ func TestNarrowSafetyHintsAndStatusRemainVisible(t *testing.T) {
 		s.drawLocked()
 		take()
 		visible := withoutStyles(strings.Join(s.live, ""))
-		if !strings.Contains(visible, s.status) || !strings.Contains(visible, "cancel") {
+		if !strings.Contains(visible, s.status) || !strings.Contains(visible, "^C") {
 			t.Fatalf("status or cancellation key is hidden at width %d: %q", cols, visible)
 		}
 		s, take = renderScreen(t, modeChoice, 8, cols)
@@ -386,8 +388,26 @@ func TestNarrowSafetyHintsAndStatusRemainVisible(t *testing.T) {
 	}
 }
 
+// commandRequest is a request whose work is one short command.
+var commandRequest = presentation.ApprovalRequest{
+	Title: "Run a command", Caption: "Bash · timeout 120s · full filesystem access, not sandboxed",
+	Work: []presentation.WorkLine{{Text: "go test ./..."}},
+}
+
+// tallRequest is a request whose work cannot fit a small screen.
+var tallRequest = presentation.ApprovalRequest{
+	Title: "Write a.txt", Caption: "Write or replace a.txt",
+	Work: func() []presentation.WorkLine {
+		lines := make([]presentation.WorkLine, 20)
+		for index := range lines {
+			lines[index] = presentation.WorkLine{Text: "+ line", Kind: presentation.WorkAdded}
+		}
+		return lines
+	}(),
+}
+
 func TestComposerCardAndApprovalCard(t *testing.T) {
-	s, take := renderScreen(t, modePrompt, 10, 60)
+	s, take := renderScreen(t, modePrompt, 16, 60)
 	s.drawLocked()
 	take()
 	if !strings.HasPrefix(s.live[0], "╭") || !strings.HasPrefix(s.live[len(s.live)-2], "╰") {
@@ -398,55 +418,55 @@ func TestComposerCardAndApprovalCard(t *testing.T) {
 			t.Fatalf("card row is %d cells, want 59: %q", got, row)
 		}
 	}
-	s.mode, s.card, s.layoutDirty = modeChoice, "Run go test\ngo test ./...", true
+	request := commandRequest
+	s.mode, s.request, s.layoutDirty = modeChoice, &request, true
 	s.drawLocked()
 	take()
 	frame := strings.Join(s.live, "\n")
-	if !strings.Contains(s.live[0], "Approval needed") || !strings.Contains(frame, "go test ./...") || !strings.Contains(frame, "allow once") {
-		t.Fatalf("approval card is missing its request or choices: %q", s.live)
+	if !strings.Contains(s.live[0], "Approval needed") || !strings.Contains(frame, "go test ./...") || !strings.Contains(frame, "y once") {
+		t.Fatalf("approval box is missing its request or choices: %q", s.live)
 	}
-	s.card, s.layoutDirty = strings.Repeat("line\n", 20), true
+	tall := tallRequest
+	s.request, s.layoutDirty = &tall, true
 	s.drawLocked()
 	take()
-	if strings.Contains(strings.Join(s.live, "\n"), "line") || len(s.live) > 10 {
-		t.Fatalf("a card that does not fit must leave only the choices: %q", s.live)
+	if strings.Contains(strings.Join(s.live, "\n"), "line") || len(s.live) > 16 {
+		t.Fatalf("a request that does not fit must leave only the choices: %q", s.live)
 	}
 }
 
-// With a tint the approval request is an amber card: its title is the first
-// row, its choices follow, the key hint sits under it, and no row is wider
-// than the live width. A request that does not fit leaves only the choices.
-func TestSoftApprovalCard(t *testing.T) {
+// With a tint a request is a rounded box with the action, the work, and the
+// caption, followed by the choices and the key hint; no row is wider than
+// the live width. A request that does not fit leaves only the choices.
+func TestSoftApprovalIsABox(t *testing.T) {
 	s, take := renderScreen(t, modeChoice, 14, 70)
 	s.theme = presentation.NewTheme(presentation.TrueColor, presentation.LightBackground, presentation.AccentPlum)
-	s.card, s.layoutDirty = "Run go test\ngo test ./...", true
+	if !s.RequestFits(commandRequest) {
+		t.Fatal("a short request does not fit")
+	}
+	if s.RequestFits(tallRequest) {
+		t.Fatal("a request taller than the screen fits")
+	}
+	request := commandRequest
+	s.request, s.layoutDirty = &request, true
 	s.drawLocked()
 	take()
 	frame := withoutStyles(strings.Join(s.live, "\n"))
-	for _, want := range []string{"Approval needed", "go test ./...", "allow once", "Enter / Esc deny"} {
+	for _, want := range []string{"╭", "Run a command", "go test ./...", "not sandboxed", "╰", "Allow?", "y once", "n no", "Enter / Esc deny"} {
 		if !strings.Contains(frame, want) {
-			t.Fatalf("soft approval card is missing %q: %q", want, frame)
+			t.Fatalf("soft approval is missing %q: %q", want, frame)
 		}
 	}
-	if strings.ContainsAny(frame, "╭╮╰╯") {
-		t.Fatalf("a soft approval card drew a border: %q", frame)
+	if strings.Index(frame, "Run a command") > strings.Index(frame, "go test") || strings.Index(frame, "╰") > strings.Index(frame, "Allow?") {
+		t.Fatalf("the box must hold the work and lead to the choices: %q", frame)
 	}
-	titleRow := -1
-	for index, row := range s.live {
+	for _, row := range s.live {
 		if cellWidth(withoutStyles(row)) > s.cols-1 {
 			t.Fatalf("row of %d cells exceeds the live width: %q", cellWidth(withoutStyles(row)), withoutStyles(row))
 		}
-		if strings.Contains(withoutStyles(row), "Approval needed") {
-			titleRow = index
-		}
 	}
-	if titleRow != 1 {
-		t.Fatalf("the title is on row %d, the first row of the card is 1", titleRow)
-	}
-	if !s.CardFits("Run go test\ngo test ./...") {
-		t.Fatal("a short request does not fit")
-	}
-	s.card, s.layoutDirty = strings.Repeat("line\n", 20), true
+	tall := tallRequest
+	s.request, s.layoutDirty = &tall, true
 	s.drawLocked()
 	take()
 	if strings.Contains(withoutStyles(strings.Join(s.live, "\n")), "line") || len(s.live) > 14 {
@@ -471,11 +491,11 @@ func TestCardFootHoldsKeysAndStatusBarEndsAtRightEdge(t *testing.T) {
 	if strings.Contains(bar, "Enter") {
 		t.Fatal("keys repeated in the status bar")
 	}
-	s, take = renderScreen(t, modeBusy, 10, 18)
+	s, take = renderScreen(t, modeBusy, 10, 17)
 	s.drawLocked()
 	take()
 	frame := withoutStyles(strings.Join(s.live, "\n"))
-	if !strings.Contains(frame, "^C cancel") || strings.Contains(s.live[len(s.live)-2], "cancel") {
+	if !strings.Contains(frame, "^C") || strings.Contains(s.live[len(s.live)-2], "^C") {
 		t.Fatalf("narrow card did not move the key to the status bar: %q", s.live)
 	}
 }
@@ -502,16 +522,15 @@ func TestWrapWords(t *testing.T) {
 	}
 }
 
-// With a tint the composer is a card without a border: its rows fill the
-// live width, the key hint moves under the card, and the typed text sits
-// where the cursor says. Without a tint the border stays.
-func TestSoftComposerCardAndHintUnderIt(t *testing.T) {
+// With a tint the composer is a rounded box with a cursor in the model
+// color, and the keys sit in the status bar under it, not in its border.
+func TestSoftComposerBoxAndHintUnderIt(t *testing.T) {
 	s, _ := renderScreen(t, modePrompt, 14, 70)
 	s.theme = presentation.NewTheme(presentation.TrueColor, presentation.LightBackground, presentation.AccentPlum)
 	s.insertLocked("typed text")
 	s.layoutLocked()
 	if !s.soft {
-		t.Fatal("a tinted theme did not draw a soft card")
+		t.Fatal("a tinted theme did not draw the gallery")
 	}
 	width := s.cols - 1
 	for _, row := range s.frame {
@@ -520,27 +539,26 @@ func TestSoftComposerCardAndHintUnderIt(t *testing.T) {
 		}
 	}
 	typed := withoutStyles(s.frame[s.frameRow])
-	if !strings.Contains(typed, "typed text") || strings.Contains(typed, "│") {
+	if !strings.HasPrefix(typed, "│ ❯ typed text") {
 		t.Fatalf("composer row = %q", typed)
 	}
 	if s.frameCol != 2+2+len("typed text") {
 		t.Fatalf("cursor column %d is not after the typed text", s.frameCol)
 	}
-	last := withoutStyles(s.frame[len(s.frame)-1])
-	if !strings.Contains(last, "Enter send") {
-		t.Fatalf("the key hint is not under the card: %q", last)
-	}
-	for _, row := range s.frame {
-		if strings.ContainsAny(withoutStyles(row), "╭╮╰╯") {
-			t.Fatalf("a soft card drew a border: %q", withoutStyles(row))
+	top := withoutStyles(s.frame[s.frameRow-1])
+	bottom := ""
+	for _, row := range s.frame[s.frameRow+1:] {
+		if plain := withoutStyles(row); strings.HasPrefix(plain, "╰") {
+			bottom = plain
+			break
 		}
 	}
-
-	bordered, _ := renderScreen(t, modePrompt, 14, 70)
-	bordered.theme = presentation.NewTheme(presentation.ANSI16, presentation.LightBackground, presentation.AccentPlum)
-	bordered.layoutLocked()
-	if bordered.soft || !strings.Contains(withoutStyles(strings.Join(bordered.frame, "\n")), "╭") {
-		t.Fatal("a theme without a tint lost its border")
+	if !strings.HasPrefix(top, "╭") || bottom == "" || strings.Contains(bottom, "Enter") {
+		t.Fatalf("the box does not hold the input, or its border holds keys: %q / %q", top, bottom)
+	}
+	last := withoutStyles(s.frame[len(s.frame)-1])
+	if !strings.Contains(last, "Enter send") {
+		t.Fatalf("the key hint is not under the bar: %q", last)
 	}
 }
 
@@ -618,17 +636,18 @@ func TestSoftFooterLeavesOutThePlaceOnShortScreens(t *testing.T) {
 	}
 }
 
-// With a tint the working status rides on a hairline that fills the row.
-func TestWorkingStatusRidesOnAHairline(t *testing.T) {
-	s := softScreen(t, modeBusy, 24, 80)
+// The working row leads with the mark, the status, and the seconds. With
+// motion the trace sits at its right end, so the row spans the live width;
+// without motion nothing follows the seconds.
+func TestWorkingStatusLeadsTheRow(t *testing.T) {
+	s := softScreen(t, modeBusy, 24, 100)
 	s.status, s.activitySince = "Writing reply", time.Now().Add(-3*time.Second)
-	row := withoutStyles(s.activityLocked())
-	if !strings.HasPrefix(row, "── ") || !strings.Contains(row, "Writing reply · 3s") || !strings.HasSuffix(row, "──") || cellWidth(row) != s.cols-1 {
-		t.Fatalf("working row = %q (%d cells)", row, cellWidth(row))
+	if row := withoutStyles(s.activityLocked()); row != "  ·  Writing reply   3s" {
+		t.Fatalf("still working row = %q", row)
 	}
-	plain, _ := renderScreen(t, modeBusy, 24, 80)
-	plain.status = "Writing reply"
-	if got := withoutStyles(plain.activityLocked()); strings.Contains(got, "──") {
-		t.Fatalf("a theme without a tint drew a rule: %q", got)
+	s.effects.motion, s.effects.epoch = true, time.Now()
+	row := withoutStyles(s.activityLocked())
+	if !strings.HasPrefix(row, "  ") || !strings.Contains(row, "Writing reply   3s") || !strings.HasSuffix(row, "─") || cellWidth(row) != s.cols-1 {
+		t.Fatalf("working row = %q (%d cells)", row, cellWidth(row))
 	}
 }

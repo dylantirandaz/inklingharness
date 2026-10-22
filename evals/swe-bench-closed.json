@@ -1,0 +1,127 @@
+{
+  "job_name": "swe-bench-verified-40-closed",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 20,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "import_path": "evals.harbor_environment:NativeModalEnvironment",
+    "cpu_enforcement_policy": "guarantee",
+    "memory_enforcement_policy": "guarantee",
+    "kwargs": {
+      "app_name": "inkling-terminal-bench",
+      "modal_vm_runtime": true
+    }
+  },
+  "agents": [
+    {
+      "import_path": "evals.harbor_think:Think",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "binary_path": "out/terminal-bench/think-noweb-linux-amd64",
+        "reasoning_effort": "high",
+        "no_web": true
+      }
+    },
+    {
+      "name": "claude-code",
+      "model_name": "thinkingmachines/inkling-small",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+        "ANTHROPIC_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "2.1.205",
+        "reasoning_effort": "high",
+        "disable_web_search": true
+      }
+    },
+    {
+      "import_path": "evals.harbor_codex:CodexOpenRouter",
+      "model_name": "thinkingmachines/inkling-small",
+      "env": {
+        "OPENAI_BASE_URL": "https://openrouter.ai/api/v1",
+        "OPENAI_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "0.146.0",
+        "reasoning_effort": "high",
+        "disable_web_search": true
+      }
+    },
+    {
+      "name": "pi",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "0.87.1",
+        "thinking": "high"
+      }
+    },
+    {
+      "import_path": "evals.harbor_bare_native:NativeBare",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "binary_path": "out/terminal-bench/bare-logged-linux-amd64",
+        "reasoning_effort": "high"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "path": "out/terminal-bench/swe-bench-closed",
+      "task_names": [
+        "django__django-10914",
+        "django__django-11066",
+        "django__django-11119",
+        "django__django-11179",
+        "django__django-11728",
+        "django__django-11749",
+        "django__django-11880",
+        "django__django-13033",
+        "django__django-13195",
+        "django__django-13410",
+        "django__django-13590",
+        "django__django-13820",
+        "django__django-14017",
+        "django__django-14771",
+        "django__django-16595",
+        "matplotlib__matplotlib-20826",
+        "matplotlib__matplotlib-22719",
+        "matplotlib__matplotlib-25287",
+        "matplotlib__matplotlib-25479",
+        "psf__requests-2317",
+        "pydata__xarray-3305",
+        "pydata__xarray-4966",
+        "pydata__xarray-6992",
+        "pylint-dev__pylint-7080",
+        "scikit-learn__scikit-learn-25232",
+        "sphinx-doc__sphinx-8056",
+        "sphinx-doc__sphinx-8120",
+        "sphinx-doc__sphinx-8459",
+        "sphinx-doc__sphinx-8548",
+        "sphinx-doc__sphinx-8595",
+        "sympy__sympy-12096",
+        "sympy__sympy-13615",
+        "sympy__sympy-13798",
+        "sympy__sympy-13974",
+        "sympy__sympy-15345",
+        "sympy__sympy-17139",
+        "sympy__sympy-19783",
+        "sympy__sympy-19954",
+        "sympy__sympy-20428",
+        "sympy__sympy-22714"
+      ]
+    }
+  ]
+}

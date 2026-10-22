@@ -15,7 +15,7 @@ import (
 func TestIntroCommitsBeforeOtherOutput(t *testing.T) {
 	s, take := renderScreen(t, modePrompt, 20, 80)
 	s.effects = effects{motion: true, epoch: time.Now()}
-	s.Intro([]string{"first frame\nfirst frame", "final banner\nfinal banner"})
+	s.Intro(twoFrames("first frame\nfirst frame", "final banner\nfinal banner"))
 	if got := take(); !strings.Contains(got, "first frame") || strings.Contains(got, "final banner") {
 		t.Fatalf("intro did not start at its first frame: %q", got)
 	}
@@ -37,9 +37,19 @@ func TestIntroCommitsBeforeOtherOutput(t *testing.T) {
 	}
 
 	still, take := renderScreen(t, modePrompt, 20, 80)
-	still.Intro([]string{"first frame", "final banner"})
+	still.Intro(twoFrames("first frame", "final banner"))
 	if got := take(); strings.Contains(got, "first frame") || !strings.Contains(got, "final banner") {
 		t.Fatalf("intro without motion did not go straight to its final frame: %q", got)
+	}
+}
+
+// twoFrames is an intro that shows first until it ends on final.
+func twoFrames(first, final string) func(float64) string {
+	return func(progress float64) string {
+		if progress >= 1 {
+			return final
+		}
+		return first
 	}
 }
 
@@ -201,8 +211,9 @@ func TestApprovalWakesTheReadLoop(t *testing.T) {
 	if err != nil || !woken {
 		t.Fatalf("approval did not wake the read loop: woken %t, %v", woken, err)
 	}
+	// The request waits without motion, so the process can sleep until a key.
 	s.mode = modeChoice
-	if interval := s.frameIntervalLocked(time.Now()); interval != steadyInterval {
+	if interval := s.frameIntervalLocked(time.Now()); interval != 0 {
 		t.Fatalf("approval animates every %v", interval)
 	}
 }

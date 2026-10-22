@@ -155,6 +155,50 @@ func TestLoopRoundTripsReasoningAndToolResults(t *testing.T) {
 	}
 }
 
+// A run is audited from its events, so each tool event must hold what the
+// model ran and what came back.
+func TestToolEventRecordsTheCommandAndItsOutput(t *testing.T) {
+	requests := 0
+	test := newTestAgent(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			streamReply(w, append([]string{
+				start(0, `{"type":"tool_use","id":"call_1","name":"bash","input":{}}`),
+				delta(0, `{"type":"input_json_delta","partial_json":"{\"command\":\"printf audit; exit 3\"}"}`),
+				stop,
+			}, finish("tool_use")...)...)
+			return
+		}
+		streamReply(w, append([]string{start(0, `{"type":"text","text":"Done."}`), stop}, finish("end_turn")...)...)
+	})
+	if err := test.run(context.Background(), "task"); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(test.events.String()), "\n") {
+		var event struct {
+			Event  string          `json:"event"`
+			Input  json.RawMessage `json:"input"`
+			Output string          `json:"output"`
+			Error  bool            `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("event %q: %v", line, err)
+		}
+		if event.Event != "tool" {
+			continue
+		}
+		found = true
+		sameJSON(t, event.Input, `{"command":"printf audit; exit 3"}`)
+		if event.Output != "audit\n[exit code 3]" || !event.Error {
+			t.Errorf("output %q, error %t", event.Output, event.Error)
+		}
+	}
+	if !found {
+		t.Fatalf("no tool event in:\n%s", test.events)
+	}
+}
+
 // A reply that stops at the output cap can hold a tool call with cut input.
 // The next request must stay valid JSON, and the model hears about the error.
 func TestCutToolInputGetsAnErrorResultAndAValidEcho(t *testing.T) {
@@ -288,6 +332,36 @@ func TestErrorBodyWithStatusOKIsReported(t *testing.T) {
 		io.WriteString(w, ": keep-alive\n\n"+`{"error":{"message":"provider failed"}}`)
 	})
 	if err := test.run(context.Background(), "task"); err == nil || !strings.Contains(err.Error(), "provider failed") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// The reasoning effort travels in output_config, and only when it is set, so a
+// run without the flag sends exactly the request of the earlier runs.
+func TestEffortIsSentAsOutputConfigOnlyWhenSet(t *testing.T) {
+	for _, effort := range []string{"", "high"} {
+		var sent map[string]json.RawMessage
+		test := newTestAgent(t, func(w http.ResponseWriter, r *http.Request) {
+			sent = decodeRequest(t, r)
+			streamReply(w, append([]string{start(0, `{"type":"text","text":"ok"}`), stop}, finish("end_turn")...)...)
+		})
+		test.effort = effort
+		if err := test.run(context.Background(), "task"); err != nil {
+			t.Fatal(err)
+		}
+		output, present := sent["output_config"]
+		switch {
+		case effort == "" && present:
+			t.Errorf("a run without effort sent output_config %s", output)
+		case effort != "":
+			sameJSON(t, output, `{"effort":"high"}`)
+		}
+	}
+}
+
+func TestRunRefusesAnUnknownEffort(t *testing.T) {
+	err := run([]string{"-base-url", "http://127.0.0.1:1", "-model", "m", "-effort", "extreme", "--", "task"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "effort must be one of") {
 		t.Fatalf("err = %v", err)
 	}
 }

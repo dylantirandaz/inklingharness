@@ -1,113 +1,99 @@
 package presentation
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
-// cardPadding is the number of cells between the card's edge and its text.
+// cardPadding is the number of cells of air between a frame and its text.
 const cardPadding = 2
 
 // CardInset is the number of cells that a card takes from the width of its
-// text on each side.
-const CardInset = cardPadding
+// text on each side: the frame and the air inside it.
+const CardInset = cardPadding + 1
 
-// Soft reports whether the theme can draw a card: a faint tint behind the
-// text. Below 256 colors there is no tint, and a caller draws a border.
+// Soft reports whether the theme draws the full look: tints behind prompts
+// and diff lines, colored ink drops, and gradient edges. Below 256 colors a
+// tint cannot be expressed, and the plain renderers take over.
 func (t Theme) Soft() bool { return t.chip != "" }
 
-// CardTone is the tint of a card. Paper is the page's own shade. The others
-// carry meaning: a tool that worked, a tool that failed, and a request that
-// waits for the user.
-type CardTone uint8
-
-const (
-	TonePaper CardTone = iota
-	ToneSuccess
-	ToneFailure
-	ToneNotice
-)
-
-// The tints are the brand green, red, and amber at a low share of the page.
-var (
-	successTint = shaded{dark: rgb{24, 42, 35}, light: rgb{238, 247, 243}}
-	failureTint = shaded{dark: rgb{56, 30, 28}, light: rgb{253, 239, 236}}
-	// A request for approval breathes between a faint and a stronger amber.
-	noticeTint       = shaded{dark: rgb{46, 37, 20}, light: rgb{254, 247, 232}}
-	noticeTintStrong = shaded{dark: rgb{68, 50, 20}, light: rgb{251, 236, 206}}
-)
-
-// toneColor is the tint of a tone. Breath from 0 to 1 only moves the notice
-// between its faint and strong shades.
-func (t Theme) toneColor(tone CardTone, breath float64) rgb {
-	switch tone {
-	case TonePaper:
-		return chipColor.on(t.shade)
-	case ToneSuccess:
-		return successTint.on(t.shade)
-	case ToneFailure:
-		return failureTint.on(t.shade)
-	case ToneNotice:
-		return blend(noticeTint.on(t.shade), noticeTintStrong.on(t.shade), breath)
-	}
-	panic("presentation: unknown card tone")
-}
-
-// A card is set on a soft tint with rounded corners, like the cards of the
-// Inkling page: no border, only a shade of paper. The corners are quadrant
-// blocks, so the card begins and ends half a row inside its first and last
-// row, and two cards in a row are a full row apart. Each method returns the
-// rows unchanged, or nothing, when the theme has no tint.
-
-func (t Theme) edge(left, middle, right string, color rgb, width int) string {
-	if !t.Soft() || width < 2 {
-		return ""
-	}
-	return t.foreground(color, "") + left + strings.Repeat(middle, width-2) + right + reset
-}
-
-func (t Theme) rowOn(background, row string, width int) string {
-	padding := max(width-2*cardPadding-CellWidth(Safe(row)), 0)
-	edge := strings.Repeat(" ", cardPadding)
-	return background + edge + strings.ReplaceAll(row, reset, reset+background) + strings.Repeat(" ", padding) + edge + reset
-}
-
-// CardTop is the first edge of a paper card of width cells.
-func (t Theme) CardTop(width int) string {
-	return t.edge("▗", "▄", "▖", t.toneColor(TonePaper, 0), width)
-}
-
-// CardBottom is the last edge of a paper card of width cells.
-func (t Theme) CardBottom(width int) string {
-	return t.edge("▝", "▀", "▘", t.toneColor(TonePaper, 0), width)
-}
-
-// CardRow sets one row of text on the paper tint, padded to width cells. A
-// row that holds a reset keeps the tint after it. A row wider than the card
-// is not cut.
-func (t Theme) CardRow(row string, width int) string {
-	if !t.Soft() {
-		return row
-	}
-	return t.rowOn(t.chip, row, width)
-}
-
-// Card sets rows inside a paper card of width cells.
+// Card sets rows in a thin frame of width cells, as a piece hangs in a
+// gallery: a line around the text and air inside it, with no fill, so the
+// page shows through. Rows must fit width-2*CardInset cells; a wider row is
+// not cut.
 func (t Theme) Card(rows []string, width int) []string {
-	return t.ToneCard(rows, width, TonePaper, 0)
+	inner := max(width-2, 0)
+	edge := strings.Repeat("─", inner)
+	side, air := t.Frame("│"), strings.Repeat(" ", cardPadding)
+	out := make([]string, 0, len(rows)+2)
+	out = append(out, t.Frame("┌"+edge+"┐"))
+	for _, row := range rows {
+		gap := max(inner-2*cardPadding-visibleWidth(row), 0)
+		out = append(out, side+air+row+strings.Repeat(" ", gap)+air+side)
+	}
+	return append(out, t.Frame("└"+edge+"┘"))
 }
 
-// ToneCard sets rows inside a card of the given tone. Breath from 0 to 1
-// moves a notice between faint and strong, so a caller can make it breathe.
-// It returns the rows unchanged when the theme has no tint or the card has no
-// room.
-func (t Theme) ToneCard(rows []string, width int, tone CardTone, breath float64) []string {
-	if !t.Soft() || width < 2*cardPadding+2 {
-		return rows
-	}
-	color := t.toneColor(tone, breath)
-	background := t.background(color)
+// visibleWidth is the number of cells that a styled row takes on screen.
+func visibleWidth(row string) int { return CellWidth(Safe(row)) }
+
+// edgeSteps is how many colors a gradient edge takes from plum to blue. Few
+// steps keep long runs of one color, so an edge costs a few dozen bytes.
+const edgeSteps = 12
+
+// GradientBox sets rows in a rounded box of width cells whose edge runs from
+// plum at the left to blue at the right, the two colors of the Inkling page.
+// A row sits one cell inside each side and must fit width-4 cells; a shorter
+// row is padded.
+func (t Theme) GradientBox(rows []string, width int) []string {
+	inner := max(width-4, 0)
+	left := t.foreground(t.edgeColor(0, width), "") + "│" + reset
+	right := t.foreground(t.edgeColor(width-1, width), "") + "│" + reset
 	out := make([]string, 0, len(rows)+2)
-	out = append(out, t.edge("▗", "▄", "▖", color, width))
+	out = append(out, t.edgeRow("╭", "╮", width))
 	for _, row := range rows {
-		out = append(out, t.rowOn(background, row, width))
+		out = append(out, left+" "+row+strings.Repeat(" ", max(inner-visibleWidth(row), 0))+" "+right)
 	}
-	return append(out, t.edge("▝", "▀", "▘", color, width))
+	return append(out, t.edgeRow("╰", "╯", width))
+}
+
+// edgeRow is the top or the bottom of a gradient box.
+func (t Theme) edgeRow(open, close string, width int) string {
+	var line []byte
+	var drawn rgb
+	for column := range width {
+		glyph := "─"
+		switch column {
+		case 0:
+			glyph = open
+		case width - 1:
+			glyph = close
+		}
+		if color := t.edgeColor(column, width); column == 0 || color != drawn {
+			line = t.appendColor(line, color, false)
+			drawn = color
+		}
+		line = append(line, glyph...)
+	}
+	return string(append(line, reset...))
+}
+
+// edgeColor is the color of a gradient edge at column of width cells.
+func (t Theme) edgeColor(column, width int) rgb {
+	share := float64(column) / float64(max(width-1, 1))
+	return blend(plum.on(t.shade), blue.on(t.shade), math.Round(share*edgeSteps)/edgeSteps)
+}
+
+// roundedFrame is the gradient box for a terminal without 256 colors: the
+// same shape with a plain gray edge.
+func (t Theme) roundedFrame(rows []string, width int) []string {
+	inner := max(width-4, 0)
+	edge := strings.Repeat("─", max(width-2, 0))
+	side := t.Frame("│")
+	out := make([]string, 0, len(rows)+2)
+	out = append(out, t.Frame("╭"+edge+"╮"))
+	for _, row := range rows {
+		out = append(out, side+" "+row+strings.Repeat(" ", max(inner-visibleWidth(row), 0))+" "+side)
+	}
+	return append(out, t.Frame("╰"+edge+"╯"))
 }

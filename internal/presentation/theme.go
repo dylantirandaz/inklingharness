@@ -104,6 +104,7 @@ const (
 	roleInk role = iota
 	roleGraphite
 	roleHairline
+	roleFrame
 	roleGreen
 	roleBlue
 	roleRed
@@ -128,10 +129,13 @@ var (
 		roleInk:      {shaded{dark: rgb{232, 232, 232}, light: rgb{40, 40, 40}}, "39"},
 		roleGraphite: {shaded{dark: rgb{160, 160, 160}, light: rgb{103, 103, 103}}, "90"},
 		roleHairline: {shaded{dark: rgb{74, 74, 74}, light: rgb{208, 208, 206}}, "90"},
-		roleGreen:    {green, "32"},
-		roleBlue:     {blue, "34"},
-		roleRed:      {shaded{dark: rgb{242, 97, 76}, light: rgb{214, 58, 39}}, "31"},
-		roleAmber:    {shaded{dark: rgb{247, 162, 36}, light: rgb{184, 116, 16}}, "33"},
+		// A frame is a little stronger than a hairline: it holds a piece, and
+		// the eye must find its edge.
+		roleFrame: {shaded{dark: rgb{100, 100, 98}, light: rgb{176, 176, 172}}, "90"},
+		roleGreen: {green, "32"},
+		roleBlue:  {blue, "34"},
+		roleRed:   {shaded{dark: rgb{242, 97, 76}, light: rgb{214, 58, 39}}, "31"},
+		roleAmber: {shaded{dark: rgb{222, 172, 92}, light: rgb{184, 116, 16}}, "33"},
 		// Inline code and paths: the brand azure, a little deeper on paper.
 		roleCode: {shaded{dark: rgb{97, 175, 239}, light: rgb{2, 112, 189}}, "36"},
 	}
@@ -166,6 +170,10 @@ type Theme struct {
 	// added and removed tint diff lines; empty below 256 colors, where
 	// diff lines fall back to green and red text.
 	added, removed string
+	// paper is the background color that the terminal reported; paperKnown
+	// is false when it reported none, and the shade gives an estimate.
+	paper      rgb
+	paperKnown bool
 }
 
 // NewTheme computes every sequence once.
@@ -234,10 +242,13 @@ func (t Theme) attribute(code, text string) string {
 func (t Theme) Ink(text string) string      { return t.paint(roleInk, text) }
 func (t Theme) Graphite(text string) string { return t.paint(roleGraphite, text) }
 func (t Theme) Hairline(text string) string { return t.paint(roleHairline, text) }
-func (t Theme) Green(text string) string    { return t.paint(roleGreen, text) }
-func (t Theme) Blue(text string) string     { return t.paint(roleBlue, text) }
-func (t Theme) Red(text string) string      { return t.paint(roleRed, text) }
-func (t Theme) Amber(text string) string    { return t.paint(roleAmber, text) }
+
+// Frame paints the line around a piece: a card or a request for approval.
+func (t Theme) Frame(text string) string { return t.paint(roleFrame, text) }
+func (t Theme) Green(text string) string { return t.paint(roleGreen, text) }
+func (t Theme) Blue(text string) string  { return t.paint(roleBlue, text) }
+func (t Theme) Red(text string) string   { return t.paint(roleRed, text) }
+func (t Theme) Amber(text string) string { return t.paint(roleAmber, text) }
 
 // Accent is the model color: plum for Inkling-Small, blue for Inkling.
 func (t Theme) Accent(text string) string { return t.paint(roleAccent, text) }
@@ -321,7 +332,7 @@ func (t Theme) squareGlyph(r role) string {
 }
 
 // Blends reports whether the theme can draw the intermediate colors that the
-// fades need: drying ink, the breathing bar, and the mark reveal.
+// fades need: drying ink and the mark reveal.
 func (t Theme) Blends() bool { return t.depth >= ANSI256 }
 
 // mix is the splitmix64 finalizer.
@@ -342,22 +353,9 @@ func (t Theme) Wet(text string, wetness float64) string {
 	return t.foreground(blend(ink, pale, min(max(wetness, 0), 1)), "") + text + reset
 }
 
-// Glow draws text in amber that breathes: intensity 1 is full amber, 0 is
-// half way to the hairline. Without intermediate colors it stays amber.
-func (t Theme) Glow(text string, intensity float64) string {
-	if !t.Blends() {
-		return t.Amber(text)
-	}
-	amber := palette[roleAmber].color.on(t.shade)
-	pale := palette[roleHairline].color.on(t.shade)
-	return t.foreground(blend(pale, amber, 0.5+0.5*min(max(intensity, 0), 1)), "") + text + reset
-}
-
 // Gauge shows used of limit as a row of squares. Used squares take the
-// accent, turn amber near the limit, and red above it. glow from 0 to 1
-// dims and restores the amber and red squares, so a caller can make them
-// breathe; 1 is steady.
-func (t Theme) Gauge(used, limit, cells int, glow float64) string {
+// accent, turn amber near the limit, and red above it.
+func (t Theme) Gauge(used, limit, cells int) string {
 	if limit <= 0 || cells <= 0 {
 		return ""
 	}
@@ -379,11 +377,7 @@ func (t Theme) Gauge(used, limit, cells int, glow float64) string {
 			styles[index] = fill
 		}
 	}
-	if fill == roleAccent || glow >= 1 || !t.Blends() {
-		return t.squares(styles, t.squareGlyph)
-	}
-	color := blend(palette[roleHairline].color.on(t.shade), palette[fill].color.on(t.shade), 0.5+0.5*max(glow, 0))
-	return t.foreground(color, "") + strings.Repeat("▪", filled) + reset + t.Hairline(strings.Repeat("▪", cells-filled))
+	return t.squares(styles, t.squareGlyph)
 }
 
 func blend(from, to rgb, share float64) rgb {

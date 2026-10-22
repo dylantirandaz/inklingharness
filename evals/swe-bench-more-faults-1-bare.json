@@ -1,0 +1,44 @@
+{
+  "job_name": "swe-bench-more-faults-1-bare",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 2,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "import_path": "evals.harbor_environment:NativeModalEnvironment",
+    "cpu_enforcement_policy": "guarantee",
+    "memory_enforcement_policy": "guarantee",
+    "kwargs": {
+      "app_name": "inkling-terminal-bench",
+      "modal_vm_runtime": true,
+      "volumes": {
+        "/agent-binaries": "inkling-agent-binaries"
+      }
+    }
+  },
+  "agents": [
+    {
+      "import_path": "evals.harbor_bare_native:NativeBare",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "binary_path": "out/terminal-bench/bare-logged-linux-amd64",
+        "reasoning_effort": "high",
+        "staged_dir": "/agent-binaries"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "path": "out/terminal-bench/swe-bench-more",
+      "task_names": [
+        "django__django-16502",
+        "pydata__xarray-3993"
+      ]
+    }
+  ]
+}

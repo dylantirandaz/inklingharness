@@ -69,6 +69,56 @@ func TestParserEscapeAndArrow(t *testing.T) {
 	}
 }
 
+// VS Code's terminal sends Alt+Enter as Escape and a carriage return and
+// Alt+Up as a modified arrow; other terminals send Escape before a plain
+// arrow. The Escape forms of word keys must keep their meaning.
+func TestParserAltEnterAndAltUp(t *testing.T) {
+	for _, test := range []struct {
+		sequence string
+		kind     keyKind
+		split    bool
+	}{
+		{"\x1b\r", keyAltEnter, true},
+		{"\x1b[1;3A", keyAltUp, true},
+		{"\x1b\x1b[A", keyAltUp, false},
+		{"\x1bb", keyWordLeft, true},
+		{"\x1bf", keyWordRight, true},
+	} {
+		var p parser
+		if keys := p.feed([]byte(test.sequence), time.Now()); len(keys) != 1 || keys[0].kind != test.kind {
+			t.Fatalf("%q produced %#v", test.sequence, keys)
+		}
+		if !test.split {
+			continue
+		}
+		var keys []key
+		for _, b := range []byte(test.sequence) {
+			keys = append(keys, p.feed([]byte{b}, time.Now())...)
+		}
+		if len(keys) != 1 || keys[0].kind != test.kind {
+			t.Fatalf("%q one byte at a time produced %#v", test.sequence, keys)
+		}
+	}
+	now := time.Now()
+	var p parser
+	p.feed([]byte("\x1b"), now)
+	if keys := p.expire(now.Add(time.Second)); len(keys) != 1 || keys[0].kind != keyEscape {
+		t.Fatalf("lone escape = %#v", keys)
+	}
+	var text strings.Builder
+	for _, k := range p.feed([]byte("\x1b[200~a\x1b\rb\x1b[201~"), now) {
+		if k.kind == keyAltEnter {
+			t.Fatal("a paste sent the draft")
+		}
+		if k.kind == keyText {
+			text.WriteString(k.text)
+		}
+	}
+	if text.String() != "a\nb" {
+		t.Fatalf("paste with Escape and a carriage return = %q", text.String())
+	}
+}
+
 func TestStalePartialPasteCannotApprove(t *testing.T) {
 	now := time.Now()
 	var p parser
@@ -198,8 +248,8 @@ func TestInputLimitReturnsErrorAndLeavesBusy(t *testing.T) {
 		t.Fatal("oversized input left active prompt")
 	}
 	s.keyLocked(key{kind: keyText, text: "y"})
-	if len(s.text) != 0 {
-		t.Fatal("busy input was retained")
+	if string(s.text) != "y" {
+		t.Fatalf("busy draft after the failed prompt = %q", string(s.text))
 	}
 }
 

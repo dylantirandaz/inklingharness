@@ -1,0 +1,112 @@
+{
+  "job_name": "swe-bench-more-100-120",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 20,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "import_path": "evals.harbor_environment:NativeModalEnvironment",
+    "cpu_enforcement_policy": "guarantee",
+    "memory_enforcement_policy": "guarantee",
+    "kwargs": {
+      "app_name": "inkling-terminal-bench",
+      "modal_vm_runtime": true,
+      "volumes": {
+        "/agent-binaries": "inkling-agent-binaries"
+      }
+    }
+  },
+  "agents": [
+    {
+      "import_path": "evals.harbor_think:Think",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "binary_path": "out/terminal-bench/think-noweb-linux-amd64",
+        "reasoning_effort": "high",
+        "no_web": true,
+        "staged_dir": "/agent-binaries"
+      }
+    },
+    {
+      "name": "claude-code",
+      "model_name": "thinkingmachines/inkling-small",
+      "env": {
+        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+        "ANTHROPIC_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "2.1.205",
+        "reasoning_effort": "high",
+        "disable_web_search": true
+      }
+    },
+    {
+      "import_path": "evals.harbor_codex:CodexOpenRouter",
+      "model_name": "thinkingmachines/inkling-small",
+      "env": {
+        "OPENAI_BASE_URL": "https://openrouter.ai/api/v1",
+        "OPENAI_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "0.146.0",
+        "reasoning_effort": "high",
+        "disable_web_search": true
+      }
+    },
+    {
+      "name": "pi",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "0.87.1",
+        "thinking": "high"
+      }
+    },
+    {
+      "import_path": "evals.harbor_bare_native:NativeBare",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "binary_path": "out/terminal-bench/bare-logged-linux-amd64",
+        "reasoning_effort": "high",
+        "staged_dir": "/agent-binaries"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "path": "out/terminal-bench/swe-bench-more",
+      "task_names": [
+        "sympy__sympy-13091",
+        "pytest-dev__pytest-5262",
+        "sympy__sympy-18199",
+        "django__django-13925",
+        "pydata__xarray-6721",
+        "django__django-15499",
+        "matplotlib__matplotlib-23314",
+        "sphinx-doc__sphinx-8269",
+        "django__django-16527",
+        "matplotlib__matplotlib-14623",
+        "django__django-15741",
+        "django__django-16642",
+        "pydata__xarray-6744",
+        "django__django-10554",
+        "sympy__sympy-18763",
+        "django__django-12143",
+        "scikit-learn__scikit-learn-13124",
+        "sympy__sympy-24539",
+        "sympy__sympy-13551",
+        "django__django-16560"
+      ]
+    }
+  ]
+}

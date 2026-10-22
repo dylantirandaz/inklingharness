@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"syscall"
 	"time"
-
-	"github.com/dylantirandaz/inklingharness/internal/presentation"
 )
 
 // backgroundQuery asks for the background color (OSC 11) and then for the
@@ -28,35 +26,37 @@ const backgroundTimeout = 200 * time.Millisecond
 // maxReplyBytes bounds an unterminated OSC reply held by the input parser.
 const maxReplyBytes = 512
 
-// queryShade returns the shade of the terminal background and the bytes that
-// belong to neither reply, which are typed input. The terminal must be in raw
-// mode, or its replies would be echoed and held for a line. A terminal that
-// does not report its background is taken as dark, the common default.
-func queryShade(input, output *os.File, wake int) (presentation.Shade, []byte, error) {
+// terminalBackground is the background color that the terminal reported.
+type terminalBackground struct{ r, g, b uint8 }
+
+// queryBackground returns the background color of the terminal, or nil when
+// the terminal does not report it, and the bytes that belong to neither
+// reply, which are typed input. The terminal must be in raw mode, or its
+// replies would be echoed and held for a line.
+func queryBackground(input, output *os.File, wake int) (*terminalBackground, []byte, error) {
 	if _, err := io.WriteString(output, backgroundQuery); err != nil {
-		return presentation.DarkBackground, nil, fmt.Errorf("terminal background query: %w", err)
+		return nil, nil, fmt.Errorf("terminal background query: %w", err)
 	}
 	deadline := time.Now().Add(backgroundTimeout)
 	var received []byte
 	var data [256]byte
 	for {
 		if replies, rest, found := cutDeviceAttributes(received); found {
-			shade, reported := backgroundShade(replies)
-			if !reported {
-				shade = presentation.DarkBackground
+			if color, reported := backgroundColor(replies); reported {
+				return &color, rest, nil
 			}
-			return shade, rest, nil
+			return nil, rest, nil
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return presentation.DarkBackground, received, nil
+			return nil, received, nil
 		}
 		ready, _, err := waitReadable(int(input.Fd()), wake, remaining)
 		if errors.Is(err, syscall.EINTR) {
 			continue
 		}
 		if err != nil {
-			return presentation.DarkBackground, nil, fmt.Errorf("terminal background query: %w", err)
+			return nil, nil, fmt.Errorf("terminal background query: %w", err)
 		}
 		if !ready {
 			continue
@@ -66,10 +66,10 @@ func queryShade(input, output *os.File, wake int) (presentation.Shade, []byte, e
 			continue
 		}
 		if err != nil {
-			return presentation.DarkBackground, nil, fmt.Errorf("terminal background query: %w", err)
+			return nil, nil, fmt.Errorf("terminal background query: %w", err)
 		}
 		if n == 0 {
-			return presentation.DarkBackground, nil, fmt.Errorf("terminal background query: %w", io.EOF)
+			return nil, nil, fmt.Errorf("terminal background query: %w", io.EOF)
 		}
 		received = append(received, data[:n]...)
 	}
@@ -126,33 +126,33 @@ func terminatorOf(text []byte) (index, length int) {
 	}
 }
 
-// backgroundShade parses "ESC ] 11 ; rgb:R/G/B" with 1 to 4 hex digits for
+// backgroundColor parses "ESC ] 11 ; rgb:R/G/B" with 1 to 4 hex digits for
 // each channel.
-func backgroundShade(replies []byte) (presentation.Shade, bool) {
+func backgroundColor(replies []byte) (terminalBackground, bool) {
 	start := bytes.Index(replies, []byte("\x1b]11;rgb:"))
 	if start < 0 {
-		return presentation.DarkBackground, false
+		return terminalBackground{}, false
 	}
 	body := replies[start+len("\x1b]11;rgb:"):]
 	end, _ := terminatorOf(body)
 	if end < 0 {
-		return presentation.DarkBackground, false
+		return terminalBackground{}, false
 	}
 	parts := bytes.Split(body[:end], []byte("/"))
 	if len(parts) != 3 {
-		return presentation.DarkBackground, false
+		return terminalBackground{}, false
 	}
 	var channels [3]uint8
 	for index, part := range parts {
 		if len(part) < 1 || len(part) > 4 {
-			return presentation.DarkBackground, false
+			return terminalBackground{}, false
 		}
 		value, err := strconv.ParseUint(string(part), 16, 16)
 		if err != nil {
-			return presentation.DarkBackground, false
+			return terminalBackground{}, false
 		}
 		maximum := uint64(1)<<(4*len(part)) - 1
 		channels[index] = uint8((value*255 + maximum/2) / maximum)
 	}
-	return presentation.ShadeOf(channels[0], channels[1], channels[2]), true
+	return terminalBackground{channels[0], channels[1], channels[2]}, true
 }

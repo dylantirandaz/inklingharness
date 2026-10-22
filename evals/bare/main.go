@@ -17,11 +17,15 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
+
+// effortLevels are the reasoning efforts that Think also accepts.
+var effortLevels = []string{"low", "medium", "high", "xhigh", "max"}
 
 const (
 	defaultCommandTimeout = 120 * time.Second
@@ -48,12 +52,18 @@ type message struct {
 	Content []json.RawMessage `json:"content"`
 }
 
+// outputConfig is the Messages field that carries the reasoning effort.
+type outputConfig struct {
+	Effort string `json:"effort"`
+}
+
 type request struct {
-	Model     string            `json:"model"`
-	MaxTokens int               `json:"max_tokens"`
-	Stream    bool              `json:"stream"`
-	Tools     []json.RawMessage `json:"tools"`
-	Messages  []message         `json:"messages"`
+	Model        string            `json:"model"`
+	MaxTokens    int               `json:"max_tokens"`
+	Stream       bool              `json:"stream"`
+	Tools        []json.RawMessage `json:"tools"`
+	Messages     []message         `json:"messages"`
+	OutputConfig *outputConfig     `json:"output_config,omitempty"`
 }
 
 type textBlock struct {
@@ -406,6 +416,7 @@ type agent struct {
 	url       string
 	key       string
 	model     string
+	effort    string
 	maxTokens int
 	maxTurns  int
 	client    *http.Client
@@ -472,13 +483,17 @@ func (a *agent) open(ctx context.Context, body []byte) (*http.Response, error) {
 }
 
 func (a *agent) next(ctx context.Context, messages []message) (reply, error) {
-	body, err := json.Marshal(request{
+	payload := request{
 		Model:     a.model,
 		MaxTokens: a.maxTokens,
 		Stream:    true,
 		Tools:     []json.RawMessage{json.RawMessage(bashTool)},
 		Messages:  messages,
-	})
+	}
+	if a.effort != "" {
+		payload.OutputConfig = &outputConfig{Effort: a.effort}
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return reply{}, err
 	}
@@ -523,7 +538,8 @@ func (a *agent) run(ctx context.Context, instruction string) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			a.log(map[string]any{"event": "tool", "turn": turn, "seconds": time.Since(started).Seconds(), "bytes": len(result.content), "error": result.isError})
+			// The audit of a run needs to see what the model ran and what came back.
+			a.log(map[string]any{"event": "tool", "turn": turn, "seconds": time.Since(started).Seconds(), "bytes": len(result.content), "error": result.isError, "input": call.input, "output": result.content})
 			results = append(results, mustMarshal(toolResultBlock{"tool_result", call.id, result.content, result.isError}))
 		}
 		messages = append(messages, message{Role: "user", Content: results})
@@ -537,12 +553,16 @@ func run(arguments []string, events io.Writer) error {
 	baseURL := flags.String("base-url", "", "the Messages API base, without /v1/messages")
 	model := flags.String("model", "", "the model to request")
 	maxTokens := flags.Int("max-tokens", 16384, "the output token cap of each request")
+	effort := flags.String("effort", "", "reasoning effort, sent as output_config.effort: "+strings.Join(effortLevels, ", ")+"; empty sends none")
 	maxTurns := flags.Int("max-turns", 10000, "the most requests of one run")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
 	if *baseURL == "" || *model == "" || *maxTokens < 1 || *maxTurns < 1 || flags.NArg() != 1 {
-		return errors.New("usage: bare -base-url URL -model MODEL [-max-tokens N] [-max-turns N] -- INSTRUCTION")
+		return errors.New("usage: bare -base-url URL -model MODEL [-effort LEVEL] [-max-tokens N] [-max-turns N] -- INSTRUCTION")
+	}
+	if *effort != "" && !slices.Contains(effortLevels, *effort) {
+		return fmt.Errorf("effort must be one of %s, not %q", strings.Join(effortLevels, ", "), *effort)
 	}
 	key := os.Getenv("OPENROUTER_API_KEY")
 	if key == "" {
@@ -560,6 +580,7 @@ func run(arguments []string, events io.Writer) error {
 		url:       strings.TrimSuffix(*baseURL, "/"),
 		key:       key,
 		model:     *model,
+		effort:    *effort,
 		maxTokens: *maxTokens,
 		maxTurns:  *maxTurns,
 		client:    &http.Client{Transport: transport},

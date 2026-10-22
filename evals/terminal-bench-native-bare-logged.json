@@ -1,0 +1,37 @@
+{
+  "job_name": "terminal-bench-2.0-native-bare-logged",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 8,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "import_path": "evals.harbor_environment:NativeModalEnvironment",
+    "cpu_enforcement_policy": "guarantee",
+    "memory_enforcement_policy": "guarantee",
+    "kwargs": {
+      "app_name": "inkling-terminal-bench",
+      "modal_vm_runtime": true
+    }
+  },
+  "agents": [
+    {
+      "import_path": "evals.harbor_bare_native:NativeBare",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "binary_path": "out/terminal-bench/bare-logged-linux-amd64",
+        "reasoning_effort": "high"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "name": "terminal-bench",
+      "version": "2.0"
+    }
+  ]
+}

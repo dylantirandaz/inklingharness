@@ -16,42 +16,12 @@ func NewMarkdown(theme Theme) *Markdown {
 	return &Markdown{theme: theme}
 }
 
-// BlockKind says how a screen sets a rendered line.
-type BlockKind uint8
-
-const (
-	// ProseLine is ordinary text, a heading, a quote, or a list item.
-	ProseLine BlockKind = iota
-	// CodeStart is the fence that opens a code block.
-	CodeStart
-	// CodeLine is one line of code, already colored.
-	CodeLine
-	// CodeEnd is the fence that closes a code block.
-	CodeEnd
-)
-
-// Block is a rendered line and what it is.
-type Block struct {
-	Kind BlockKind
-	// Text is the line as Line returns it.
-	Text string
-	// Info is what an opening fence names after its marks, such as the
-	// language; it is plain text.
-	Info string
-}
-
 func (m *Markdown) Line(text string) string {
-	return m.render(Safe(text), true).Text
+	return m.render(Safe(text), true)
 }
 
 func (m *Markdown) Preview(text string) string {
-	return m.render(Safe(text), false).Text
-}
-
-// Block renders a complete line like Line and says what kind of line it is,
-// so that a screen can set code on a card instead of between rules.
-func (m *Markdown) Block(text string) Block {
-	return m.render(Safe(text), true)
+	return m.render(Safe(text), false)
 }
 
 // InCode reports whether a code fence is open.
@@ -62,7 +32,7 @@ func (m *Markdown) EndCode() {
 	m.fence, m.fenceLength, m.code = 0, 0, codeState{}
 }
 
-func (m *Markdown) render(text string, commit bool) Block {
+func (m *Markdown) render(text string, commit bool) string {
 	trimmed := strings.TrimLeft(text, " ")
 	indent := len(text) - len(trimmed)
 	var marker byte
@@ -76,45 +46,42 @@ func (m *Markdown) render(text string, commit bool) Block {
 			if commit {
 				m.EndCode()
 			}
-			return Block{Kind: CodeEnd, Text: m.theme.Hairline("────")}
+			// The block ends in air, not in a second mark.
+			return ""
 		}
 		if !commit {
 			// A preview colors against a copy, so a partial line never
 			// leaves a comment or string open for the committed one.
 			state := m.code
-			return Block{Kind: CodeLine, Text: highlight(text, &state, m.theme)}
+			return highlight(text, &state, m.theme)
 		}
-		return Block{Kind: CodeLine, Text: highlight(text, &m.code, m.theme)}
+		return highlight(text, &m.code, m.theme)
 	}
 	if indent >= 4 || strings.HasPrefix(trimmed, "\t") {
-		return Block{Text: text}
+		return text
 	}
 	if length >= 3 && (marker != '`' || !strings.Contains(trimmed[length:], "`")) {
 		if commit {
 			m.fence, m.fenceLength = marker, length
 			m.code = codeState{lang: languageFor(trimmed[length:])}
 		}
-		// The fence shows as a rule with the language, not as backticks.
-		rule := m.theme.Hairline("────")
-		info := strings.TrimSpace(trimmed[length:])
-		if info != "" {
-			rule += " " + m.theme.Graphite(info)
-		}
-		return Block{Kind: CodeStart, Text: rule, Info: info}
+		// The fence shows as the language in gray, a quiet label above the
+		// code, not as backticks. A fence with no language leaves air.
+		return m.theme.Graphite(strings.TrimSpace(trimmed[length:]))
 	}
 	if indent <= 3 && strings.HasPrefix(trimmed, "#") {
 		count := markerRun(trimmed, 0, '#')
 		if count <= 6 && count < len(trimmed) && trimmed[count] == ' ' {
-			return Block{Text: m.theme.Bold(m.theme.Ink(inline(strings.TrimLeft(trimmed[count:], " "), m.theme, 0)))}
+			return m.theme.Bold(m.theme.Ink(inline(strings.TrimLeft(trimmed[count:], " "), m.theme, 0)))
 		}
 	}
 	if strings.HasPrefix(trimmed, "> ") {
-		return Block{Text: text[:indent] + m.theme.Hairline("│ ") + m.theme.Italic(inline(trimmed[2:], m.theme, 0))}
+		return text[:indent] + m.theme.Hairline("│ ") + m.theme.Italic(inline(trimmed[2:], m.theme, 0))
 	}
 	if len(trimmed) >= 2 && (trimmed[0] == '-' || trimmed[0] == '*' || trimmed[0] == '+') && trimmed[1] == ' ' {
-		return Block{Text: text[:indent] + m.theme.Accent("• ") + inline(trimmed[2:], m.theme, 0)}
+		return text[:indent] + m.theme.Accent("• ") + inline(trimmed[2:], m.theme, 0)
 	}
-	return Block{Text: inline(text, m.theme, 0)}
+	return inline(text, m.theme, 0)
 }
 
 func markerRun(text string, start int, marker byte) int {

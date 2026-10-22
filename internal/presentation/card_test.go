@@ -6,46 +6,90 @@ import (
 	"testing"
 )
 
-// A card row fills its width, and the tint survives the resets inside the
-// row, so a styled word never leaves a hole in the card.
-func TestCardRowFillsWidthAndKeepsTint(t *testing.T) {
+// A card is a frame: every row is exactly the width, the edges close it, and
+// a styled row keeps its text inside the two sides.
+func TestCardFramesEveryRowAtTheWidth(t *testing.T) {
 	theme := NewTheme(TrueColor, LightBackground, AccentPlum)
-	row := theme.Graphite("quiet") + " text " + theme.Bold("bold")
-	got := theme.CardRow(row, 30)
-	if width := CellWidth(Safe(got)); width != 30 {
-		t.Fatalf("card row is %d cells wide: %q", width, Safe(got))
+	rows := theme.Card([]string{theme.Graphite("quiet") + " text " + theme.Bold("bold"), ""}, 30)
+	if len(rows) != 4 {
+		t.Fatalf("card has %d rows, want the 2 rows and 2 edges: %q", len(rows), rows)
 	}
-	parts := strings.Split(got, reset)
-	for index, part := range parts[:len(parts)-1] {
-		if !strings.HasPrefix(part, theme.chip) {
-			t.Fatalf("part %d of the card row has lost the tint: %q", index, part)
+	for index, row := range rows {
+		plain := Safe(row)
+		if width := CellWidth(plain); width != 30 {
+			t.Fatalf("row %d is %d cells wide: %q", index, width, plain)
+		}
+		first, last := []rune(plain)[0], []rune(plain)[len([]rune(plain))-1]
+		switch index {
+		case 0:
+			if first != '┌' || last != '┐' {
+				t.Fatalf("top edge = %q", plain)
+			}
+		case len(rows) - 1:
+			if first != '└' || last != '┘' {
+				t.Fatalf("bottom edge = %q", plain)
+			}
+		default:
+			if first != '│' || last != '│' {
+				t.Fatalf("row %d is not inside the frame: %q", index, plain)
+			}
 		}
 	}
-	if parts[len(parts)-1] != "" {
-		t.Fatalf("the card row does not end on a reset: %q", got)
+	if !strings.Contains(Safe(rows[1]), "quiet text bold") {
+		t.Fatalf("the text left the frame: %q", Safe(rows[1]))
 	}
 }
 
-// Below 256 colors there is no tint, so a card draws nothing of its own and
-// the caller keeps its border.
-func TestCardWithoutTintReturnsRowsUnchanged(t *testing.T) {
-	rows := []string{"one", "two"}
-	for _, theme := range []Theme{{}, NewTheme(ANSI16, DarkBackground, AccentBlue)} {
-		if theme.Soft() {
-			t.Fatalf("depth %d has a tint", theme.depth)
+// A request is a closed box after a row of air: every row is the same width
+// and stays inside the screen, the box holds the whole work, even a line
+// longer than the screen, a removed line takes the removed tint, and the
+// caption closes the box.
+func TestApprovalRowsBoxTheWholeWork(t *testing.T) {
+	theme := NewTheme(TrueColor, DarkBackground, AccentPlum)
+	long := "+ " + strings.Repeat("abcdefghij", 12)
+	request := NewApprovalRequest("edit_file", ToolView{
+		Title:   "Edit app.py",
+		Details: "Replace one exact occurrence in app.py\n- old line\n" + long,
+	})
+	if request.Title != "Edit app.py" || !strings.HasPrefix(request.Caption, "Replace one exact occurrence in app.py") {
+		t.Fatalf("label = %q / %q", request.Title, request.Caption)
+	}
+	if len(request.Work) != 2 || request.Work[0].Kind != WorkRemoved || request.Work[1].Kind != WorkAdded {
+		t.Fatalf("work = %+v", request.Work)
+	}
+	for _, air := range []bool{false, true} {
+		rows := theme.ApprovalRows(request, 70, air)
+		if rows[0] != "" || !strings.HasPrefix(strings.TrimSpace(Safe(rows[1])), "╭") || !strings.HasPrefix(strings.TrimSpace(Safe(rows[len(rows)-1])), "╰") {
+			t.Fatalf("the request is not a box after a row of air: %q", rows)
 		}
-		if got := theme.Card(rows, 30); !reflect.DeepEqual(got, rows) {
-			t.Fatalf("card without tint changed its rows: %q", got)
+		var shown strings.Builder
+		for _, row := range rows[1:] {
+			plain := Safe(row)
+			if CellWidth(plain) != 70 {
+				t.Fatalf("box row is %d cells, want 70: %q", CellWidth(plain), plain)
+			}
+			shown.WriteString(strings.TrimSpace(strings.Trim(strings.TrimSpace(plain), "│")))
+			if strings.Contains(plain, "- old line") && !strings.Contains(row, theme.removed) {
+				t.Fatalf("the removed line has no removed tint: %q", row)
+			}
+		}
+		if !strings.Contains(shown.String(), strings.TrimPrefix(long, "+ ")) || !strings.Contains(shown.String(), "- old line") {
+			t.Fatalf("the box lost part of the work (air %t): %q", air, shown.String())
+		}
+		if caption := Safe(rows[len(rows)-2]); !strings.Contains(caption, "not sandboxed") {
+			t.Fatalf("the caption does not close the box: %q", caption)
 		}
 	}
 }
 
-func TestCardEdgesSpanTheWidth(t *testing.T) {
-	theme := NewTheme(TrueColor, DarkBackground, AccentGreen)
-	for _, edge := range []string{theme.CardTop(20), theme.CardBottom(20)} {
-		if width := CellWidth(Safe(edge)); width != 20 {
-			t.Fatalf("card edge is %d cells wide: %q", width, Safe(edge))
-		}
+// A command is the work itself, so the title names only the action.
+func TestApprovalRequestShowsTheObjectOnce(t *testing.T) {
+	command := NewApprovalRequest("bash", ToolView{Title: "Run go test ./...", Details: "Bash · timeout 120s\ngo test ./..."})
+	if command.Title != "Run a command" || len(command.Work) != 1 || command.Work[0].Text != "go test ./..." {
+		t.Fatalf("command request = %+v", command)
+	}
+	if !strings.HasPrefix(command.Caption, "Bash · timeout 120s") {
+		t.Fatalf("caption = %q", command.Caption)
 	}
 }
 
@@ -80,28 +124,26 @@ func TestWaffleShowsStateWithoutColor(t *testing.T) {
 	}
 }
 
-func TestMarkdownBlockKinds(t *testing.T) {
+func TestMarkdownTracksTheOpenFence(t *testing.T) {
 	m := NewMarkdown(Theme{})
 	for _, test := range []struct {
 		line string
-		kind BlockKind
-		info string
 		code bool
 	}{
-		{"plain text", ProseLine, "", false},
-		{"```go", CodeStart, "go", true},
-		{"x := 1", CodeLine, "", true},
-		{"```", CodeEnd, "", false},
-		{"after", ProseLine, "", false},
+		{"plain text", false},
+		{"```go", true},
+		{"x := 1", true},
+		{"```", false},
+		{"after", false},
 	} {
-		block := m.Block(test.line)
-		if block.Kind != test.kind || block.Info != test.info || m.InCode() != test.code {
-			t.Fatalf("%q: kind %d info %q in code %t", test.line, block.Kind, block.Info, m.InCode())
+		m.Line(test.line)
+		if m.InCode() != test.code {
+			t.Fatalf("%q: in code %t", test.line, m.InCode())
 		}
 	}
-	m.Block("```")
+	m.Line("```")
 	m.EndCode()
-	if m.InCode() || m.Block("*plain*").Text != "plain" {
+	if m.InCode() || m.Line("*plain*") != "plain" {
 		t.Fatal("EndCode did not leave the fence")
 	}
 }

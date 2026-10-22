@@ -54,14 +54,17 @@ type Screen struct {
 	mu sync.Mutex
 	// place is what the footer says about where the work happens.
 	place struct{ folder, branch string }
-	// card is the approval request shown inside the choice box; empty when
-	// it went to the scrollback because the box could not hold it.
-	card string
-	// box is true while the live area draws its input inside a card; the
-	// input then wraps four cells narrower.
+	// request is the approval shown above the choices; nil when it went to
+	// the scrollback because the screen could not hold it.
+	request *presentation.ApprovalRequest
+	// choiceSince is when the current approval appeared; see choiceGrace.
+	choiceSince time.Time
+	// box is true while the live area draws its input inside a rounded bar;
+	// the input then wraps four cells narrower.
 	box bool
-	// soft is true while the card is a tint without a border, which leaves
-	// the key hints to the status bar under it.
+	// soft is true while the screen draws the gallery: the key hints sit in
+	// the status bar under the composer, and an approval hangs on the page
+	// in its own frame instead of a box.
 	soft          bool
 	input, output *os.File
 	wake          wakePipe
@@ -123,6 +126,9 @@ type Screen struct {
 	menuDismissed bool
 	// typing closes at the next prompt key other than Enter; see ArmTyping.
 	typing chan struct{}
+	// queue holds the messages that the user sent while the agent worked,
+	// oldest first.
+	queue []queuedMessage
 }
 
 // cachedRule keeps the composer rule for one width, so a redraw does not
@@ -221,20 +227,26 @@ func New(ctx context.Context, input, output *os.File, onInterrupt func(), style 
 		restoreErr := setState(input, &state)
 		return nil, errors.Join(err, restoreErr)
 	}
-	shade, typed := presentation.DarkBackground, []byte(nil)
+	theme, typed := presentation.NewTheme(style.Depth, presentation.DarkBackground, style.Accent), []byte(nil)
 	if style.Depth != presentation.NoColor {
-		shade, typed, err = queryShade(input, output, wake.read)
+		var background *terminalBackground
+		background, typed, err = queryBackground(input, output, wake.read)
 		if err != nil {
 			wake.close()
 			restoreErr := setState(input, &state)
 			return nil, errors.Join(err, restoreErr)
+		}
+		// A terminal that does not report its background is taken as dark,
+		// the common default.
+		if background != nil {
+			theme = theme.OnPaper(background.r, background.g, background.b)
 		}
 	}
 	s := &Screen{
 		input: input, output: output, wake: wake, state: state, onInterrupt: onInterrupt,
 		ctx: ctx, stop: make(chan struct{}), done: make(chan struct{}),
 		resizes: make(chan os.Signal, 1), rows: rows, cols: cols, layoutDirty: true,
-		theme: presentation.NewTheme(style.Depth, shade, style.Accent), activityRow: -1, footerRow: -1,
+		theme: theme, activityRow: -1, footerRow: -1,
 		effects: effects{motion: style.Motion, epoch: time.Now()},
 	}
 	// Keys typed while the terminal answered the background query get the
@@ -535,11 +547,10 @@ func (s *Screen) layoutLocked() {
 	}
 	marker := s.mode != modeChoice && width >= 4
 	var bodyRows []string
-	var choiceBar string
 	editRow, editCol, start := 0, 0, 0
-	// The composer and the approval sit in a rounded card when there is room
-	// for its two borders and the status bar; otherwise a hairline or nothing
-	// separates them. The card decides the footer, so it comes first.
+	// The composer sits in a rounded bar when there is room for its two
+	// borders and the status bar; otherwise a hairline or nothing separates
+	// it. The bar decides the footer, so it comes first.
 	box := width >= boxWidth && rows >= 4
 	s.box = box
 	s.soft = box && s.theme.Soft()
@@ -569,10 +580,13 @@ func (s *Screen) layoutLocked() {
 	}
 	maxBody = max(1, min(maxBody, min(6, max(2, rows/3))))
 	switch s.mode {
-	case modePrompt:
+	case modePrompt, modeBusy:
 		body := string(s.text)
 		if body == "" {
 			body = s.placeholder
+			if s.mode == modeBusy {
+				body = busyPlaceholder(rows, inner)
+			}
 		}
 		bodyRows = styledRows(body, inner, false)
 		editRow, editCol = inputPoint(s.text, s.position, inner)
@@ -583,63 +597,48 @@ func (s *Screen) layoutLocked() {
 			bodyRows = append(bodyRows, "")
 		}
 	case modeChoice:
-		choiceBar = s.theme.Glow("│", 0.3+0.2*s.breathLocked(now)) + " "
-		if width < 4 || box {
-			choiceBar = ""
-		}
-		labels := s.theme.Key("y") + " allow once   " + s.theme.Key("a") + " allow session   " + s.theme.Key("n") + " deny"
-		if width < 52 {
-			labels = "y once · a session · n deny"
-		}
-		choiceWidth := max(width-cellWidth(withoutStyles(choiceBar)), 1)
-		choiceRows := max(1, rows-len(footer))
-		if box {
+		// Without a tint the request sits in an amber box. With one it hangs
+		// on the page in its own frame, with nothing around it.
+		choiceWidth, choiceRows := width, max(1, rows-len(footer))
+		if box && !s.soft {
 			choiceWidth, choiceRows = width-4, max(1, rows-len(footer)-2)
 		}
-		bodyRows = styledRows(labels, choiceWidth, s.theme.Colored())
+		bodyRows = styledRows(s.theme.ApprovalChoices(choiceWidth), choiceWidth, s.theme.Colored())
 		if len(bodyRows) > choiceRows {
 			bodyRows = styledRows("y a n", choiceWidth, false)
 		}
 		if len(bodyRows) > choiceRows {
 			bodyRows = styledRows("yan", choiceWidth, false)
 		}
-		if box && s.card != "" {
-			card := styledRows(s.card, choiceWidth, s.theme.Colored())
-			if len(card)+1+len(bodyRows) <= choiceRows {
-				bodyRows = append(append(card, ""), bodyRows...)
+		if s.request != nil {
+			// The frame takes a row of air above and below the work when
+			// the screen has room for it.
+			piece := s.theme.ApprovalRows(*s.request, choiceWidth, true)
+			if len(piece)+1+len(bodyRows) > choiceRows {
+				piece = s.theme.ApprovalRows(*s.request, choiceWidth, false)
+			}
+			if len(piece)+1+len(bodyRows) <= choiceRows {
+				bodyRows = append(append(piece, ""), bodyRows...)
 			}
 		}
-		// A card has no border to hold its title, so the title is its first row.
 		if s.soft && len(bodyRows) < choiceRows {
-			bodyRows = append([]string{s.theme.Bold(s.theme.Amber("Approval needed"))}, bodyRows...)
-		}
-		bodyRows = visibleRows(bodyRows, choiceRows, choiceWidth)
-	case modeBusy:
-		inactive := "Input paused"
-		if rows == 1 {
-			inactive = "Paused · ^C cancel"
-			if cellWidth(inactive) > inner {
-				inactive = "^C cancel"
-			}
-			if cellWidth(inactive) > inner {
-				inactive = "^C"
-			}
-		}
-		bodyRows = visibleRows(styledRows(inactive, inner, false), maxBody, inner)
-		if len(bodyRows) == 1 && maxBody >= 2 {
+			// Air under the choices keeps them apart from the status bar.
 			bodyRows = append(bodyRows, "")
 		}
+		bodyRows = visibleRows(bodyRows, choiceRows, choiceWidth)
 	case modeView:
 		panic("terminal: document view reached composer layout")
 	default:
 		panic(fmt.Sprintf("terminal: unknown input mode %d", s.mode))
 	}
+	// framed is true when the live rows sit inside the composer's borders.
+	framed := box && (s.mode != modeChoice || !s.soft)
 	activity := s.mode == modeBusy && s.status != ""
 	room := rows - len(bodyRows) - len(footer)
 	if rule {
 		room--
 	}
-	if box {
+	if framed {
 		room -= 2
 	}
 	var activityLines []string
@@ -652,6 +651,8 @@ func (s *Screen) layoutLocked() {
 		room -= 2
 	}
 	room -= min(menuRowLimit, len(s.menuLocked()))
+	queueRows := s.queueRowsLocked(width, room)
+	room -= len(queueRows)
 	if preview := s.previewLocked(now); preview != "" && room > 0 {
 		// The preview wraps like a committed line: at words, with later rows
 		// under the text after the sigil, so a streamed paragraph does not
@@ -671,6 +672,7 @@ func (s *Screen) layoutLocked() {
 		s.activityRow, s.activityRows = len(s.frame), len(activityLines)
 		s.frame = append(s.frame, activityLines...)
 	}
+	s.frame = append(s.frame, queueRows...)
 	if rule {
 		s.frame = append(s.frame, s.composerRuleLocked(width))
 	}
@@ -678,21 +680,26 @@ func (s *Screen) layoutLocked() {
 		s.frame = append(s.frame, "")
 	}
 	bodyStart := len(s.frame)
-	if box {
+	if framed {
 		bodyStart++
 	}
 	live := make([]string, 0, len(bodyRows))
 	for i, row := range bodyRows {
-		if s.mode == modeBusy || s.mode == modePrompt && len(s.text) == 0 {
-			row = s.theme.Graphite(row)
+		if len(s.text) == 0 && (s.mode == modeBusy || s.mode == modePrompt) {
+			// An invitation, not an instruction: quiet italic gray.
+			row = s.theme.Graphite(s.theme.Italic(row))
 		}
 		if marker {
 			prefix := "  "
 			if start+i == 0 {
+				glyph := "›"
+				if s.soft {
+					glyph = "❯"
+				}
 				if s.mode == modeBusy {
-					prefix = s.theme.Graphite("›") + " "
+					prefix = s.theme.Graphite(glyph) + " "
 				} else {
-					prefix = s.theme.Bold(s.theme.Accent("›")) + " "
+					prefix = s.theme.Bold(s.theme.Accent(glyph)) + " "
 				}
 			}
 			if i == 0 && start > 0 {
@@ -702,25 +709,24 @@ func (s *Screen) layoutLocked() {
 			}
 			row = prefix + row
 		}
-		live = append(live, choiceBar+row)
+		live = append(live, row)
 	}
 	foot, fits := s.cardFootLocked()
-	if !fits {
+	if !fits || s.soft {
+		// With a tint the status bar under the composer holds the keys.
 		foot = ""
 	}
 	switch {
-	case box && s.soft && s.mode == modeChoice:
-		s.frame = append(s.frame, s.theme.ToneCard(live, width, presentation.ToneNotice, s.breathLocked(now))...)
-	case box && s.mode == modeChoice:
-		glow := 0.3 + 0.2*s.breathLocked(now)
-		border := func(text string) string { return s.theme.Glow(text, glow) }
-		s.frame = append(s.frame, s.boxed(live, width, border, s.theme.Amber("Approval needed"), s.theme.Graphite(foot))...)
-	case box && s.soft:
-		s.frame = append(s.frame, s.theme.Card(live, width)...)
-	case box:
-		s.frame = append(s.frame, s.boxed(live, width, s.theme.Hairline, "", s.theme.Graphite(foot))...)
-	default:
+	case !framed:
 		s.frame = append(s.frame, live...)
+	case s.mode == modeChoice:
+		s.frame = append(s.frame, s.boxed(live, width, s.theme.Amber, s.theme.Amber("Approval needed"), s.theme.Graphite(foot))...)
+	case s.soft:
+		// The composer is a rounded box whose edge fades from plum to blue:
+		// the one surface that takes input.
+		s.frame = append(s.frame, s.theme.GradientBox(live, width)...)
+	default:
+		s.frame = append(s.frame, s.boxed(live, width, s.theme.Hairline, "", s.theme.Graphite(foot))...)
 	}
 	if padding {
 		s.frame = append(s.frame, "")
@@ -734,7 +740,7 @@ func (s *Screen) layoutLocked() {
 		s.frame = append(s.frame, footer...)
 	}
 	s.frameRow, s.frameCol = len(s.frame)-1, 0
-	if s.mode == modePrompt {
+	if s.mode == modePrompt || s.mode == modeBusy {
 		s.frameRow = bodyStart + editRow - start
 		s.frameCol = editCol
 		if marker {
@@ -781,15 +787,49 @@ func (s *Screen) activityLocked() string {
 	} else {
 		mark = s.theme.Accent(mark)
 	}
-	row := mark + " " + s.theme.Ink(s.status)
+	row := mark + "  " + s.theme.Ink(s.status)
 	if !s.activitySince.IsZero() {
-		row += s.theme.Graphite(" · " + strconv.Itoa(int(now.Sub(s.activitySince).Seconds())) + "s")
+		row += s.theme.Graphite("   " + strconv.Itoa(int(now.Sub(s.activitySince).Seconds())) + "s")
 	}
 	if !s.theme.Soft() {
 		return row
 	}
-	used := 3 + cellWidth(withoutStyles(row)) + 1
-	return s.theme.Hairline("── ") + row + " " + s.theme.Hairline(strings.Repeat("─", max(max(s.cols-1, 2)-used, 0)))
+	used := 2 + cellWidth(withoutStyles(row)) + 3
+	room := max(max(s.cols-1, 2)-used, 0)
+	trace := s.traceLocked(now, room)
+	if trace == "" {
+		return "  " + row
+	}
+	// The trace sits at the right end of the row, as the display of an
+	// instrument, so it keeps its place while the label changes.
+	return "  " + row + strings.Repeat(" ", 3+room-traceColumns) + trace
+}
+
+// traceColumns is the width of the trace: about five seconds of the stream,
+// small enough to sit beside a long label on a terminal of 100 columns.
+const traceColumns = 48
+
+// markLocked records count events of a kind on the trace. Without motion,
+// without intermediate colors, or before the first frame it does nothing.
+func (s *Screen) markLocked(kind presentation.TraceMark, count int) {
+	if s.effects.trace != nil {
+		s.effects.trace.Mark(kind, count)
+	}
+}
+
+// traceLocked moves the trace to now and draws it, or returns "" when the
+// row has no room for it or the screen draws no motion. The trace is made on
+// the first frame that has room, so a narrow terminal never holds one.
+func (s *Screen) traceLocked(now time.Time, room int) string {
+	if !s.effects.motion || !s.theme.Blends() || room < traceColumns+8 {
+		return ""
+	}
+	if s.effects.trace == nil {
+		s.effects.trace, s.effects.traceAt = presentation.NewTrace(traceColumns), now
+	}
+	s.effects.trace.Step(now.Sub(s.effects.traceAt))
+	s.effects.traceAt = now
+	return s.effects.trace.Draw(s.theme)
 }
 
 // hintLocked names the keys of the current mode in the widest form that fits
@@ -833,10 +873,7 @@ func (s *Screen) hintLocked(room int) string {
 			hint = "^M/Esc n"
 		}
 	case modeBusy:
-		hint = "Ctrl-C cancel"
-		if room < cellWidth(hint) {
-			hint = "^C cancel"
-		}
+		hint = busyHint(room, len(s.queue) > 0)
 	case modeView:
 		panic("terminal: document view reached composer hints")
 	}
@@ -1031,7 +1068,7 @@ func (s *Screen) renderLocked() {
 			copy(s.frame[s.footerRow:s.footerRow+s.footerRows], rows)
 		}
 	}
-	visible := s.mode == modePrompt
+	visible := s.mode == modePrompt || s.mode == modeBusy
 	dirty := len(s.frame) != len(s.live)
 	for i, row := range s.frame {
 		if i >= len(s.live) || row != s.live[i] {
@@ -1199,12 +1236,24 @@ func (s *Screen) setStatusLocked(text string, tool bool) {
 	now := time.Now()
 	if text != s.status {
 		s.activitySince = now
+		if tool {
+			s.markLocked(presentation.TraceTool, 1)
+		}
 	}
 	s.effects.toolRunning = tool
 	s.status = text
 	s.layoutDirty = true
 	s.drawLocked()
 	s.wake.signal()
+}
+
+// Mark records count events of a kind on the trace of the working row, for
+// an event that the screen does not see itself, such as reasoning that is
+// not shown or a failed tool. Without a trace it does nothing.
+func (s *Screen) Mark(kind presentation.TraceMark, count int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.markLocked(kind, count)
 }
 
 // SetBackgroundWork shows work that continues while the user types.
@@ -1240,8 +1289,7 @@ func (s *Screen) finishLocked(value answer) {
 	result := s.result
 	s.result = nil
 	s.mode = modeBusy
-	s.text = nil
-	s.position, s.inputBytes = 0, 0
+	// The draft stays: it belongs to the user, not to the prompt that ended.
 	s.placeholder = ""
 	s.layoutDirty = true
 	if s.view != nil {
@@ -1259,8 +1307,9 @@ func (s *Screen) finishLocked(value answer) {
 	s.wake.signal()
 }
 
-// Drain before installing a new owner. The reader uses the same lock, so no
-// byte read for an earlier mode can be delivered after this boundary.
+// Drain before a choice or a view takes the keys. The reader uses the same
+// lock, so no byte read before this boundary can answer the new owner. The
+// bytes were typed for the draft, so they edit it.
 func (s *Screen) drainLocked() error {
 	var data [4096]byte
 	for total := 0; total < maxInputBytes; {
@@ -1290,6 +1339,7 @@ func (s *Screen) drainLocked() error {
 				go s.interrupted(nil)
 				return context.Canceled
 			}
+			s.keyLocked(k)
 		}
 	}
 	return errors.New("terminal queued input exceeds 1 MiB")
@@ -1317,12 +1367,16 @@ func (s *Screen) await(ctx context.Context, mode inputMode, placeholder string, 
 		s.mu.Unlock()
 		return answer{}, errors.New("terminal already has an active prompt")
 	}
-	if err := s.drainLocked(); err != nil {
-		if !errors.Is(err, context.Canceled) {
-			s.failLocked(err)
+	// A prompt edits the same draft as busy mode, so the read loop gives it
+	// the waiting bytes as typed input; only a new owner of other keys drains.
+	if mode != modePrompt {
+		if err := s.drainLocked(); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.failLocked(err)
+			}
+			s.mu.Unlock()
+			return answer{}, err
 		}
-		s.mu.Unlock()
-		return answer{}, err
 	}
 	if view != nil {
 		s.commitIntroLocked()
@@ -1334,18 +1388,16 @@ func (s *Screen) await(ctx context.Context, mode inputMode, placeholder string, 
 	}
 	result := make(chan answer, 1)
 	s.result, s.mode, s.placeholder = result, mode, placeholder
-	s.text = nil
-	s.position, s.inputBytes = 0, 0
 	s.menuIndex, s.menuDismissed = 0, false
-	s.historyPosition = len(s.history)
-	s.draft = ""
-	s.draftPosition, s.verticalColumn = 0, 0
-	s.verticalMove = false
+	s.verticalColumn, s.verticalMove = 0, false
 	s.layoutDirty = true
 	if view != nil {
 		s.enterViewLocked(view)
 	}
 	s.drawLocked()
+	if mode == modeChoice {
+		s.choiceSince = time.Now()
+	}
 	// The new mode may animate, such as the breathing approval bar; the read
 	// loop must leave a wait that it began without a deadline.
 	s.wake.signal()
@@ -1382,35 +1434,35 @@ func (s *Screen) Choose(ctx context.Context) (Choice, error) {
 	return value.choice, err
 }
 
-// CardFits reports whether ChooseCard can show card inside the approval box
-// at the current terminal size, so the request leaves no trace in the
-// scrollback once it is answered.
-func (s *Screen) CardFits(card string) bool {
+// RequestFits reports whether ChooseRequest can show request above the
+// choices at the current terminal size, so the request leaves no trace in
+// the scrollback once it is answered.
+func (s *Screen) RequestFits(request presentation.ApprovalRequest) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	width := max(s.cols-1, 2)
-	if width < 52 || card == "" {
+	if width < 52 {
 		return false
 	}
-	// Borders, a gap, the choice row, and up to two footer rows. A card with
-	// a tint also holds its title as a row.
-	reserved := 6
-	if s.theme.Soft() {
-		reserved++
+	// A gap, the choice row, and up to three footer rows. Without a tint the
+	// request also sits inside a box: two borders, four cells narrower.
+	reserved, inner := 5, width
+	if !s.theme.Soft() {
+		reserved, inner = 7, width-4
 	}
-	return len(styledRows(card, width-4, false))+reserved <= s.rows
+	return len(s.theme.ApprovalRows(request, inner, false))+reserved <= s.rows
 }
 
-// ChooseCard asks for an approval with card shown above the choices. The
-// caller checks CardFits first; a card that stops fitting after a resize is
-// left out and the choices remain.
-func (s *Screen) ChooseCard(ctx context.Context, card string) (Choice, error) {
+// ChooseRequest asks for an approval with request shown above the choices.
+// The caller checks RequestFits first; a request that stops fitting after a
+// resize is left out and the choices remain.
+func (s *Screen) ChooseRequest(ctx context.Context, request presentation.ApprovalRequest) (Choice, error) {
 	s.mu.Lock()
-	s.card = card
+	s.request = &request
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		s.card = ""
+		s.request = nil
 		s.layoutDirty = true
 		s.mu.Unlock()
 	}()
@@ -1431,7 +1483,12 @@ func (s *Screen) ArmTyping() <-chan struct{} {
 
 func (s *Screen) insertLocked(text string) {
 	if s.inputBytes+len(text) > maxInputBytes {
-		s.finishLocked(answer{err: errors.New("terminal input exceeds 1 MiB")})
+		// While the agent works no prompt can fail, so the editor keeps its
+		// text and refuses the key.
+		if s.mode == modePrompt {
+			s.text, s.position, s.inputBytes = nil, 0, 0
+			s.finishLocked(answer{err: errors.New("terminal input exceeds 1 MiB")})
+		}
 		return
 	}
 	insert := []rune(text)
@@ -1455,35 +1512,58 @@ func (s *Screen) keyLocked(k key) bool {
 		s.layoutDirty = true
 		return true
 	}
-	if s.mode == modeBusy || k.stale {
+	if k.stale {
 		return false
 	}
 	if s.view != nil {
 		s.viewKeyLocked(k)
 		return false
 	}
-	if s.mode == modeChoice {
-		if k.paste {
+	switch s.mode {
+	case modeChoice:
+		if time.Since(s.choiceSince) >= choiceGrace {
+			s.choiceKeyLocked(k)
 			return false
 		}
-		choice := Deny
-		switch {
-		case k.kind == keyEnter || k.kind == keyEscape:
-		case k.kind == keyText && (k.text == "n" || k.text == "N"):
-		case k.kind == keyText && (k.text == "y" || k.text == "Y"):
-			choice = AllowOnce
-		case k.kind == keyText && (k.text == "a" || k.text == "A"):
-			choice = AllowSession
-		default:
-			return false
+		// The approval appeared while the user typed, so the key edits the
+		// draft below it.
+	case modePrompt:
+		if k.kind == keyAltEnter {
+			k.kind = keyEnter
 		}
-		s.finishLocked(answer{choice: choice})
-		return false
+		if s.typing != nil && k.kind != keyEnter {
+			close(s.typing)
+			s.typing = nil
+		}
+	case modeBusy:
+	case modeView:
+		panic("terminal: document view mode without a view")
 	}
-	if s.typing != nil && k.kind != keyEnter {
-		close(s.typing)
-		s.typing = nil
+	s.editKeyLocked(k)
+	return false
+}
+
+func (s *Screen) choiceKeyLocked(k key) {
+	if k.paste {
+		return
 	}
+	choice := Deny
+	switch {
+	case k.kind == keyEnter || k.kind == keyEscape:
+	case k.kind == keyText && (k.text == "n" || k.text == "N"):
+	case k.kind == keyText && (k.text == "y" || k.text == "Y"):
+		choice = AllowOnce
+	case k.kind == keyText && (k.text == "a" || k.text == "A"):
+		choice = AllowSession
+	default:
+		return
+	}
+	s.finishLocked(answer{choice: choice})
+}
+
+// editKeyLocked applies a key to the draft. A prompt and busy mode share the
+// editor; only Enter and Alt+Enter differ, in sendLocked.
+func (s *Screen) editKeyLocked(k key) {
 	s.layoutDirty = true
 	if k.kind != keyUp && k.kind != keyDown {
 		s.verticalMove = false
@@ -1493,7 +1573,7 @@ func (s *Screen) keyLocked(k key) bool {
 		if string(s.text) != before {
 			s.menuDismissed = false
 		}
-		return false
+		return
 	}
 	defer func() {
 		if string(s.text) != before {
@@ -1506,15 +1586,11 @@ func (s *Screen) keyLocked(k key) bool {
 	case keyNewline:
 		s.insertLocked("\n")
 	case keyEnter:
-		text := string(s.text)
-		if text != "" && (len(s.history) == 0 || s.history[len(s.history)-1] != text) {
-			s.history = append(s.history, text)
-			if len(s.history) > 100 {
-				copy(s.history, s.history[1:])
-				s.history = s.history[:100]
-			}
-		}
-		s.finishLocked(answer{text: text})
+		s.sendLocked(false)
+	case keyAltEnter:
+		s.sendLocked(true)
+	case keyAltUp:
+		s.restoreQueueLocked()
 	case keyLeft:
 		s.position = previousCluster(s.text, s.position)
 	case keyRight:
@@ -1553,7 +1629,6 @@ func (s *Screen) keyLocked(k key) bool {
 	default:
 		panic(fmt.Sprintf("terminal: unknown key kind %d", k.kind))
 	}
-	return false
 }
 
 func (s *Screen) resizeLocked(rows, cols int) {

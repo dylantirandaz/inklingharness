@@ -29,6 +29,12 @@ type Config struct {
 	MaxTurns      int
 	CompactTokens int
 	EnableTasks   bool
+	// Lean offers context_read alone of the resource tools, without
+	// inspect_images and context_checkpoint. Automatic compaction still works,
+	// and its note points to context_read. Images need the full set.
+	Lean bool
+	// reads gives repeated reads a note in the lean profile. Run sets it.
+	reads *repeatedReads
 	// ContextStore keeps source images and exact archived messages outside
 	// active model context. CLI entry points always supply a private store.
 	ContextStore      *session.Store
@@ -50,6 +56,13 @@ type Config struct {
 	// background job that ended. Each notice goes to the model once, with
 	// the next tool results or prompt. A nil Notices has none.
 	Notices func() []string
+	// Steering returns the messages that the user sent while the agent
+	// worked, oldest first, and removes them from the caller's queue. Each
+	// one goes to the model once, as a user text block: after the next tool
+	// results, or as a new user message when the model would stop. Run does
+	// not call it when no further request can follow. A nil Steering has
+	// none.
+	Steering func() []string
 }
 
 // Refusal is why a Gate stops one tool call.
@@ -137,6 +150,10 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 		return outcome, err
 	}
 	definitions := RequestTools(config, toolSet)
+	config.reads = nil
+	if config.Lean {
+		config.reads = newRepeatedReads()
+	}
 	cutReplies := 0
 	var checkpointPrefix []anthropic.EncodedMessage
 	config.contextCheckpoint = func(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -175,6 +192,7 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 			}
 			outcome.Messages = compacted.Messages
 			outcome.LastInputTokens = 0
+			config.reads.forget()
 			if err := checkpoint(ctx, config, outcome); err != nil {
 				return outcome, err
 			}
@@ -226,6 +244,9 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 			if notices := withNotices("", config); notices != "" {
 				results = append(results, anthropic.TextBlock{Text: notices})
 			}
+			if runErr == nil && turn < config.MaxTurns {
+				results = append(results, steering(config)...)
+			}
 			// History keeps a tool call only together with its results.
 			completed, err = appendMessage(completed, anthropic.Message{Role: anthropic.RoleUser, Content: results})
 			if err != nil {
@@ -237,6 +258,7 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 			// complete final pair, not the difference in message counts.
 			completed = append(checkpointPrefix, completed[len(completed)-2:]...)
 			outcome.LastInputTokens = 0
+			config.reads.forget()
 			observer.Status("context checkpoint saved; exact earlier messages remain available")
 		}
 		outcome.Messages = completed
@@ -250,7 +272,23 @@ func Run(ctx context.Context, client *anthropic.Client, config Config, toolSet *
 		case anthropic.StopToolUse, anthropic.StopPauseTurn:
 		case anthropic.StopEndTurn, anthropic.StopStopSequence:
 			outcome.FinalText = finalText(response.Message)
-			return outcome, nil
+			if turn == config.MaxTurns {
+				return outcome, nil
+			}
+			steered := steering(config)
+			if len(steered) == 0 {
+				return outcome, nil
+			}
+			// The user changed direction after the answer was written, so
+			// the model answers again.
+			withSteering, err := appendMessage(outcome.Messages, anthropic.Message{Role: anthropic.RoleUser, Content: steered})
+			if err != nil {
+				return outcome, fmt.Errorf("turn %d: add steering: %w", turn, err)
+			}
+			outcome.Messages = withSteering
+			if err := checkpoint(requestContext, config, outcome); err != nil {
+				return outcome, err
+			}
 		case anthropic.StopMaxTokens:
 			return outcome, fmt.Errorf("turn %d: reply hit max_tokens=%d", turn, config.MaxTokens)
 		case anthropic.StopRefusal:
@@ -323,7 +361,11 @@ func RequestTools(config Config, toolSet *tools.Set) []anthropic.ToolDefinition 
 		definitions = append(definitions, taskDefinition())
 	}
 	if config.ContextStore != nil {
-		definitions = append(definitions, resourceDefinitions()...)
+		for _, definition := range resourceDefinitions() {
+			if !config.Lean || definition.Name == "context_read" {
+				definitions = append(definitions, definition)
+			}
+		}
 	}
 	return definitions
 }
@@ -466,10 +508,11 @@ func runTools(ctx context.Context, client *anthropic.Client, config Config, tool
 	display := latency.NewMeter(ctx, latency.Observer, "tool_results")
 	defer display.End()
 	for index, executed := range executions {
+		result := config.reads.result(calls[index], executed.result)
 		started := display.Start()
-		observer.ToolResult(calls[index].Name, executed.result, executed.elapsed)
+		observer.ToolResult(calls[index].Name, result, executed.elapsed)
 		display.Add(started, nil)
-		results[index] = anthropic.ToolResultBlock{ToolUseID: calls[index].ID, Content: executed.result.Content, IsError: executed.result.IsError}
+		results[index] = anthropic.ToolResultBlock{ToolUseID: calls[index].ID, Content: result.Content, IsError: result.IsError}
 		usage = usage.Add(executed.usage)
 		if executed.err != nil {
 			failures = append(failures, executed.err)
@@ -620,4 +663,19 @@ func withNotices(text string, config Config) string {
 		return block
 	}
 	return text + "\n\n" + block
+}
+
+// steering takes the queued steering messages as text blocks. A blank
+// message is left out, because the API refuses an empty text block.
+func steering(config Config) []anthropic.ContentBlock {
+	if config.Steering == nil {
+		return nil
+	}
+	var blocks []anthropic.ContentBlock
+	for _, text := range config.Steering() {
+		if strings.TrimSpace(text) != "" {
+			blocks = append(blocks, anthropic.TextBlock{Text: text})
+		}
+	}
+	return blocks
 }

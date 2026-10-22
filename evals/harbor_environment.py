@@ -1,4 +1,4 @@
-"""Keep native Terminal-Bench runs on the task's declared CPU and memory limits."""
+"""Keep native Terminal-Bench runs on the task's declared CPU and memory limits, and keep any shared volume read-only."""
 
 import importlib.metadata
 import json
@@ -10,6 +10,11 @@ from harbor.models.trial.config import ResourceMode
 
 
 class NativeModalEnvironment(ModalEnvironment):
+    def _volumes_config(self):
+        """Mount every volume read-only. An agent runs arbitrary commands as root, and a volume is shared by every
+        sandbox of a job, so a writable one would let a trial change what the next trials install."""
+        return {mount_path: volume.read_only() for mount_path, volume in super()._volumes_config().items()}
+
     async def start(self, force_build: bool) -> None:
         if not self._vm_runtime_enabled:
             raise ValueError("Native Terminal-Bench runs require modal_vm_runtime=true")

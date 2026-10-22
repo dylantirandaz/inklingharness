@@ -3,7 +3,11 @@
 Spend uses OpenRouter key usage and decreases in the Prime wallet balance.
 The --already amount carries earlier spend forward. Wallet top-ups do not
 reduce recorded spend. The guard stops the watched process groups at the
-limit, on a balance read failure, or when too many owned sandboxes remain.
+limit, on a balance read failure, when too many owned sandboxes remain, and
+when the account credits or the key's own limit fall below --min-credits.
+The key limit matters as much as the credits: on October 20 a key with a
+total limit of $500 reached it in the middle of a job, and OpenRouter then
+answered 403 to every request while the account still held credits.
 
 With --backend docker the trials run in local Docker: there is no wallet to
 read, and the guard instead removes unused Terminal-Bench images when free
@@ -18,6 +22,8 @@ credit, so the guard terminates the sandboxes of the watched jobs' trials.
 
 import argparse
 import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -27,13 +33,39 @@ import subprocess
 import time
 import urllib.request
 
+from evals.harbor_wire import MODEL
+from evals.provider_health import MIN_CACHE_HIT_WHILE_RUNNING, cache_problem, read_cache_use
+from evals.provider_health import check as check_provider
+
 MODAL_APP = "inkling-terminal-bench"
+# A read inside the loop is tried this many times, this many seconds apart, before the guard takes a
+# failure for an outage and stops the jobs. One connection reset on October 20 ended a healthy run of 200 trials.
+LOOP_READ_ATTEMPTS = 5
+LOOP_READ_PAUSE = 10.0
 
 
-def openrouter_usage() -> float:
+@dataclass(frozen=True)
+class KeyStatus:
+    usage: float
+    # None when the key has no limit of its own.
+    limit_remaining: float | None
+
+
+def openrouter_key() -> KeyStatus:
     request = urllib.request.Request("https://openrouter.ai/api/v1/key", headers={"Authorization": "Bearer " + os.environ["OPENROUTER_API_KEY"]})
     with urllib.request.urlopen(request, timeout=30) as response:
-        return float(json.load(response)["data"]["usage"])
+        data = json.load(response)["data"]
+    remaining = data["limit_remaining"]
+    return KeyStatus(float(data["usage"]), None if remaining is None else float(remaining))
+
+
+def funds_problem(credits_left: float, key_limit_left: float | None, minimum: float) -> str | None:
+    """None when both the account credits and the key's own limit hold at least minimum dollars. Otherwise why not."""
+    if credits_left < minimum:
+        return "OpenRouter credits exhausted"
+    if key_limit_left is not None and key_limit_left < minimum:
+        return "the limit of the OpenRouter key is exhausted"
+    return None
 
 
 def openrouter_credits_left() -> float:
@@ -94,11 +126,16 @@ def stop(pid_files: list[Path]) -> list[int]:
     return stopped
 
 
+def next_degraded_count(problem: str | None, count: int) -> int:
+    """The number of degraded provider checks in a row. A healthy check, where problem is None, ends the row."""
+    return 0 if problem is None else count + 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--limit", type=float, required=True, help="Total dollars, including --already")
     parser.add_argument("--already", type=float, default=0.0, help="Dollars spent before the guard started")
-    parser.add_argument("--min-credits", type=float, default=2.0, help="Stop when OpenRouter credits or the Prime wallet fall below this")
+    parser.add_argument("--min-credits", type=float, default=2.0, help="Stop when the OpenRouter credits, the OpenRouter key's own limit, or the Prime wallet fall below this")
     parser.add_argument("--interval", type=float, default=120.0)
     parser.add_argument("--backend", choices=["prime", "docker", "modal"], default="prime")
     parser.add_argument("--min-disk-gb", type=float, default=15.0, help="Docker backend: prune unused task images below this much free disk")
@@ -106,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job-dir", action="append", type=Path, default=[], help="Prime or Modal job directory; repeat for each watched job")
     parser.add_argument("--max-sandboxes", type=int, help="Stop if owned Prime sandboxes exceed this count")
     parser.add_argument("--modal-app", default=MODAL_APP, help="Modal backend: the Modal app that holds the trial sandboxes")
+    parser.add_argument("--stop-on-degraded-provider", type=int, default=0, metavar="CHECKS", help="Stop when evals.provider_health finds the provider degraded or unreadable in this many checks in a row; 0 turns the check off")
+    parser.add_argument("--min-cache-hit", type=float, default=0.0, metavar="RATIO", help=f"Stop when the finished trials of the --job-dir jobs, 20 or more, got less than this share of their input tokens from the prompt cache; 0 turns the check off. {MIN_CACHE_HIT_WHILE_RUNNING} is the limit that evals.provider_health explains. It was set on trials of 30 to 40 turns. Short trials read less cached context, so on a healthy provider Think shows about 89% at low effort (7 turns) and 91% at medium effort (12 turns), and the check must be off for them")
     parser.add_argument("pid_files", nargs="*", type=Path)
     arguments = parser.parse_args(argv)
     prime, docker, modal = (arguments.backend == name for name in ("prime", "docker", "modal"))
@@ -116,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     if modal and not arguments.once and (not arguments.job_dir or not arguments.pid_files):
         parser.error("Modal requires --job-dir and PID files")
     try:
-        start_usage, start_balance = _retry(openrouter_usage), _retry(read_balance)
+        start_usage, start_balance = _retry(openrouter_key).usage, _retry(read_balance)
     except (OSError, ValueError, subprocess.SubprocessError):
         stop(arguments.pid_files)
         if prime and arguments.job_dir:
@@ -129,20 +168,23 @@ def main(argv: list[str] | None = None) -> int:
             remove_tb_containers()
         raise
     previous_balance = start_balance
+    started = datetime.now(timezone.utc)
     sandboxes = 0.0
+    degraded_checks = 0
     while True:
         try:
-            inference = openrouter_usage() - start_usage
-            balance = read_balance()
+            key = _retry(openrouter_key, attempts=LOOP_READ_ATTEMPTS, pause=LOOP_READ_PAUSE)
+            inference = key.usage - start_usage
+            balance = _retry(read_balance, attempts=LOOP_READ_ATTEMPTS, pause=LOOP_READ_PAUSE)
             sandboxes += max(0.0, previous_balance - balance)
             previous_balance = balance
-            credits = openrouter_credits_left()
+            credits = _retry(openrouter_credits_left, attempts=LOOP_READ_ATTEMPTS, pause=LOOP_READ_PAUSE)
             if arguments.once:
                 owned = []
             elif prime:
                 owned = sandbox_ids(arguments.job_dir)
             elif modal:
-                owned = modal_sandboxes(arguments.job_dir, arguments.modal_app)
+                owned = _retry(lambda: modal_sandboxes(arguments.job_dir, arguments.modal_app), attempts=LOOP_READ_ATTEMPTS, pause=LOOP_READ_PAUSE)
             else:
                 owned = []
             jobs_finished = bool(arguments.pid_files) and not any(_alive(path) for path in arguments.pid_files)
@@ -157,8 +199,14 @@ def main(argv: list[str] | None = None) -> int:
             elif docker:
                 remove_tb_containers()
             raise
+        problem = check_provider(MODEL, os.environ["OPENROUTER_API_KEY"]) if arguments.stop_on_degraded_provider and not arguments.once else None
+        degraded_checks = next_degraded_count(problem, degraded_checks)
+        cache_use = read_cache_use(arguments.job_dir, since=started) if arguments.min_cache_hit and not arguments.once else None
+        cache_issue = None if cache_use is None else cache_problem(cache_use, minimum_ratio=arguments.min_cache_hit)
         spent = arguments.already + inference + sandboxes
         record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "spent": round(spent, 2), "inference": round(inference, 2), "limit": arguments.limit, "openrouter_credits_left": round(credits, 2)}
+        if key.limit_remaining is not None:
+            record["openrouter_key_limit_left"] = round(key.limit_remaining, 2)
         if docker:
             record["free_disk_gb"] = round(free_disk_gb(), 1)
             if record["free_disk_gb"] < arguments.min_disk_gb and not arguments.once:
@@ -170,18 +218,26 @@ def main(argv: list[str] | None = None) -> int:
             record.update(sandboxes=round(sandboxes, 2), prime_balance=round(balance, 2), owned_sandboxes=len(owned))
         elif modal:
             record.update(owned_sandboxes=len(owned))
+        if arguments.stop_on_degraded_provider:
+            record["provider_degraded_checks"] = degraded_checks
+        if cache_use is not None and cache_use.hit_ratio is not None:
+            record.update(cache_hit_ratio=round(cache_use.hit_ratio, 4), cache_trials=cache_use.trials)
         print(json.dumps(record), flush=True)
         if arguments.once:
             return 0
         reason = None
         if spent >= arguments.limit:
             reason = "budget limit reached"
-        elif credits < arguments.min_credits:
-            reason = "OpenRouter credits exhausted"
+        elif (funds := funds_problem(credits, key.limit_remaining, arguments.min_credits)) is not None:
+            reason = funds
         elif prime and balance < arguments.min_credits:
             reason = "Prime wallet exhausted"
         elif prime and len(owned) > arguments.max_sandboxes:
             reason = "owned sandbox count exceeds the trial limit"
+        elif arguments.stop_on_degraded_provider and degraded_checks >= arguments.stop_on_degraded_provider:
+            reason = f"the provider is degraded: {problem}"
+        elif cache_issue is not None:
+            reason = f"the prompt cache is not working: {cache_issue}"
         if reason is not None or jobs_finished:
             print(json.dumps({"reason": reason or "all jobs stopped", "stopped": stop(arguments.pid_files)}), flush=True)
             # Each minute that the sandboxes live costs credit. Prime needs a pause before its deletion call.
@@ -256,22 +312,28 @@ def modal_session_prefixes(job_dirs: list[Path]) -> tuple[str, ...]:
 
 
 def modal_sandboxes(job_dirs: list[Path], app_name: str) -> list:
-    """List the running Modal sandboxes that belong to these jobs' saved trials."""
+    """List the running Modal sandboxes that belong to these jobs' saved trials.
+    A lost or refused connection to Modal is an OSError, like the failed reads of OpenRouter: grpclib and the
+    Modal client raise their own classes, and on October 20 an unhandled StreamTerminatedError ended the guard
+    while three jobs went on for an hour with no limit on their spend."""
     prefixes = modal_session_prefixes(job_dirs)
     if not prefixes:
         return []
+    import grpclib.exceptions
     import modal
 
     try:
         app = modal.App.lookup(app_name, create_if_missing=False)
+        return [
+            sandbox
+            for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"harbor.managed": "true"})
+            if sandbox.get_tags().get("harbor.session_id", "").startswith(prefixes)
+        ]
     except modal.exception.NotFoundError:
         # The app exists once the first trial has started a sandbox.
         return []
-    return [
-        sandbox
-        for sandbox in modal.Sandbox.list(app_id=app.app_id, tags={"harbor.managed": "true"})
-        if sandbox.get_tags().get("harbor.session_id", "").startswith(prefixes)
-    ]
+    except (grpclib.exceptions.GRPCError, grpclib.exceptions.StreamTerminatedError, modal.exception.Error) as error:
+        raise OSError(f"cannot list the Modal sandboxes: {error!r}") from error
 
 
 def terminate_modal_sandboxes(job_dirs: list[Path], app_name: str) -> list[str]:
@@ -291,14 +353,15 @@ def terminate_modal_sandboxes(job_dirs: list[Path], app_name: str) -> list[str]:
 
 
 
-def _retry(read):
-    for attempt in range(10):
+def _retry(read, attempts: int = 10, pause: float = 15.0):
+    """Call read until it succeeds. A failure on the last attempt is raised."""
+    for attempt in range(attempts):
         try:
             return read()
         except (OSError, ValueError, subprocess.SubprocessError):
-            if attempt == 9:
+            if attempt == attempts - 1:
                 raise
-            time.sleep(15)
+            time.sleep(pause)
 
 
 def _alive(path: Path) -> bool:

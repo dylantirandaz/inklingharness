@@ -1,0 +1,28 @@
+{
+  "job_name": "oracle-closed-terminal-bench",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 16,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "import_path": "evals.harbor_environment:NativeModalEnvironment",
+    "cpu_enforcement_policy": "guarantee",
+    "memory_enforcement_policy": "guarantee",
+    "kwargs": {
+      "app_name": "inkling-terminal-bench",
+      "modal_vm_runtime": true
+    }
+  },
+  "agents": [
+    {
+      "name": "oracle"
+    }
+  ],
+  "datasets": [
+    {
+      "path": "out/terminal-bench/tb-closed"
+    }
+  ]
+}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"sync"
 )
 
 type serverSentEvent struct {
@@ -16,8 +17,23 @@ type eventScanner struct {
 	reader *bufio.Reader
 }
 
+// readers keeps the 64 KiB read buffers of ended streams. Each turn streams
+// one reply, so without the pool each turn allocates a new buffer.
+var readers = sync.Pool{New: func() any { return bufio.NewReaderSize(nil, 64*1024) }}
+
+// newEventScanner borrows a read buffer. Call release when the stream ends.
 func newEventScanner(stream io.Reader) *eventScanner {
-	return &eventScanner{reader: bufio.NewReaderSize(stream, 64*1024)}
+	reader := readers.Get().(*bufio.Reader)
+	reader.Reset(stream)
+	return &eventScanner{reader: reader}
+}
+
+// release gives the read buffer back. Events that next returned stay valid,
+// because each event owns its data. The scanner must not be used after it.
+func (s *eventScanner) release() {
+	s.reader.Reset(nil)
+	readers.Put(s.reader)
+	s.reader = nil
 }
 
 // next returns the next complete event. It returns io.EOF when the stream
@@ -49,7 +65,7 @@ func (s *eventScanner) next() (serverSentEvent, error) {
 		value = bytes.TrimPrefix(value, []byte(" "))
 		switch string(field) {
 		case "event":
-			name = string(value)
+			name = eventName(value)
 		case "data":
 			if hasData {
 				data = append(data, '\n')
@@ -78,4 +94,26 @@ func (s *eventScanner) readLine() ([]byte, error) {
 		full = append(full, line...)
 	}
 	return full, err
+}
+
+// eventName returns a shared string for the event names of the Messages API,
+// so the common events do not allocate a name.
+func eventName(value []byte) string {
+	switch string(value) {
+	case "content_block_delta":
+		return "content_block_delta"
+	case "content_block_start":
+		return "content_block_start"
+	case "content_block_stop":
+		return "content_block_stop"
+	case "message_start":
+		return "message_start"
+	case "message_delta":
+		return "message_delta"
+	case "message_stop":
+		return "message_stop"
+	case "ping":
+		return "ping"
+	}
+	return string(value)
 }

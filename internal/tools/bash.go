@@ -21,10 +21,10 @@ const (
 // bashTool saves large outputs in the output directory of jobs, so a noisy
 // command cannot fill the context window and the model can still read the
 // full output. A background command becomes a job in jobs.
-func bashTool(root string, jobs *Jobs) Tool {
+func bashTool(root string, jobs *Jobs, limits Limits) Tool {
 	return Tool{
 		Name:        "bash",
-		Description: "Run a bash command in the working directory. Returns stdout and stderr, and the exit code when not 0. Output over 32 KiB keeps its start and end and names a file with all of it. Timeout: 120 s by default, 600 at most. For servers and watchers set background, then use bash_job.",
+		Description: fmt.Sprintf("Run a bash command in the working directory. Returns stdout and stderr, and the exit code when not 0. Output over %d KiB keeps its start and end and names a file with all of it. Timeout: 120 s by default, 600 at most. For servers and watchers set background, then use bash_job.", (limits.OutputHeadBytes+limits.OutputTailBytes)/1024),
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":600},"background":{"type":"boolean"}},"required":["command"]}`),
 		ReadOnly:    false,
 		Run: func(ctx context.Context, input json.RawMessage) (Result, error) {
@@ -56,12 +56,12 @@ func bashTool(root string, jobs *Jobs) Tool {
 			if timeout > maxCommandTimeout {
 				return invalidInput(fmt.Errorf("timeout_seconds %d exceeds the maximum of %d", arguments.TimeoutSeconds, int(maxCommandTimeout.Seconds()))), nil
 			}
-			return runCommand(ctx, root, jobs, arguments.Command, timeout)
+			return runCommand(ctx, root, jobs, limits, arguments.Command, timeout)
 		},
 	}
 }
 
-func runCommand(ctx context.Context, root string, jobs *Jobs, commandLine string, timeout time.Duration) (Result, error) {
+func runCommand(ctx context.Context, root string, jobs *Jobs, limits Limits, commandLine string, timeout time.Duration) (Result, error) {
 	runContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -74,7 +74,7 @@ func runCommand(ctx context.Context, root string, jobs *Jobs, commandLine string
 		return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 	}
 	command.WaitDelay = pipeDrainDelay
-	output := newOutputCollector(jobs.outputDirectory, jobs.writing)
+	output := newOutputCollector(jobs.outputDirectory, jobs.writing, limits)
 	command.Stdout = output
 	command.Stderr = output
 

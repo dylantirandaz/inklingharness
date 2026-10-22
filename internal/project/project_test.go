@@ -155,6 +155,20 @@ func TestInspectUnbornAndDetachedRepository(t *testing.T) {
 	}
 }
 
+func TestLikelyRepositoryOnlyChoosesTheStartOrder(t *testing.T) {
+	root := initRepo(t)
+	work := filepath.Join(root, "sub", "leaf")
+	writeFile(t, filepath.Join(work, "a.go"), "package a\n")
+	plain := t.TempDir()
+	if !likelyRepository(work) || likelyRepository(plain) {
+		t.Fatal("a .git entry in a parent did not mark a likely repository, or a plain folder did")
+	}
+	t.Setenv("GIT_DIR", filepath.Join(root, ".git"))
+	if !likelyRepository(plain) {
+		t.Fatal("GIT_DIR did not mark a likely repository")
+	}
+}
+
 func TestInstructionSizeLimitAndSymlink(t *testing.T) {
 	root := initRepo(t)
 	path := filepath.Join(root, "AGENTS.md")

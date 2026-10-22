@@ -63,12 +63,15 @@ func (BlockStop) streamEvent()     {}
 func (UnknownEvent) streamEvent()  {}
 func (RetryEvent) streamEvent()    {}
 
+// wireEvent decodes every event kind in one pass. Delta is the union of the
+// delta fields of content_block_delta and message_delta, so a delta event,
+// which is most of a stream, needs one decode and no copy of its delta.
 type wireEvent struct {
 	Type         string            `json:"type"`
 	Index        int               `json:"index"`
 	Message      *wireMessageStart `json:"message"`
 	ContentBlock json.RawMessage   `json:"content_block"`
-	Delta        json.RawMessage   `json:"delta"`
+	Delta        wireDelta         `json:"delta"`
 	Usage        *Usage            `json:"usage"`
 	Error        *wireError        `json:"error"`
 }
@@ -90,16 +93,13 @@ type wireContentBlockStart struct {
 	Data string `json:"data"`
 }
 
-type wireContentBlockDelta struct {
+type wireDelta struct {
 	Type        string `json:"type"`
 	Text        string `json:"text"`
 	PartialJSON string `json:"partial_json"`
 	Thinking    string `json:"thinking"`
 	Signature   string `json:"signature"`
-}
-
-type wireMessageDelta struct {
-	StopReason string `json:"stop_reason"`
+	StopReason  string `json:"stop_reason"`
 }
 
 const (
@@ -171,12 +171,8 @@ func (b *responseBuilder) apply(event serverSentEvent, observe func(StreamEvent)
 	case "content_block_stop":
 		return b.stopBlock(wire.Index, observe)
 	case "message_delta":
-		var delta wireMessageDelta
-		if err := json.Unmarshal(wire.Delta, &delta); err != nil {
-			return fmt.Errorf("anthropic: decode message_delta: %w", err)
-		}
-		if delta.StopReason != "" {
-			b.stopReason = StopReason(delta.StopReason)
+		if wire.Delta.StopReason != "" {
+			b.stopReason = StopReason(wire.Delta.StopReason)
 		}
 		if wire.Usage != nil {
 			b.usage = mergeUsage(b.usage, *wire.Usage)
@@ -217,10 +213,7 @@ func (b *responseBuilder) applyDelta(wire wireEvent, observe func(StreamEvent) e
 	if !exists {
 		return fmt.Errorf("anthropic: delta for content block %d that is not open", wire.Index)
 	}
-	var delta wireContentBlockDelta
-	if err := json.Unmarshal(wire.Delta, &delta); err != nil {
-		return fmt.Errorf("anthropic: decode content_block_delta: %w", err)
-	}
+	delta := wire.Delta
 	switch delta.Type {
 	case "text_delta":
 		if builder.kind != blockKindText {

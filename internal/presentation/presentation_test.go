@@ -2,7 +2,9 @@ package presentation
 
 import (
 	"encoding/json"
-	"fmt"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -387,7 +389,7 @@ func TestCompactViewsRemainSafeWithoutColor(t *testing.T) {
 			if strings.Contains(view, "\x1b[2J") || (!theme.Colored() && strings.Contains(view, "\x1b")) {
 				t.Fatalf("unsafe compact view: %q", view)
 			}
-			if !strings.Contains(Safe(view), "label") || !strings.Contains(Safe(view), "second") {
+			if plain := strings.ToLower(Safe(view)); !strings.Contains(plain, "label") || !strings.Contains(plain, "second") {
 				t.Fatal("compact view lost its label")
 			}
 		}
@@ -427,7 +429,7 @@ func TestThemeDecorationKeepsVisibleText(t *testing.T) {
 		}
 		for _, text := range []string{"Approval", "界"} {
 			for _, level := range []float64{0, 0.5, 1} {
-				if Safe(theme.Wet(text, level)) != text || Safe(theme.Glow(text, level)) != text {
+				if Safe(theme.Wet(text, level)) != text {
 					t.Fatalf("fade changed %q", text)
 				}
 			}
@@ -443,10 +445,8 @@ func TestThemeDecorationKeepsVisibleText(t *testing.T) {
 			continue
 		}
 		for used := range 300 {
-			for _, glow := range []float64{0, 0.5, 1} {
-				if got := Safe(theme.Gauge(used, 100, 4, glow)); got != "▪▪▪▪" {
-					t.Fatalf("gauge %d glow %v = %q", used, glow, got)
-				}
+			if got := Safe(theme.Gauge(used, 100, 4)); got != "▪▪▪▪" {
+				t.Fatalf("gauge %d = %q", used, got)
 			}
 		}
 	}
@@ -455,7 +455,7 @@ func TestThemeDecorationKeepsVisibleText(t *testing.T) {
 // The gauge must show context use even when the terminal has no color.
 func TestSquaresShowStateWithoutColor(t *testing.T) {
 	for used, want := range map[int]string{0: "····", 1: "▪···", 50: "▪▪··", 100: "▪▪▪▪", 250: "▪▪▪▪"} {
-		if got := (Theme{}).Gauge(used, 100, 4, 1); got != want {
+		if got := (Theme{}).Gauge(used, 100, 4); got != want {
 			t.Fatalf("gauge %d = %q, want %q", used, got, want)
 		}
 	}
@@ -463,22 +463,23 @@ func TestSquaresShowStateWithoutColor(t *testing.T) {
 
 // The opening animation starts empty and ends exactly on the banner, and no
 // frame moves the composer below it.
-func TestBannerFramesEndOnTheBanner(t *testing.T) {
+func TestBannerAnimationEndsOnTheBanner(t *testing.T) {
 	theme := NewTheme(TrueColor, LightBackground, AccentPlum)
 	info := BannerInfo{Directory: "/work", Model: "Inkling-Small", Effort: "default", Width: 100, Height: 40}
-	frames := BannerFrames(info, theme, 24)
-	if len(frames) != 24 {
-		t.Fatalf("%d frames", len(frames))
+	animation := BannerAnimation(info, theme)
+	if animation == nil {
+		t.Fatal("no animation on a terminal with room and color")
 	}
-	if frames[23] != Banner(info, theme) {
+	if animation(1) != Banner(info, theme) {
 		t.Fatal("the last frame is not the banner")
 	}
-	if strings.TrimSpace(Safe(frames[0])) != "" {
-		t.Fatalf("the first frame is not empty: %q", Safe(frames[0]))
+	first := animation(0)
+	if strings.TrimSpace(Safe(first)) != "" {
+		t.Fatalf("the first frame is not empty: %q", Safe(first))
 	}
-	for index, frame := range frames {
-		if got, want := strings.Count(frame, "\n"), strings.Count(frames[0], "\n"); got != want {
-			t.Fatalf("frame %d has %d rows, the first has %d", index, got, want)
+	for step := 0; step <= 40; step++ {
+		if got, want := strings.Count(animation(float64(step)/40), "\n"), strings.Count(first, "\n"); got != want {
+			t.Fatalf("step %d has %d rows, the first frame has %d", step, got, want)
 		}
 	}
 	for _, small := range []struct {
@@ -490,8 +491,8 @@ func TestBannerFramesEndOnTheBanner(t *testing.T) {
 		{"narrow", BannerInfo{Directory: "/work", Width: 30, Height: 40}, theme},
 		{"short", BannerInfo{Directory: "/work", Width: 100, Height: 20}, theme},
 	} {
-		if BannerFrames(small.info, small.theme, 24) != nil {
-			t.Fatalf("%s: frames without artwork to animate", small.name)
+		if BannerAnimation(small.info, small.theme) != nil {
+			t.Fatalf("%s: an animation without artwork", small.name)
 		}
 	}
 }
@@ -556,11 +557,19 @@ func TestBlotPictureGeometry(t *testing.T) {
 		if theme.depth != TrueColor {
 			continue
 		}
-		all := strings.Join(rows, "")
+		// Pixels blend their pigment with the page, so a layer shows as a
+		// color near its pigment, not as the pigment itself.
+		var drawn []rgb
+		for _, match := range regexp.MustCompile(`\x1b\[[34]8;2;(\d+);(\d+);(\d+)m`).FindAllStringSubmatch(strings.Join(rows, ""), -1) {
+			channel := func(text string) uint8 { value, _ := strconv.Atoi(text); return uint8(value) }
+			drawn = append(drawn, rgb{channel(match[1]), channel(match[2]), channel(match[3])})
+		}
 		for layer := uint8(1); layer <= blotLayers; layer++ {
-			color := theme.blotColor(layer, picture.colors)
-			if !strings.Contains(all, fmt.Sprintf(";%d;%d;%dm", color.r, color.g, color.b)) {
-				t.Fatalf("finished picture has no layer %d", layer)
+			pigment := theme.blotColor(layer, picture.colors)
+			if !slices.ContainsFunc(drawn, func(color rgb) bool {
+				return square(int(color.r)-int(pigment.r))+square(int(color.g)-int(pigment.g))+square(int(color.b)-int(pigment.b)) <= 3*12*12
+			}) {
+				t.Fatalf("finished picture shows no pigment of layer %d", layer)
 			}
 		}
 	}
@@ -614,9 +623,5 @@ func TestToolRowAndShortDuration(t *testing.T) {
 		if got := ShortDuration(elapsed); got != want {
 			t.Fatalf("ShortDuration(%v) = %q, want %q", elapsed, got, want)
 		}
-	}
-	card := ApprovalCard(ToolView{Title: "Edit a.go", Details: "Edit a.go\n- old\n+ new"}, theme)
-	if card != "Edit a.go\n- old\n+ new\nFull filesystem access · not sandboxed" {
-		t.Fatalf("card = %q", card)
 	}
 }

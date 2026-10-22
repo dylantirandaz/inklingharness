@@ -32,7 +32,7 @@ func TestCleanTerminalText(t *testing.T) {
 }
 
 func TestOutputCollectorCleansTerminalText(t *testing.T) {
-	c := newOutputCollector(t.TempDir(), func(string) bool { return false })
+	c := newOutputCollector(t.TempDir(), func(string) bool { return false }, standardLimits)
 	_, _ = c.Write([]byte("\x1b[32m0%\r50%\r100%\x1b[0m\nok\n"))
 	if got := c.finish(); got != "100%\nok\n" {
 		t.Fatalf("got %q", got)
@@ -40,7 +40,7 @@ func TestOutputCollectorCleansTerminalText(t *testing.T) {
 }
 
 func TestOutputCollectorCleansTruncatedText(t *testing.T) {
-	c := newOutputCollector(t.TempDir(), func(string) bool { return false })
+	c := newOutputCollector(t.TempDir(), func(string) bool { return false }, standardLimits)
 	progress := strings.Repeat("x\r", outputInlineBytes) + "y"
 	_, _ = c.Write([]byte("\x1b[1mstart\x1b[0m\n" + progress + "\nend\x1b[0m\n"))
 	got := c.finish()

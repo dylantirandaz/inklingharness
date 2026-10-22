@@ -111,12 +111,17 @@ type options struct {
 	approveAll    bool
 	compactTokens int
 	enableTasks   bool
-	verbose       bool
-	plain         bool
-	files         filePaths
-	timings       string
-	cpuProfile    string
-	runtimeTrace  string
+	noWeb         bool
+	// lean is the headless profile for Inkling Small: tools.Lean, no task and
+	// no remember tool, the lean resource tools, and the lean prompt. Only
+	// think run binds it.
+	lean         bool
+	verbose      bool
+	plain        bool
+	files        filePaths
+	timings      string
+	cpuProfile   string
+	runtimeTrace string
 }
 
 func bindOptions(flags *flag.FlagSet) *options {
@@ -134,6 +139,7 @@ func bindOptions(flags *flag.FlagSet) *options {
 	flags.BoolVar(&o.approveAll, "yes", false, "allow file changes and commands without a prompt; no sandbox")
 	flags.IntVar(&o.compactTokens, "compact-tokens", 200000, "compact older context at this estimated token count; 0 disables it")
 	flags.BoolVar(&o.enableTasks, "tasks", true, "allow read-only research subagents")
+	flags.BoolVar(&o.noWeb, "no-web", false, "do not offer web_search and web_fetch, and leave them out of the built-in prompt")
 	flags.BoolVar(&o.verbose, "verbose", false, "show per-turn protocol details in chat and run")
 	flags.BoolVar(&o.plain, "plain", false, "use plain line input instead of the terminal interface")
 	flags.StringVar(&o.timings, "timings", "", "append private stage timing records to this JSONL file")
@@ -146,7 +152,12 @@ func (o *options) agentConfig() (agent.Config, error) {
 	if o.maxTokens <= 0 || o.maxTurns <= 0 || o.compactTokens < 0 || strings.TrimSpace(o.model) == "" {
 		return agent.Config{}, errors.New("model, positive token/turn limits, and nonnegative compact-tokens are required")
 	}
-	config := agent.Config{Model: o.model, MaxTokens: o.maxTokens, MaxTurns: o.maxTurns, System: agent.CodingInstructions, CompactTokens: o.compactTokens, EnableTasks: o.enableTasks}
+	config := agent.Config{Model: o.model, MaxTokens: o.maxTokens, MaxTurns: o.maxTurns, System: agent.CodingInstructions(!o.noWeb), CompactTokens: o.compactTokens, EnableTasks: o.enableTasks}
+	if o.lean {
+		config.System = agent.LeanInstructions(!o.noWeb)
+		config.EnableTasks = false
+		config.Lean = true
+	}
 	if o.systemFile != "" {
 		system, err := os.ReadFile(o.systemFile)
 		if err != nil {
@@ -246,7 +257,11 @@ func sessionTools(store *session.Store, workDir, sessionID string, ext *extensio
 		return nil, nil, err
 	}
 	jobs := tools.NewJobs(outputDirectory)
-	standard, err := tools.Standard(workDir, outputDirectory, jobs)
+	newSet := tools.Standard
+	if ext.lean {
+		newSet = tools.Lean
+	}
+	standard, err := newSet(workDir, outputDirectory, jobs)
 	if err != nil {
 		return nil, nil, errors.Join(err, jobs.Close())
 	}
@@ -370,6 +385,7 @@ func runCommand(ctx context.Context, args []string, stdin *os.File, stdout, stde
 	jsonEvents := flags.Bool("json", false, "write events as JSON lines on stdout instead of text")
 	readOnly := flags.Bool("plan", false, "investigate with read-only tools and reply with a plan; change nothing")
 	goalCommand := flags.String("goal", "", "after the task, run this bash command; while it fails, continue (at most 5 rounds); exit 1 if it never passes")
+	flags.BoolVar(&o.lean, "lean", false, "headless profile for Inkling Small: read_files and shorter tool output, no task, remember, inspect_images, or context_checkpoint tool, and the matching prompt; not for images")
 	if err := flags.Parse(args); err != nil {
 		return flagExit(err)
 	}
@@ -563,7 +579,7 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) (
 			return 1
 		}
 		taskContext, timing := timedContext(ctx, o)
-		result := eval.RunTask(taskContext, client, config, evalSetup, task, taskFileDir, *keepWorkDirs)
+		result := eval.RunTask(taskContext, client, config, evalSetup(o.noWeb), task, taskFileDir, *keepWorkDirs)
 		var taskError error
 		if !result.Pass {
 			taskError = errors.New("evaluation failed")
@@ -601,20 +617,23 @@ func evalCommand(ctx context.Context, args []string, stdout, stderr io.Writer) (
 // evalSetup gives each eval task the tools and turn policy of a real session,
 // so a feature that changes the model's success shows in the score. It reads
 // no user settings, hooks, or memory, so the score does not depend on the
-// files of this machine. No user answers ask_user.
-func evalSetup(workDir, outputDirectory string, jobs *tools.Jobs, config *agent.Config) (*tools.Set, error) {
-	ext := &extensions{workDir: workDir}
-	standard, err := tools.Standard(workDir, outputDirectory, jobs)
-	if err != nil {
-		return nil, err
+// files of this machine. No user answers ask_user. noWeb leaves out the web
+// tools, as -no-web does in a session.
+func evalSetup(noWeb bool) eval.Setup {
+	return func(workDir, outputDirectory string, jobs *tools.Jobs, config *agent.Config) (*tools.Set, error) {
+		ext := &extensions{workDir: workDir, noWeb: noWeb}
+		standard, err := tools.Standard(workDir, outputDirectory, jobs)
+		if err != nil {
+			return nil, err
+		}
+		toolSet, err := ext.toolSet(standard, nil)
+		if err != nil {
+			return nil, err
+		}
+		ext.configure(config, toolSet, turnPolicy{}, config.Approve)
+		config.Notices = jobs.Notices
+		return toolSet, nil
 	}
-	toolSet, err := ext.toolSet(standard, nil)
-	if err != nil {
-		return nil, err
-	}
-	ext.configure(config, toolSet, turnPolicy{}, config.Approve)
-	config.Notices = jobs.Notices
-	return toolSet, nil
 }
 
 func formatResult(result eval.Result) string {

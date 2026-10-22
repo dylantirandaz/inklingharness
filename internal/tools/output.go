@@ -17,11 +17,9 @@ import (
 )
 
 const (
-	// outputHeadBytes and outputTailBytes set how much of a large command
-	// output stays in the model context. The rest goes to a file.
-	outputHeadBytes   = 16 * 1024
-	outputTailBytes   = 16 * 1024
-	outputInlineBytes = outputHeadBytes + outputTailBytes
+	// outputInlineBytes is how much of the new output of a background job one
+	// bash_job call returns.
+	outputInlineBytes = 32 * 1024
 	// maxSavedOutputBytes stops a runaway command from filling the disk.
 	maxSavedOutputBytes = 64 * 1024 * 1024
 	// maxOutputDirectoryBytes bounds the saved outputs of one session. A new
@@ -32,7 +30,7 @@ const (
 
 // outputCollector receives the combined stdout and stderr of one command.
 // It keeps only the head and a tail ring in memory. When the output becomes
-// larger than outputInlineBytes, it streams the full output to a new file.
+// larger than the head and the tail, it streams the full output to a new file.
 // exec.Cmd calls Write from one goroutine at a time because stdout and
 // stderr share this writer, so the collector needs no lock.
 type outputCollector struct {
@@ -40,7 +38,11 @@ type outputCollector struct {
 	// writing reports the files that running jobs still write, so that
 	// pruning keeps them.
 	writing func(path string) bool
-	head    []byte
+	// headBytes and tailBytes are the start and the end of a large output that
+	// stay in the result; the rest goes to the file.
+	headBytes int
+	tailBytes int
+	head      []byte
 	// tail is a ring buffer. The write position follows from total, so the
 	// ring needs no separate index.
 	tail  []byte
@@ -57,12 +59,16 @@ type outputFile struct {
 	written int64
 }
 
-func newOutputCollector(directory string, writing func(path string) bool) *outputCollector {
-	return &outputCollector{directory: directory, writing: writing}
+func newOutputCollector(directory string, writing func(path string) bool, limits Limits) *outputCollector {
+	return &outputCollector{directory: directory, writing: writing, headBytes: limits.OutputHeadBytes, tailBytes: limits.OutputTailBytes}
+}
+
+func (c *outputCollector) inlineBytes() int64 {
+	return int64(c.headBytes + c.tailBytes)
 }
 
 func (c *outputCollector) Write(chunk []byte) (int, error) {
-	if c.saved == nil && c.saveErr == nil && c.total+int64(len(chunk)) > outputInlineBytes {
+	if c.saved == nil && c.saveErr == nil && c.total+int64(len(chunk)) > c.inlineBytes() {
 		c.startFile()
 	}
 	if c.saved != nil {
@@ -74,7 +80,7 @@ func (c *outputCollector) Write(chunk []byte) (int, error) {
 
 // startFile creates the output file and writes all bytes received so far.
 // Before this call the head and the ring hold the complete output, because
-// the total is not larger than outputInlineBytes.
+// the total is not larger than the inline bytes.
 func (c *outputCollector) startFile() {
 	file, err := createOutputFile(c.directory)
 	if err != nil {
@@ -133,7 +139,7 @@ func (c *outputCollector) dropFile(cause error) {
 }
 
 func (c *outputCollector) keep(chunk []byte) {
-	if room := outputHeadBytes - len(c.head); room > 0 {
+	if room := c.headBytes - len(c.head); room > 0 {
 		taken := min(room, len(chunk))
 		c.head = append(c.head, chunk[:taken]...)
 		c.total += int64(taken)
@@ -143,14 +149,15 @@ func (c *outputCollector) keep(chunk []byte) {
 		return
 	}
 	if c.tail == nil {
-		c.tail = make([]byte, outputTailBytes)
+		c.tail = make([]byte, c.tailBytes)
 	}
-	end := c.total - outputHeadBytes + int64(len(chunk))
+	tailBytes := int64(c.tailBytes)
+	end := c.total - int64(c.headBytes) + int64(len(chunk))
 	c.total += int64(len(chunk))
-	if len(chunk) > outputTailBytes {
-		chunk = chunk[len(chunk)-outputTailBytes:]
+	if len(chunk) > c.tailBytes {
+		chunk = chunk[len(chunk)-c.tailBytes:]
 	}
-	start := (end - int64(len(chunk))) % outputTailBytes
+	start := (end - int64(len(chunk))) % tailBytes
 	copied := copy(c.tail[start:], chunk)
 	copy(c.tail, chunk[copied:])
 }
@@ -158,10 +165,10 @@ func (c *outputCollector) keep(chunk []byte) {
 // orderedTail returns the ring content, oldest bytes first, as two parts.
 func (c *outputCollector) orderedTail() (first, second []byte) {
 	routed := c.total - int64(len(c.head))
-	if routed <= outputTailBytes {
+	if routed <= int64(c.tailBytes) {
 		return c.tail[:routed], nil
 	}
-	next := routed % outputTailBytes
+	next := routed % int64(c.tailBytes)
 	return c.tail[next:], c.tail[:next]
 }
 
@@ -179,11 +186,11 @@ func (c *outputCollector) finish() string {
 		}
 	}
 	first, second := c.orderedTail()
-	if c.total <= outputInlineBytes {
+	if c.total <= c.inlineBytes() {
 		return cleanTerminalText(string(c.head) + string(first))
 	}
 	head := trimIncompleteRuneEnd(c.head)
-	tail := trimIncompleteRuneStart(append(append(make([]byte, 0, outputTailBytes), first...), second...))
+	tail := trimIncompleteRuneStart(append(append(make([]byte, 0, c.tailBytes), first...), second...))
 	omitted := c.total - int64(len(head)) - int64(len(tail))
 
 	var text strings.Builder

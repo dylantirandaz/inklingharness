@@ -65,29 +65,29 @@ func TestHomeRelativeShortensOnlyPathsUnderHome(t *testing.T) {
 	}
 }
 
-// A sent prompt is a card as wide as the live area, with the time at the end
-// of its first row; a long prompt wraps inside it. Without a tint it stays a
-// band.
-func TestPrintUserEchoesACardOrABand(t *testing.T) {
+// A sent prompt sits on a band with an edge of blue ink: a blank row, a
+// padding row, the rows of the prompt with the time at the end of the
+// first, and a padding row; no row leaves the live area. Without a tint it
+// stays a plain marked row.
+func TestPrintUserEchoesABand(t *testing.T) {
 	var card bytes.Buffer
 	printUser(&card, "first line\n"+strings.Repeat("word ", 30), 60, tintedTheme)
 	rows := strings.Split(strings.TrimRight(card.String(), "\n"), "\n")
-	// A blank row, the top edge, the rows of the prompt, the bottom edge.
-	if len(rows) < 6 || rows[0] != "" {
-		t.Fatalf("card = %q", rows)
+	if len(rows) < 6 || rows[0] != "" || presentation.Safe(rows[1]) != "▌" || presentation.Safe(rows[len(rows)-1]) != "▌" {
+		t.Fatalf("band = %q", rows)
 	}
-	for _, row := range rows[1:] {
-		if cells := presentation.CellWidth(presentation.Safe(row)); cells != 59 {
-			t.Fatalf("a card row is %d cells wide, want 59: %q", cells, presentation.Safe(row))
+	for index, row := range rows[2 : len(rows)-1] {
+		if plain := presentation.Safe(row); presentation.CellWidth(plain) > 59 || !strings.HasPrefix(plain, "▌ ") {
+			t.Fatalf("prompt row %d leaves the live area or its edge: %q", index, plain)
 		}
 	}
-	if first := presentation.Safe(rows[2]); !strings.Contains(first, "› first line") {
+	if first := presentation.Safe(rows[2]); !strings.HasPrefix(first, "▌ first line") {
 		t.Fatalf("first row = %q", first)
 	}
 
-	var band bytes.Buffer
-	printUser(&band, "hello", 60, plainTheme)
-	if got := presentation.Safe(band.String()); !strings.Contains(got, "› hello") || strings.ContainsAny(got, "▗▖▝▘") {
-		t.Fatalf("band = %q", got)
+	var plain bytes.Buffer
+	printUser(&plain, "hello", 60, plainTheme)
+	if got := presentation.Safe(plain.String()); !strings.Contains(got, "› hello") {
+		t.Fatalf("plain prompt = %q", got)
 	}
 }

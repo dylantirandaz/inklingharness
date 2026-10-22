@@ -12,9 +12,9 @@ import (
 type Style struct {
 	Depth  presentation.ColorDepth
 	Accent presentation.Accent
-	// Motion animates the banner, streamed text, activity mark, context
-	// count, and approval rule. Pending text and elapsed seconds still update
-	// when motion is off.
+	// Motion animates the banner, streamed text, activity mark, and context
+	// count. Pending text and elapsed seconds still update when motion is
+	// off.
 	Motion bool
 }
 
@@ -22,16 +22,18 @@ const (
 	// smoothInterval paces short effects that must look fluid: the banner,
 	// streamed text and the context count.
 	smoothInterval = 33 * time.Millisecond
-	// steadyInterval paces the activity mark and the approval rule.
+	// steadyInterval paces the activity mark.
 	steadyInterval = 66 * time.Millisecond
 	// stillInterval updates the elapsed seconds when motion is off.
 	stillInterval = time.Second
 
-	introDuration = 700 * time.Millisecond
+	// introDuration lets the ink of the opening artwork soak in and dry. The
+	// composer takes input while it plays; a short soak settles the screen
+	// sooner and writes half the bytes of a long one.
+	introDuration = 1000 * time.Millisecond
 	wetDuration   = 240 * time.Millisecond
 	gaugeDuration = 450 * time.Millisecond
 	expertTick    = 120 * time.Millisecond
-	breathPeriod  = 2400 * time.Millisecond
 
 	// minimumLiveRows is the room that the banner must leave for the
 	// composer while it plays.
@@ -44,8 +46,10 @@ type effects struct {
 	motion bool
 	epoch  time.Time
 
-	// intro holds the frames of the opening banner while it plays.
-	intro   []string
+	// intro draws the opening banner at a progress from 0 to 1 while it
+	// plays; nil when no banner plays. Frames are drawn on demand, so no
+	// frame is computed or held before the screen shows it.
+	intro   func(progress float64) string
 	introAt time.Time
 
 	// The streamed preview is the reply prefix and the partial line. wet holds
@@ -59,6 +63,12 @@ type effects struct {
 	haveUse   bool
 	gaugeFrom float64
 	gaugeAt   time.Time
+
+	// trace records the stream on the working row; nil until the first
+	// frame with room for it, and always nil without motion or intermediate
+	// colors. traceAt is the time of its last step.
+	trace   *presentation.Trace
+	traceAt time.Time
 }
 
 // wetRun is the part of the preview body from start to the next run, which
@@ -68,45 +78,46 @@ type wetRun struct {
 	at    time.Time
 }
 
-// Intro plays the opening banner: frames from an empty banner to the final
-// one. The final frame goes to scrollback when the animation ends, when other
-// output arrives, or at Close. Without motion, or without room for the
-// composer under it, the final frame goes to scrollback at once.
-func (s *Screen) Intro(frames []string) {
+// Intro plays the opening banner: frame draws it at a progress from 0, empty,
+// to 1, final. Every progress must have the same number of rows. The final
+// frame goes to scrollback when the animation ends, when other output
+// arrives, or at Close. Without motion, or without room for the composer
+// under it, the final frame goes to scrollback at once.
+func (s *Screen) Intro(frame func(progress float64) string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(frames) == 0 || s.closed || s.fault != nil {
+	if frame == nil || s.closed || s.fault != nil {
 		return
 	}
-	if !s.effects.motion || s.rows-strings.Count(frames[0], "\n")-1 < minimumLiveRows {
-		s.writeLocked([]byte(frames[len(frames)-1] + "\n"))
+	final := frame(1)
+	if !s.effects.motion || s.rows-strings.Count(final, "\n")-1 < minimumLiveRows {
+		s.writeLocked([]byte(final + "\n"))
 		return
 	}
-	s.effects.intro, s.effects.introAt = frames, time.Now()
+	s.effects.intro, s.effects.introAt = frame, time.Now()
 	s.layoutDirty = true
 	s.drawLocked()
 	s.wake.signal()
 }
 
 func (s *Screen) introFrameLocked(now time.Time) []string {
-	frames := s.effects.intro
-	if frames == nil {
+	if s.effects.intro == nil {
 		return nil
 	}
-	index := int(float64(len(frames)) * float64(now.Sub(s.effects.introAt)) / float64(introDuration))
-	return strings.Split(frames[min(index, len(frames)-1)], "\n")
+	progress := min(float64(now.Sub(s.effects.introAt))/float64(introDuration), 1)
+	return strings.Split(s.effects.intro(progress), "\n")
 }
 
 // commitIntroLocked moves a banner that still plays to scrollback in its final
 // form.
 func (s *Screen) commitIntroLocked() {
-	frames := s.effects.intro
-	if frames == nil {
+	frame := s.effects.intro
+	if frame == nil {
 		return
 	}
 	s.effects.intro = nil
 	s.layoutDirty = true
-	s.writeLocked([]byte(frames[len(frames)-1] + "\n"))
+	s.writeLocked([]byte(frame(1) + "\n"))
 }
 
 // StreamReasoning keeps the latest partial line for the next frame. Formatting
@@ -138,6 +149,9 @@ func (s *Screen) StreamPreview(prefix, body string) {
 	}
 	if len(body) > start && s.effects.motion && s.theme.Blends() {
 		s.effects.wet = append(s.effects.wet, wetRun{start: start, at: time.Now()})
+	}
+	if len(body) > start {
+		s.markLocked(presentation.TraceReply, 1)
 	}
 	s.preview = ""
 	s.effects.previewPrefix, s.effects.previewBody = prefix, body
@@ -213,15 +227,6 @@ func (s *Screen) tickLocked(now time.Time) int {
 	return int(now.Sub(s.effects.epoch) / expertTick)
 }
 
-// breathLocked is the breathing intensity from 0 to 1; without motion it is 1.
-func (s *Screen) breathLocked(now time.Time) float64 {
-	if !s.effects.motion {
-		return 1
-	}
-	phase := float64(now.Sub(s.effects.epoch)) / float64(breathPeriod)
-	return 0.5 + 0.5*math.Cos(2*math.Pi*phase)
-}
-
 // SetContext sets what the footer reports. A new context estimate counts to
 // its value, and the gauge squares fill one by one.
 func (s *Screen) SetContext(use presentation.ContextUse) {
@@ -278,18 +283,13 @@ func (s *Screen) gaugeMovingLocked(now time.Time) bool {
 }
 
 // footerPartsLocked is the context footer at now, as the model that works
-// and the context that it uses. The gauge breathes only during a turn, when
-// the screen already animates; an idle prompt must not wake the process.
+// and the context that it uses.
 func (s *Screen) footerPartsLocked(now time.Time) (model, usage string) {
 	if !s.effects.haveUse {
 		return "", ""
 	}
-	glow := 1.0
-	if s.mode == modeBusy && s.status != "" {
-		glow = s.breathLocked(now)
-	}
 	return presentation.FooterModel(s.effects.use, s.theme),
-		presentation.FooterUsage(s.effects.use, int(math.Round(s.shownTokensLocked(now))), glow, s.theme)
+		presentation.FooterUsage(s.effects.use, int(math.Round(s.shownTokensLocked(now))), s.theme)
 }
 
 // footerTextLocked is the two parts of the footer on one line.
@@ -320,7 +320,7 @@ func (s *Screen) frameIntervalLocked(now time.Time) time.Duration {
 	switch {
 	case s.effects.intro != nil, s.wetActiveLocked(now), s.gaugeMovingLocked(now):
 		return smoothInterval
-	case busy, s.mode == modePrompt && s.background != "", s.mode == modeChoice && s.theme.Blends():
+	case busy, s.mode == modePrompt && s.background != "":
 		return steadyInterval
 	default:
 		return 0

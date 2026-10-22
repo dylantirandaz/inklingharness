@@ -1,0 +1,39 @@
+{
+  "job_name": "terminal-bench-airgap-1-pi-rerun",
+  "jobs_dir": "out/terminal-bench/jobs",
+  "n_attempts": 1,
+  "n_concurrent_trials": 1,
+  "retry": {
+    "max_retries": 0
+  },
+  "environment": {
+    "import_path": "evals.harbor_environment:NativeModalEnvironment",
+    "cpu_enforcement_policy": "guarantee",
+    "memory_enforcement_policy": "guarantee",
+    "kwargs": {
+      "app_name": "inkling-terminal-bench",
+      "modal_vm_runtime": true
+    }
+  },
+  "agents": [
+    {
+      "import_path": "evals.harbor_pi:PiWithSafeInstruction",
+      "model_name": "openrouter/thinkingmachines/inkling-small",
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      },
+      "kwargs": {
+        "version": "0.87.1",
+        "thinking": "high"
+      }
+    }
+  ],
+  "datasets": [
+    {
+      "path": "out/terminal-bench/tb-closed",
+      "task_names": [
+        "pytorch-model-recovery"
+      ]
+    }
+  ]
+}
