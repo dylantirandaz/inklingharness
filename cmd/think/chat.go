@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dylantirandaz/inklingharness/internal/agent"
@@ -1348,11 +1350,25 @@ func sessionsExportCommand(args []string, stdout, stderr io.Writer) int {
 
 // failureCause says why a turn failed in the words of the provider: an HTTP
 // error shows its status and the message of its JSON body, not the body, and
-// an error inside the stream shows its kind and message.
+// an error inside the stream shows its kind and message. A network error
+// names the host that could not be found or reached, and why.
 func failureCause(err error) string {
 	var streamError *anthropic.StreamError
 	if errors.As(err, &streamError) {
 		return "provider " + strings.ReplaceAll(streamError.Type, "_", " ") + " · " + streamError.Message
+	}
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		return "cannot find " + dnsError.Name + " · " + dnsError.Err
+	}
+	var networkError *net.OpError
+	if errors.As(err, &networkError) && networkError.Addr != nil {
+		reason := networkError.Err.Error()
+		var errno syscall.Errno
+		if errors.As(networkError.Err, &errno) {
+			reason = errno.Error()
+		}
+		return "cannot reach " + networkError.Addr.String() + " · " + reason
 	}
 	var apiError *anthropic.APIError
 	if !errors.As(err, &apiError) {

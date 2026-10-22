@@ -43,7 +43,7 @@ Chat follows the rules that make Claude Code and omp look sharp: normal case, on
 - While the model works, the working row is the next step that has not landed: a drop in the model color forms and falls in the column of the step drops, then the status and the seconds. The right end of the row is a ticker tape: a head moves at a steady pace, and each tenth of a second in which a piece of the stream arrived leaves a fine tick, so the rhythm of the model is the pattern. A finished step leaves a taller tick in the color of its drop.
 - A streaming line shows without its Markdown marks, so a `**` or a backtick never flashes before it turns into style.
 - A finished turn is signed with its score: one drop for each step, in order and in the color of what the step did, then the wall time, the requests, and the tokens in gray. So the scrollback keeps the shape of every turn: `●●●●●` is two reads, a change, a failure, and a command. A row of air follows it.
-- A turn that fails shows a red bullet, `● Turn failed` (or `● Turn stopped`), with the cause hooked under it: for an HTTP error, its status and the provider's message, not the raw body.
+- A turn that fails shows a red bullet, `● Turn failed` (or `● Turn stopped`), with the cause hooked under it: for an HTTP error, its status and the provider's message, not the raw body; for a network error, the host that could not be found or reached, and why.
 - Labels name files from the project, so a step reads `Read app.py`, not the full path. The work of an approval keeps its paths exactly as the model wrote them, because you approve what will run.
 - A code block shows its language in gray above the code and ends in air. In `/tools`, each tab opens with the drop of its step, and a change shows its red and green lines.
 
@@ -55,11 +55,7 @@ Chat keeps normal terminal scrollback and a fixed multiline composer in a rounde
 
 You can type while Inkling works. Enter queues a steering message: it goes to the model with the next tool results, or, if the model has already answered, the model answers again with it. Alt+Enter queues a message for later, which starts the next turn when the current one ends; a `/command` always waits for later. Queued messages show above the composer. Alt+Up moves them back into the composer, and a stopped or failed turn does the same. Each steering message shows as a sent prompt where it took effect. An approval ignores keys for 0.4 s after it appears, so a key typed for the draft cannot answer it.
 
-A reply is plain text with one left margin: no marker, inline code and file paths in azure, and bullets in the model color. A tool, the model, and a turn each have their own look:
-
-- **Tools** are bullet rows: the verb in bold, the target, a count, and at the right edge the time and `#N`, the number of the tool's tab in `/tools N`. A tool that failed has a red bullet and a red verb, and shows more of its output. A read, a search, and a file listing show a count and no output. An edit or a write shows its diff with the line numbers. Other tools show a few lines of output, and a note says how many lines are hidden.
-- **Working** shows above the composer: the spinner, the state, and the seconds, with the ticker tape at the right end. The state is waiting for the model, thinking, writing, or running tools.
-- **A turn** ends with one gray row: the wall time, request count, and token use.
+A reply is plain text with one left margin: no marker, inline code and file paths in azure, and bullets in the model color.
 
 The footer has two rows under the composer. The first row names the folder and the Git branch at the left, and the model and effort at the right. The second row has the keys at the left, and the context gauge and the session tokens at the right. A terminal shorter than 16 rows keeps one row.
 
@@ -69,9 +65,9 @@ Tool numbers continue across model requests for one prompt. `/tools` opens the s
 
 Detail views use a separate screen buffer only while open. The tab row names each document; a rule and a scrollbar frame the text on screens at least 40 columns wide. Up/Down or j/k scrolls; PageUp/PageDown moves a page; Home/End or g/G moves to the start or end. Left/Right, Tab, or a digit selects a tab. Escape, q, Enter, or Ctrl-C returns to chat. These views do not animate while idle.
 
-The context gauge is four cells against the compaction threshold, and the session tokens include cache tokens. The context count updates after each model request. Code blocks in a reply sit on a card with the language name. `/help` lists keys; `/usage` shows token counts.
+The context gauge is four cells against the compaction threshold, and the session tokens include cache tokens. The context count updates after each model request. `/help` lists the commands and keys in two tables; `/usage` shows token counts.
 
-`/status` and `/context` show cards like the model cards of the page. Each card has a waffle of squares: `/status` shows the context against the compaction threshold, and `/context` gives each kind of content its own color.
+`/status` and `/context` show rounded gray cards. Each card has a waffle of squares: `/status` shows the context against the compaction threshold, and `/context` gives each kind of content its own color.
 
 Use `think chat -show-thinking` to show reasoning. The Go renderer batches partial reasoning on its 33 ms frame timer, including when animations are off. Complete lines and text at reply, tool, status, or finish boundaries print at once.
 
