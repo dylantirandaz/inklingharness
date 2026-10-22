@@ -99,25 +99,34 @@ func (t Theme) StepMark(kind StepKind) string {
 // turn ends its score with an ellipsis.
 const scoreLimit = 32
 
-// TurnRule closes a finished turn with its score: one wedge for each step,
-// in order and in the color of what the step did, so the scrollback keeps the
-// shape of every turn and the run of wedges reads as its speed. Then come the
-// wall time, the request count, and the token use in gray. A turn without
-// steps is one wedge of ink: the reply.
-func (t Theme) TurnRule(summary string, steps []StepKind) string {
+// TurnRule closes a finished turn in width cells with its score: one wedge
+// for each step, in order and in the color of what the step did, so the
+// scrollback keeps the shape of every turn and the run of wedges reads as
+// its speed. A line of force runs from the score toward the right edge, as
+// the line under the opening city runs from the project to the model, and
+// the wall time, the request count, and the token use in gray end the row.
+// When the row is too narrow for the line, the stats follow the score. A
+// turn without steps is one wedge of ink: the reply.
+func (t Theme) TurnRule(summary string, steps []StepKind, width int) string {
 	summary = strings.TrimPrefix(singleLine(summary), "✓ ")
 	var score strings.Builder
+	marks := max(len(steps), 1)
 	if len(steps) == 0 {
 		score.WriteString(t.StepMark(StepRun))
 	}
 	for index, kind := range steps {
 		if index == scoreLimit {
 			score.WriteString(t.Graphite("…"))
+			marks = scoreLimit + 1
 			break
 		}
 		score.WriteString(t.StepMark(kind))
 	}
-	return "  " + score.String() + " " + t.Graphite(summary)
+	room := width - 1 - cardPadding - marks - 2 - CellWidth(summary) - cardPadding
+	if room < 8 || !t.Blends() {
+		return "  " + score.String() + " " + t.Graphite(summary)
+	}
+	return "  " + score.String() + " " + t.forceRule(room, room) + " " + t.Graphite(summary)
 }
 
 // trainLength is the number of wedges in the working train.

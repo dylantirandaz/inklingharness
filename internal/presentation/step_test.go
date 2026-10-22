@@ -43,20 +43,27 @@ func TestToolCardRowsFitTheWidth(t *testing.T) {
 
 // The score of a turn is one wedge per step, in order and in the color of
 // what the step did; a turn without steps is one wedge of ink, and a very
-// long turn ends its score with an ellipsis.
+// long turn ends its score with an ellipsis. On a wide row a line of force
+// runs from the score to the stats, which end the row two cells before the
+// edge; on a narrow row the stats follow the score.
 func TestTurnRuleScoresTheSteps(t *testing.T) {
 	theme := NewTheme(TrueColor, DarkBackground, AccentPlum)
 	summary := TurnSummaryText(5200*time.Millisecond, 4, 15600, 223)
+	stats := "5.2s · 4 requests · 15.6k in · 223 out"
 	steps := []StepKind{KindOf("read_file", false), KindOf("grep", false), KindOf("edit_file", false), KindOf("bash", true), KindOf("bash", false)}
 	want := "  " + theme.StepMark(StepRead) + theme.StepMark(StepRead) + theme.StepMark(StepChange) + theme.StepMark(StepFailed) + theme.StepMark(StepRun) + " "
-	if rule := theme.TurnRule(summary, steps); !strings.HasPrefix(rule, want) || !strings.HasSuffix(Safe(rule), "5.2s · 4 requests · 15.6k in · 223 out") {
-		t.Fatalf("score = %q", rule)
+	wide := theme.TurnRule(summary, steps, 100)
+	if !strings.HasPrefix(wide, want) || !strings.HasSuffix(Safe(wide), "━▶ "+stats) || CellWidth(Safe(wide)) != 100-1-cardPadding {
+		t.Fatalf("wide score = %q (%d cells)", Safe(wide), CellWidth(Safe(wide)))
 	}
-	if rule := Safe(theme.TurnRule(summary, nil)); !strings.HasPrefix(rule, "  ▶ 5.2s") {
+	if narrow := Safe(theme.TurnRule(summary, steps, 50)); narrow != "  ▶▶▶▶▶ "+stats {
+		t.Fatalf("narrow score = %q", narrow)
+	}
+	if rule := Safe(theme.TurnRule(summary, nil, 50)); rule != "  ▶ "+stats {
 		t.Fatalf("a turn without steps = %q", rule)
 	}
 	long := make([]StepKind, scoreLimit+5)
-	if rule := Safe(theme.TurnRule(summary, long)); strings.Count(rule, "▶") != scoreLimit || !strings.Contains(rule, "…") {
+	if rule := Safe(theme.TurnRule(summary, long, 60)); strings.Count(rule, "▶") != scoreLimit || !strings.Contains(rule, "…") {
 		t.Fatalf("a long score = %q", rule)
 	}
 }

@@ -91,7 +91,7 @@ func TestMarkdownInlineAndIncomplete(t *testing.T) {
 	// wantColored is the result with color, where color replaces the backticks.
 	tests := []struct{ input, want, wantColored string }{
 		{"# Heading", "Heading", ""},
-		{"- item", "• item", ""},
+		{"- item", "▸ item", ""},
 		{"**bold** and *emphasis*", "bold and emphasis", ""},
 		{"snake_case_identifier", "snake_case_identifier", ""},
 		{"`a*b _c_ [x](y)`", "`a*b _c_ [x](y)`", "a*b _c_ [x](y)"},

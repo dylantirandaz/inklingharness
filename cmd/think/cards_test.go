@@ -12,15 +12,16 @@ var (
 	plainTheme  = presentation.NewTheme(presentation.ANSI16, presentation.LightBackground, presentation.AccentPlum)
 )
 
-// A code fence shows only its language, in gray, on every terminal, and a
-// closing fence is air, so code copies without marks around it.
+// A code fence shows its language in gray, after a short line of force where
+// the terminal can blend colors, and a closing fence is air, so code copies
+// without marks around it.
 func TestCodeFenceIsTheLanguageAlone(t *testing.T) {
-	for _, theme := range []presentation.Theme{tintedTheme, plainTheme} {
+	for theme, want := range map[presentation.Theme]string{tintedTheme: "━━━▶ go", plainTheme: "go"} {
 		markdown := presentation.NewMarkdown(theme)
 		fence := presentation.Safe(markdown.Line("```go"))
 		markdown.Line("x := 1")
-		if fence != "go" || markdown.Line("```") != "" {
-			t.Fatalf("fence = %q", fence)
+		if fence != want || markdown.Line("```") != "" {
+			t.Fatalf("fence = %q, want %q", fence, want)
 		}
 	}
 }

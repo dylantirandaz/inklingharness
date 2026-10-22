@@ -1139,9 +1139,9 @@ func chatCommand(parent context.Context, args []string, stdin *os.File, stdout, 
 			inputTokens := outcome.Usage.InputTokens + outcome.Usage.CacheReadInputTokens + outcome.Usage.CacheCreationInputTokens
 			if theme.Soft() {
 				summary := presentation.TurnSummaryText(time.Since(started), outcome.Turns, inputTokens, outcome.Usage.OutputTokens)
-				// The score of drops and the stats close the turn, then a
-				// row of air.
-				fmt.Fprintln(progressOutput, "\n"+theme.TurnRule(summary, observer.steps)+"\n")
+				// The score, a line of force, and the stats close the turn,
+				// then a row of air.
+				fmt.Fprintln(progressOutput, "\n"+theme.TurnRule(summary, observer.steps, screen.Width())+"\n")
 			} else {
 				fmt.Fprintln(progressOutput, "\n  "+presentation.TurnSummary(time.Since(started), outcome.Turns, inputTokens, outcome.Usage.OutputTokens, theme))
 			}

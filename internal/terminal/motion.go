@@ -27,9 +27,9 @@ const (
 	// stillInterval updates the elapsed seconds when motion is off.
 	stillInterval = time.Second
 
-	// introDuration lets the ink of the opening artwork soak in and dry. The
-	// composer takes input while it plays; a short soak settles the screen
-	// sooner and writes half the bytes of a long one.
+	// introDuration lets the city of the opening rise and the planes of
+	// force sweep in. The composer takes input while it plays; a short rise
+	// settles the screen sooner and writes fewer bytes than a long one.
 	introDuration = 1000 * time.Millisecond
 	wetDuration   = 240 * time.Millisecond
 	gaugeDuration = 450 * time.Millisecond

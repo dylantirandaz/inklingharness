@@ -5,33 +5,40 @@ import (
 	"math"
 )
 
-// CityPicture is the opening artwork: a city of the Futurists, after the
-// drawings of Antonio Sant'Elia for La Città Nuova (1914). Towers step back as
-// they rise, a lift shaft runs up outside the main tower, a bridge joins two
-// towers, and the lines of force of Boccioni and Balla cut the sky behind
-// them as planes of light. Each project has its own city, from a hash of its
-// path. In the opening the city rises from the ground, the far towers first,
-// with the echo of each rising roof above it, and the planes sweep in.
+// CityPicture is the opening artwork: a panorama of the city of the
+// Futurists, after the drawings of Antonio Sant'Elia for La Città Nuova
+// (1914), seen from below as he drew it. The walls of every tower lean
+// toward one point high above the picture, so the city soars. Towers step
+// back as they rise, a red lift shaft runs up outside the main tower, and a
+// bridge joins it to a neighbor. Planes of force, as Boccioni and Balla
+// painted them, cut through the city from a corner: they are translucent,
+// so a tower takes their color where a plane crosses it. Each project has
+// its own city, from a hash of its path. In the opening the city rises as a
+// wave from left to right, with the echo of each rising roof above it, and
+// the planes sweep open.
 type CityPicture struct {
 	Columns, Rows int
-	// Back to front: the planes of force, the distant skyline, the far
-	// towers, the bridge, the main tower, and its lift shaft.
-	forces   []cityForce
-	distant  []cityTower
-	far      []cityTower
-	main     cityTower
-	shaft    cityShaft
-	bridge   cityBlock
-	canvas   *inkCanvas
-	groundY  int
-	diagonal float64
-	// originX and originY are the point, in pixels, that the planes of force
-	// come from: above and outside one top corner.
-	originX, originY float64
+	// Back to front: the distant skyline, the crowd of towers, the bridge,
+	// the main tower, and its lift shaft; the planes cross all of them.
+	distant []cityTower
+	crowd   []cityTower
+	main    cityTower
+	shaft   cityShaft
+	bridge  cityBlock
+	planes  []cityPlane
+	canvas  *inkCanvas
+	groundY int
+	// vanishX and vanishY are the point, in pixels, that every wall leans
+	// toward: above the picture, so the city is seen from the street.
+	vanishX, vanishY float64
+	// originX and originY are the corner below the picture that the planes
+	// of force start from, and reach is how far they run.
+	originX, originY, reach float64
 }
 
-// cityBlock is a rectangle in pixels: x from left to right-1 and y from top
-// to bottom-1, with y growing down.
+// cityBlock is a rectangle in pixels at the foot of the perspective: x from
+// left to right-1 and y from top to bottom-1, with y growing down. Drawn, its
+// sides lean toward the vanishing point.
 type cityBlock struct{ left, right, top, bottom int }
 
 // cityTower is a stack of tiers from the ground up, the mast on its roof (an
@@ -51,20 +58,29 @@ type cityShaft struct {
 	rise          cityWindow
 }
 
-// cityForce is a plane of force: a wedge from a point above the picture,
-// between two angles, in the color of its tone.
-type cityForce struct {
-	fromAngle, toAngle float64
-	tone               cityTone
-	sweep              cityWindow
+// cityPlane is a plane of force: a band from the origin along an angle on
+// screen, halfWidth screen units to each side at its far end and half that
+// at the origin, in one tone, that runs out during its window of the
+// opening.
+type cityPlane struct {
+	angle, halfWidth float64
+	tone             cityTone
+	sweep            cityWindow
 }
+
+// pixelAspect is how much taller than wide a pixel of the canvas is on
+// screen: a cell is about twice as tall as it is wide, and a pixel is a
+// quarter of a cell. The planes measure in screen units, so a steep plane
+// and a shallow one look equally thick.
+const pixelAspect = 2.1
 
 // cityTone is the color of a plane of force.
 type cityTone uint8
 
 const (
-	toneBlue cityTone = iota
-	toneRed
+	toneRed cityTone = iota
+	toneAmber
+	toneBlue
 )
 
 // cityWindow is a part of the opening, as a start and a span of progress.
@@ -94,11 +110,12 @@ func (r *cityRandom) between(low, high int) int {
 	return low + int(r.next()%uint64(high-low+1))
 }
 
-// The point that the planes of force come from, as a share of the picture:
-// above and outside one top corner.
+// A plane of force is nearly solid in the open sky, where its color must
+// carry, and translucent where it crosses a tower, so the tower takes its
+// color and still shows: the two forms pass through each other.
 const (
-	forceOriginX = -0.12
-	forceOriginY = -0.6
+	planeSkyAlpha   = 0.78
+	planeCrossAlpha = 0.4
 )
 
 // NewCityPicture builds the city of directory for a box of columns by rows
@@ -112,64 +129,59 @@ func NewCityPicture(directory string, columns, rows int) *CityPicture {
 	random := &cityRandom{state: hash.Sum64()}
 	width, height := 2*columns, 2*rows
 	ground := height - 1
-	picture := &CityPicture{
-		Columns: columns, Rows: rows, canvas: newInkCanvas(columns, rows), groundY: ground,
-		diagonal: math.Hypot(float64(width), float64(height)) * 1.6,
-	}
+	picture := &CityPicture{Columns: columns, Rows: rows, canvas: newInkCanvas(columns, rows), groundY: ground}
 
-	// The main tower stands off the middle and nearly reaches the top. Its
-	// tiers step back on both sides as it rises, and a mast crowns it.
-	center := width * random.between(40, 56) / 100
-	baseWidth := max(width*random.between(18, 22)/100, 10)
-	picture.main = stackTower(random, center, baseWidth, ground, height-random.between(4, 6), random.between(3, 4))
+	// The main tower stands near the middle and nearly reaches the top, with
+	// tiers that step back and a mast. The walls lean toward a point high
+	// above it.
+	center := width * random.between(42, 58) / 100
+	picture.vanishX, picture.vanishY = float64(center), -5*float64(height)
+	baseWidth := max(width*random.between(10, 13)/100, 12)
+	picture.main = stackTower(random, center, baseWidth, ground, height-random.between(3, 5), random.between(3, 4))
 	top := picture.main.tiers[len(picture.main.tiers)-1]
 	mastX := (top.left + top.right) / 2
 	picture.main.mast = cityBlock{left: mastX, right: mastX + 1, top: max(top.top-random.between(3, 5), 0), bottom: top.top}
-	picture.main.rise = cityWindow{start: 0.25, span: 0.5}
-	picture.main.shadowWidth = 2
+	picture.main.shadowWidth = 3
 	base := picture.main.tiers[0]
 
-	// A distant skyline of low blocks runs across the whole width, so the
-	// city has depth and the picture has a ground.
+	// The city rises as a wave from left to right, the way the work moves.
+	wave := func(x int) cityWindow {
+		return cityWindow{start: 0.05 + 0.35*float64(x)/float64(width), span: 0.35}
+	}
+	picture.main.rise = cityWindow{start: wave(center).start, span: 0.45}
+
+	// A distant skyline of low blocks runs across the whole width.
 	for x := 0; x < width; {
 		blockWidth := random.between(4, 9)
-		tower := stackTower(random, x+blockWidth/2, blockWidth, ground, height*random.between(16, 38)/100, random.between(1, 2))
-		tower.rise = cityWindow{start: 0.02 * float64(x) / float64(width), span: 0.3}
+		tower := stackTower(random, x+blockWidth/2, blockWidth, ground, height*random.between(16, 34)/100, random.between(1, 2))
+		tower.rise = cityWindow{start: 0.02, span: 0.3}
 		picture.distant = append(picture.distant, tower)
 		x += blockWidth + random.between(0, 2)
 	}
 
-	// Far towers stand on both sides of the main tower, spread to the edges
-	// of the picture, lower than it, and rise before it.
-	leftRoom, rightRoom := base.left-2, width-base.right-2
-	for side, room := range [2]int{leftRoom, rightRoom} {
-		count := max(min(room/12, 3), 1)
-		for index := range count {
-			farWidth := max(width*random.between(8, 12)/100, 6)
-			share := (float64(index) + 0.5) / float64(count)
-			farCenter := base.left - 2 - int(share*float64(room))
-			if side == 1 {
-				farCenter = base.right + 2 + int(share*float64(room))
-			}
-			farCenter = min(max(farCenter, farWidth/2), width-farWidth/2-1)
-			// Towers nearer the main tower are taller, so the skyline peaks
-			// at the middle like a crowd of buildings.
-			farHeight := height * (random.between(40, 52) + int(20*(1-share))) / 100
-			tower := stackTower(random, farCenter, farWidth, ground, farHeight, random.between(1, 3))
-			tower.rise = cityWindow{start: 0.08 + 0.05*float64(len(picture.far)), span: 0.4}
-			tower.shadowWidth = 1
-			picture.far = append(picture.far, tower)
+	// A crowd of towers fills the panorama on both sides of the main tower,
+	// tallest near it, so the skyline peaks at the middle.
+	for x := random.between(0, 3); x < width; {
+		towerWidth := random.between(7, 14)
+		middle := x + towerWidth/2
+		if middle+towerWidth/2 >= base.left-3 && middle-towerWidth/2 <= base.right+6 {
+			x = base.right + 7
+			continue
 		}
+		distance := float64(middle-center) / float64(width)
+		profile := 0.3 + 0.42*math.Exp(-distance*distance/(0.28*0.28))
+		towerHeight := int(float64(height) * profile * float64(random.between(80, 110)) / 100)
+		tower := stackTower(random, middle, towerWidth, ground, towerHeight, random.between(1, 3))
+		tower.shadowWidth = 1
+		tower.rise = wave(middle)
+		picture.crowd = append(picture.crowd, tower)
+		x += towerWidth + random.between(1, 4)
 	}
 
-	// The lift shaft runs up one side of the main tower, past its second
+	// The lift shaft runs up the right of the main tower, past its second
 	// tier, with walkways to each tier that it passes.
-	leftSide := random.between(0, 1) == 0
 	shaftTop := picture.main.tiers[min(1, len(picture.main.tiers)-1)].top - random.between(3, 5)
 	shaftX := base.right + 2
-	if leftSide {
-		shaftX = base.left - 4
-	}
 	picture.shaft.column = cityBlock{left: shaftX, right: shaftX + 2, top: shaftTop, bottom: ground + 1}
 	picture.shaft.house = cityBlock{left: shaftX - 1, right: shaftX + 3, top: shaftTop - 2, bottom: shaftTop}
 	for _, tier := range picture.main.tiers {
@@ -177,58 +189,40 @@ func NewCityPicture(directory string, columns, rows int) *CityPicture {
 			break
 		}
 		y := tier.top + 1
-		walkway := cityBlock{left: tier.right, right: shaftX, top: y, bottom: y + 1}
-		if leftSide {
-			walkway = cityBlock{left: shaftX + 2, right: tier.left, top: y, bottom: y + 1}
-		}
-		picture.shaft.walkways = append(picture.shaft.walkways, walkway)
+		picture.shaft.walkways = append(picture.shaft.walkways, cityBlock{left: tier.right, right: shaftX, top: y, bottom: y + 1})
 	}
-	picture.shaft.rise = cityWindow{start: 0.3, span: 0.45}
+	picture.shaft.rise = picture.main.rise
 
-	// A bridge joins the main tower to the nearest far tower on the side
-	// away from the shaft, below the roof of both.
-	for _, tower := range picture.far {
-		farBase := tower.tiers[0]
-		farTop := tower.tiers[len(tower.tiers)-1].top
-		awayRight := leftSide && farBase.left > base.right
-		awayLeft := !leftSide && farBase.right < base.left
-		if !awayRight && !awayLeft {
+	// A bridge joins the main tower to the nearest tower on its left, below
+	// the roof of both.
+	for index := len(picture.crowd) - 1; index >= 0; index-- {
+		neighbor := picture.crowd[index]
+		if neighbor.tiers[0].right > base.left {
 			continue
 		}
-		y := max(farTop, base.top) + random.between(2, 4)
-		if y+2 >= ground {
-			continue
-		}
-		picture.bridge = cityBlock{left: base.right, right: farBase.left + 1, top: y, bottom: y + 2}
-		if awayLeft {
-			picture.bridge = cityBlock{left: farBase.right - 1, right: base.left, top: y, bottom: y + 2}
+		y := max(neighbor.tiers[len(neighbor.tiers)-1].top, base.top) + random.between(2, 4)
+		if y+2 < ground {
+			picture.bridge = cityBlock{left: neighbor.tiers[0].right - 1, right: base.left + 1, top: y, bottom: y + 2}
 		}
 		break
 	}
 
-	// Planes of force fan out from a point above one corner and cut across
-	// the sky, in alternate blue and red, each a few degrees wide.
-	picture.originX, picture.originY = forceOriginX*float64(width), forceOriginY*float64(height)
-	if random.between(0, 1) == 0 {
-		picture.originX = (1 - forceOriginX) * float64(width)
-	}
-	// Each plane lands on its own stretch of the ground, so the planes cross
-	// the whole sky and not only the corner they come from.
-	planes := random.between(3, 4)
+	// The planes of force start below the left corner and fan up across the
+	// whole city, each aimed at its own stretch of the top edge. A plane is a
+	// band that widens a little as it runs, as a beam does, so it reads as a
+	// line of force and not as a slab.
+	picture.originX, picture.originY = -0.1*float64(width), 1.6*float64(height)
+	picture.reach = math.Hypot(1.3*float64(width), 2.6*float64(height)*pixelAspect)
+	tones := [...]cityTone{toneRed, toneBlue, toneAmber, toneRed, toneBlue}
+	planes := random.between(4, 5)
 	for index := range planes {
-		share := (float64(index) + 0.25 + 0.5*float64(random.between(0, 100))/100) / float64(planes)
-		landing := share * float64(width)
-		half := float64(width) * float64(random.between(3, 6)) / 100
-		dy := float64(ground) - picture.originY
-		first := math.Atan2(dy, landing+half-picture.originX)
-		second := math.Atan2(dy, landing-half-picture.originX)
-		tone := toneBlue
-		if index%2 == 1 {
-			tone = toneRed
-		}
-		picture.forces = append(picture.forces, cityForce{
-			fromAngle: min(first, second), toAngle: max(first, second), tone: tone,
-			sweep: cityWindow{start: 0.06 * float64(index), span: 0.4},
+		share := (float64(index) + 0.3 + 0.4*float64(random.between(0, 100))/100) / float64(planes)
+		landing := (0.1 + 1.1*share) * float64(width)
+		picture.planes = append(picture.planes, cityPlane{
+			angle:     math.Atan2(-picture.originY*pixelAspect, landing-picture.originX),
+			halfWidth: float64(random.between(20, 34)) / 10,
+			tone:      tones[index],
+			sweep:     cityWindow{start: 0.04 * float64(index), span: 0.5},
 		})
 	}
 	return picture
@@ -268,27 +262,29 @@ func (p *CityPicture) Draw(t Theme, progress float64) []string {
 	}
 	p.canvas.reset()
 	paper := t.paperColor()
-	ink, shadow := t.cityInk(0.62)
-	_, farShadow := t.cityInk(0.42)
+	ink, _ := t.cityInk(0)
 	_, distant := t.cityInk(0.2)
-	p.drawForces(t, paper, progress)
+	_, crowdShadow := t.cityInk(0.45)
+	_, mainShadow := t.cityInk(0.6)
 	for _, tower := range p.distant {
 		p.drawTower(tower, distant, distant, progress)
 	}
-	for _, tower := range p.far {
-		p.drawTower(tower, blend(paper, ink, 0.78), farShadow, progress)
+	crowdFront := blend(paper, ink, 0.8)
+	for _, tower := range p.crowd {
+		p.drawTower(tower, crowdFront, crowdShadow, progress)
 	}
-	if p.bridge.right > p.bridge.left && progress >= 0.72 {
+	if p.bridge.right > p.bridge.left && progress >= 0.7 {
 		p.fill(p.bridge, blue.on(t.shade))
 	}
-	p.drawTower(p.main, ink, shadow, progress)
+	p.drawTower(p.main, ink, mainShadow, progress)
 	p.drawShaft(ink, progress)
+	p.drawPlanes(t, progress)
 	return t.drawCanvas(p.canvas)
 }
 
-// cityInk is the ink of the towers and the tone of their shaded sides,
-// which is depth of the way from the page to the ink.
-func (t Theme) cityInk(depth float64) (ink, shade rgb) {
+// cityInk is the ink of the towers and a tone that lies depth of the way
+// from the page to the ink.
+func (t Theme) cityInk(depth float64) (ink, tone rgb) {
 	ink = rgb{236, 233, 228}
 	if t.shade == LightBackground {
 		ink = rgb{22, 19, 17}
@@ -296,30 +292,15 @@ func (t Theme) cityInk(depth float64) (ink, shade rgb) {
 	return ink, blend(t.paperColor(), ink, depth)
 }
 
-// drawForces paints the planes of force as far as they have swept from
-// their point, as faint wedges of color.
-func (p *CityPicture) drawForces(t Theme, paper rgb, progress float64) {
-	width, height := p.canvas.width(), p.canvas.height()
-	originX, originY := p.originX, p.originY
-	for _, force := range p.forces {
-		reach := force.sweep.at(progress) * p.diagonal
-		if reach <= 0 {
-			continue
-		}
-		color := blend(paper, blue.on(t.shade), 0.3)
-		if force.tone == toneRed {
-			color = blend(paper, palette[roleRed].color.on(t.shade), 0.26)
-		}
-		for y := range height {
-			for x := range width {
-				dx, dy := float64(x)+0.5-originX, float64(y)+0.5-originY
-				if angle := math.Atan2(dy, dx); angle < force.fromAngle || angle > force.toAngle || math.Hypot(dx, dy) > reach {
-					continue
-				}
-				p.canvas.over(x, y, color, 1)
-			}
-		}
-	}
+// lean is where x, at the foot of the perspective, lies at height y: walls
+// lean toward the vanishing point as they rise.
+func (p *CityPicture) lean(x float64, y int) float64 {
+	return x + (p.vanishX-x)*float64(p.groundY+1-y)/(float64(p.groundY+1)-p.vanishY)
+}
+
+// span is the pixels that block covers at height y, after the lean.
+func (p *CityPicture) span(block cityBlock, y int) (left, right int) {
+	return int(math.Round(p.lean(float64(block.left), y))), int(math.Round(p.lean(float64(block.right), y)))
 }
 
 // drawTower paints a tower that has risen as far as progress allows. Above a
@@ -345,9 +326,10 @@ func (p *CityPicture) drawTower(tower cityTower, front, side rgb, progress float
 				}
 				alpha = 0.45 * float64(echo-(roof-y)) / echo
 			}
-			for x := block.left; x < block.right; x++ {
+			left, right := p.span(block, y)
+			for x := left; x < right; x++ {
 				color := front
-				if shaded && x >= block.right-tower.shadowWidth {
+				if shaded && x >= right-tower.shadowWidth {
 					color = side
 				}
 				p.canvas.over(x, y, color, alpha)
@@ -379,10 +361,49 @@ func (p *CityPicture) drawShaft(ink rgb, progress float64) {
 	}
 }
 
-// fill paints a block in one color.
+// drawPlanes lays the planes of force over the city as far as they have run
+// from their corner.
+func (p *CityPicture) drawPlanes(t Theme, progress float64) {
+	width, height := p.canvas.width(), p.canvas.height()
+	for _, plane := range p.planes {
+		reach := plane.sweep.at(progress) * p.reach
+		if reach <= 0 {
+			continue
+		}
+		var color rgb
+		switch plane.tone {
+		case toneRed:
+			color = palette[roleRed].color.on(t.shade)
+		case toneAmber:
+			color = palette[roleAmber].color.on(t.shade)
+		case toneBlue:
+			color = blue.on(t.shade)
+		}
+		cos, sin := math.Cos(plane.angle), math.Sin(plane.angle)
+		for y := range height {
+			for x := range width {
+				// The pixel in screen units, from the origin: how far along
+				// the plane it lies, and how far to one side.
+				dx, dy := float64(x)+0.5-p.originX, (float64(y)+0.5-p.originY)*pixelAspect
+				along, across := dx*cos+dy*sin, math.Abs(dy*cos-dx*sin)
+				if along < 0 || along > reach || across > plane.halfWidth*(0.5+0.5*along/p.reach) {
+					continue
+				}
+				alpha := planeSkyAlpha
+				if p.canvas.pixels[y*width+x].alpha > 0 {
+					alpha = planeCrossAlpha
+				}
+				p.canvas.over(x, y, color, alpha)
+			}
+		}
+	}
+}
+
+// fill paints a block in one color, leaning with the perspective.
 func (p *CityPicture) fill(block cityBlock, color rgb) {
 	for y := block.top; y < block.bottom; y++ {
-		for x := block.left; x < block.right; x++ {
+		left, right := p.span(block, y)
+		for x := left; x < right; x++ {
 			p.canvas.over(x, y, color, 1)
 		}
 	}

@@ -102,7 +102,7 @@ func TestApprovalRequestShowsTheObjectOnce(t *testing.T) {
 func TestUnmarkedPreviewHidesMarksOutsideCode(t *testing.T) {
 	m := NewMarkdown(NewTheme(TrueColor, DarkBackground, AccentPlum))
 	for text, want := range map[string]string{
-		"- **Cause:** an off-by-one in `pag": "• Cause: an off-by-one in pag",
+		"- **Cause:** an off-by-one in `pag": "▸ Cause: an off-by-one in pag",
 		"## Fixed the pa":                    "Fixed the pa",
 		"**unfinished":                       "unfinished",
 		"    indented `code`":                "    indented `code`",

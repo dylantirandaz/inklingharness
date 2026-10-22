@@ -17,12 +17,13 @@ type BannerInfo struct {
 	Width, Height int
 }
 
-// The hero needs this much of the terminal: the page's 12 rows of artwork
-// need 6 rows of text and margins, and the composer needs the rest.
+// The hero needs this much of the terminal: 12 rows of city need 6 rows of
+// text and margins, and the composer needs the rest. The city is a panorama
+// as wide as the terminal allows, up to bannerArtMaxWidth.
 const (
 	bannerMinimumWidth = 64
 	bannerArtMaxRows   = 12
-	bannerArtMaxWidth  = 60
+	bannerArtMaxWidth  = 100
 	bannerArtReserved  = 18
 	bannerArtMinRows   = 5
 )

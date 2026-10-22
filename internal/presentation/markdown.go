@@ -42,7 +42,7 @@ func (m *Markdown) Unmarked(text string) string {
 	}
 	switch {
 	case strings.HasPrefix(trimmed, "- "), strings.HasPrefix(trimmed, "* "), strings.HasPrefix(trimmed, "+ "):
-		trimmed = "• " + trimmed[2:]
+		trimmed = "▸ " + trimmed[2:]
 	case strings.HasPrefix(trimmed, "#"):
 		trimmed = strings.TrimLeft(strings.TrimLeft(trimmed, "#"), " ")
 	}
@@ -90,8 +90,12 @@ func (m *Markdown) render(text string, commit bool) string {
 			m.fence, m.fenceLength = marker, length
 			m.code = codeState{lang: languageFor(trimmed[length:])}
 		}
-		// The fence shows as the language in gray, a quiet label above the
-		// code, not as backticks. A fence with no language leaves air.
+		// The fence shows as the language in gray after a short line of
+		// force, a quiet label above the code, not as backticks. A fence
+		// with no language leaves air.
+		if language := strings.TrimSpace(trimmed[length:]); language != "" && m.theme.Blends() {
+			return m.theme.forceRule(4, 4) + " " + m.theme.Graphite(language)
+		}
 		return m.theme.Graphite(strings.TrimSpace(trimmed[length:]))
 	}
 	if indent <= 3 && strings.HasPrefix(trimmed, "#") {
@@ -104,7 +108,9 @@ func (m *Markdown) render(text string, commit bool) string {
 		return text[:indent] + m.theme.Hairline("│ ") + m.theme.Italic(inline(trimmed[2:], m.theme, 0))
 	}
 	if len(trimmed) >= 2 && (trimmed[0] == '-' || trimmed[0] == '*' || trimmed[0] == '+') && trimmed[1] == ' ' {
-		return text[:indent] + m.theme.Accent("• ") + inline(trimmed[2:], m.theme, 0)
+		// A list item leads with a small wedge, the step mark at the size
+		// of the text.
+		return text[:indent] + m.theme.Accent("▸ ") + inline(trimmed[2:], m.theme, 0)
 	}
 	return inline(text, m.theme, 0)
 }
